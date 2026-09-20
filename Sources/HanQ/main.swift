@@ -4,6 +4,8 @@ import Carbon
 import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    let updater = AppUpdater()
+    var updateRestricted = false
     let jamoRepair = JamoRepair()
     let hud = HUDController()
     let inputSource = InputSourceObserver()
@@ -77,15 +79,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.addItem(hudItem)
         loginItem.target = self
         statusMenu.addItem(loginItem)
+        statusMenu.addItem(updater.automaticItem)
         refreshLaunchAtLogin()
         statusMenu.addItem(.separator())
         let aboutItem = NSMenuItem(title: "한Q 정보", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         statusMenu.addItem(aboutItem)
-        let updateItem = NSMenuItem(title: "업데이트 확인", action: nil, keyEquivalent: "")
-        updateItem.isEnabled = false
-        updateItem.toolTip = "업데이트 기능은 준비 중입니다."
-        statusMenu.addItem(updateItem)
+        statusMenu.addItem(updater.checkItem)
         statusMenu.addItem(makeFeedbackItem())
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "한Q 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
@@ -114,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.jamoRepair.inputSourceDidChange()
             self.sourceObservations += 1
-            if self.permissionGranted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name) }
+            if self.permissionGranted && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name) }
         }
         inputSource.start()
         window.center()
@@ -131,6 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         RunLoop.main.add(timer, forMode: .common)
         showWindow()
         if !permissionGranted { requestAccessibility() }
+        updater.onRestrictionChange = { [weak self] restricted in self?.setUpdateRestricted(restricted) }
+        updater.start()
         #if HANQ_DEVELOPMENT
         showDevelopmentTestPanels()
         #endif
@@ -242,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissionGranted = granted
         permissionContent.isHidden = granted
         if granted { window.orderOut(nil) }
-        if granted && pendingActivation {
+        if granted && pendingActivation && !updateRestricted {
             let korean = UserDefaults.standard.bool(forKey: "koreanKeyEnabled")
             let hanja = UserDefaults.standard.bool(forKey: "hanjaKeyEnabled")
             if korean || hanja {
@@ -256,7 +258,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshStatus()
     }
 
+    func setUpdateRestricted(_ restricted: Bool) {
+        guard updateRestricted != restricted else { return }
+        updateRestricted = restricted
+        if restricted {
+            pendingActivation = false
+            stopMapping()
+            hud.hide()
+        } else {
+            pendingActivation = true
+            updatePermission()
+        }
+        refreshStatus()
+    }
+
     @objc func startMapping() {
+        guard !updateRestricted else { return }
         guard !filter.consuming && !optionFilter.consuming else { status.stringValue = "우측 Command와 Option을 놓은 뒤 다시 시작하세요."; return }
         guard !CGEventSource.keyState(.combinedSessionState, key: 54) && !CGEventSource.keyState(.combinedSessionState, key: 61) else {
             status.stringValue = "우측 Command와 Option을 놓은 뒤 시작하세요."; return
@@ -292,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                     return Unmanaged.passUnretained(event)
                 }
-                guard owner.permissionGranted else {
+                guard owner.permissionGranted && !owner.updateRestricted else {
                     owner.enabled = false
                     DispatchQueue.main.async { owner.stopMapping() }
                     return Unmanaged.passUnretained(event)
@@ -426,13 +443,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleItem.state = UserDefaults.standard.bool(forKey: "koreanKeyEnabled") ? .on : .off
             hanjaItem.state = UserDefaults.standard.bool(forKey: "hanjaKeyEnabled") ? .on : .off
         }
-        toggleItem.isEnabled = permissionGranted
-        hanjaItem.isEnabled = permissionGranted
-        hudItem.isEnabled = permissionGranted
+        toggleItem.isEnabled = permissionGranted && !updateRestricted
+        hanjaItem.isEnabled = permissionGranted && !updateRestricted
+        hudItem.isEnabled = permissionGranted && !updateRestricted
         menuStatus.title = permissionGranted ? status.stringValue : "손쉬운 사용 권한을 기다리고 있어요"
+        if updateRestricted { menuStatus.title = "업데이트가 필요해요 · 한Q 기능 중단" }
         statusItem.button?.appearsDisabled = !koreanEnabled && !hanjaEnabled
     }
     @objc func toggleKorean() {
+        guard !updateRestricted else { return }
         if !koreanEnabled { startMapping(); guard enabled else { return } }
         koreanEnabled.toggle()
         UserDefaults.standard.set(koreanEnabled, forKey: "koreanKeyEnabled")
@@ -440,6 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshStatus()
     }
     @objc func toggleHanja() {
+        guard !updateRestricted else { return }
         if !hanjaEnabled { startMapping(); guard enabled else { return } }
         hanjaEnabled.toggle()
         UserDefaults.standard.set(hanjaEnabled, forKey: "hanjaKeyEnabled")
@@ -489,7 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let info = Bundle.main.infoDictionary ?? [:]
         var options: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationName: "한Q",
-            .applicationVersion: info["CFBundleShortVersionString"] as? String ?? "",
+            .applicationVersion: info["HanQReleaseVersion"] as? String ?? "",
             .version: info["CFBundleVersion"] as? String ?? ""
         ]
         if let logoURL = Bundle.main.url(forResource: "HanQ-Logo", withExtension: "png"),
@@ -516,10 +536,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         updatePermission()
         showWindow()
+        updater.showRequiredUpdate()
         return false
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
+        updater.stop()
         permissionTimer?.invalidate()
         safetyPulseTimer?.invalidate()
         hud.hide()

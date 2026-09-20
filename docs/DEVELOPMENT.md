@@ -13,7 +13,19 @@ open build/HanQ.app
 
 [빌드 스크립트](../scripts/build-app.sh)는 컴파일, 자동 검사, plist·ad-hoc 서명 검증을 마친 뒤 `build/HanQ.app`을 생성한다. 기존 앱이 있으면 `.build/hanq/backups/`에 보관하고 교체하며, 실행 중인 앱은 교체하지 않는다. 서명이 바뀌면 손쉬운 사용 권한 재등록이 필요할 수 있다.
 
-앱 버전은 `version.env`에서 읽으며 변경 규칙은 [버전 관리](VERSIONING.md)를 따른다. 작업자는 AI를 포함해 별도 요청 없이 변경 내용·공개 상태에 맞는 버전과 변경 이력을 갱신한다. 문서 수정이나 동일 입력의 재빌드만으로 번호를 올리지 않는다. 배포 대상·번들 ID는 빌드 스크립트에서 관리하고 컴파일 아키텍처는 빌드 머신을 따른다. 기존 설치를 업데이트할 때는 번들 ID와 앱 경로를 유지하고 사용자 설정이 보존되는지 확인한다.
+앱 버전은 `version.env`에서 읽으며 변경 규칙은 [버전 관리](VERSIONING.md)를 따른다. 작업자는 AI를 포함해 별도 요청 없이 변경 내용·공개 상태에 맞는 버전과 변경 이력을 갱신한다. 문서 수정이나 동일 입력의 재빌드만으로 번호를 올리지 않는다. 배포 대상·번들 ID는 빌드 스크립트에서 관리하고 컴파일 아키텍처는 arm64로 고정한다. 기존 설치를 업데이트할 때는 번들 ID와 앱 경로를 유지하고 사용자 설정이 보존되는지 확인한다.
+
+### 별도 후보 빌드와 업데이트 의존성
+
+`bash scripts/build-app.sh --candidate`는 `build/candidate/HanQ.app`을 생성한다. 기존 `build/HanQ.app`은 계속 실행할 수 있으며 후보 앱 자체가 실행 중이면 교체하지 않는다. 실제 입력 검증은 기존 앱을 종료한 뒤 같은 설치 경로에서 수행한다. 후보 생성과 실제 실행 검증은 구분한다.
+
+Sparkle 2.10.0 공식 아카이브와 SHA-256은 `scripts/prepare-sparkle.sh`에 고정한다. 최초 빌드에는 네트워크가 필요하고 이후 검증된 로컬 아카이브를 사용한다. 프레임워크의 심볼릭 링크·서명과 라이선스를 보존해 앱에 포함한다. 공개 업데이트 주소·검증키는 `updates/config.json`에 있으며 개인키는 포함하지 않는다.
+
+`bash scripts/test-update-policy.sh`는 정책 서명·경계·만료·적용 범위와 네트워크 실패·정책 철회의 기능 복귀 결정을 검사한다. `test-lifecycle.sh`는 제한 시 입력 해제·재활성화 방지·설정 보존도 확인한다. 실서버 조회는 `bash scripts/test-update-network.sh`로 별도 확인한다. `bash scripts/test-update-integration.sh`는 별도 번들에서 실제 안내창·AppDelegate 제한·오프라인 복귀·서명된 정책 철회를 함께 검사한다. `--interactive`는 재확인 버튼을 직접 확인할 때 사용한다. 운영 정책·실제 한Q 설정·전역 입력 탭은 변경하지 않는다.
+
+실제 Sparkle 설치 검증용 별도 앱은 `Tests/UpdateEndToEnd/`와 `scripts/prepare-update-e2e.sh`에 있다. `.build/hanq/update-e2e/server`를 만든 뒤 `python3 Tests/UpdateEndToEnd/server.py .build/hanq/update-e2e`를 별도 터미널에서 실행하고 준비 스크립트를 실행한다. 서버는 127.0.0.1에만 바인딩한다. `installed/HanQ Update E2E.app`에서 테스트 업데이트를 실행해 설치·재실행 후 `result.json`의 빌드 2·설정 유지·동일 경로를 확인한다. 잘못된 서명과 취소 경로도 확인한다. 테스트 전용 HTTP 허용·번들 ID·임시 키는 해당 테스트 앱에만 포함된다. 종료 후 앱·서버를 닫고 `test-signing.key`를 삭제한다. 재실행할 때는 이전 테스트 디렉터리를 옮겨 새 환경을 만든다.
+
+이 검사는 한Q 배포본의 손쉬운 사용 권한 유지나 최초 다운로드 Gatekeeper 검증을 대신하지 않는다.
 
 ### 수동 테스트 창을 포함한 개발 빌드
 
@@ -43,6 +55,7 @@ open build/HanQ.app --args --test-hanja-panel
 | [FreshPermissionMonitor.swift](../Sources/HanQ/FreshPermissionMonitor.swift), [InputSafetyWatchdog.swift](../Sources/HanQ/InputSafetyWatchdog.swift), [PermissionRecovery.swift](../Sources/HanQ/PermissionRecovery.swift) | 권한 감시, 응답 중단 방어, 권한 상실 후 재실행 |
 | [HUDController.swift](../Sources/HanQ/HUDController.swift) | 입력 소스 이름 표시 |
 | [FeedbackForm.swift](../Sources/HanQ/FeedbackForm.swift) | 피드백 폼 주소·필드 ID 및 자동 입력값 구성 |
+| [AppUpdater.swift](../Sources/HanQ/AppUpdater.swift), [UpdatePolicy.swift](../Sources/HanQ/UpdatePolicy.swift), [UpdatePolicyClient.swift](../Sources/HanQ/UpdatePolicyClient.swift) | 업데이트 메뉴·Sparkle 연결·서명 정책 판정과 조회 |
 | [InputDiagnostics.swift](../Sources/HanQ/InputDiagnostics.swift) | 입력 진단 |
 | [Tests/](../Tests/), [scripts/](../scripts/) | 자동 검사와 빌드·진단 도구 |
 

@@ -15,17 +15,28 @@ if [[ "${1:-}" == --print-version && $# -eq 1 ]]; then
   exit 0
 fi
 compiler=(swiftc)
-if [[ "${1:-}" == --development && $# -eq 1 ]]; then
-  compiler+=(-D HANQ_DEVELOPMENT)
-elif [[ $# -ne 0 ]]; then
-  echo '사용법: bash scripts/build-app.sh [--print-version | --development]' >&2
-  exit 1
-fi
+output=build/HanQ.app
+development=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --development) development=true; shift ;;
+    --candidate) output=build/candidate/HanQ.app; shift ;;
+    *) echo '사용법: bash scripts/build-app.sh [--print-version | --development | --candidate]' >&2; exit 1 ;;
+  esac
+done
+if $development; then compiler+=(-D HANQ_DEVELOPMENT); fi
 macos_minimum=13.0
-build_arch=$(uname -m)
+build_arch=arm64
 swift_target="${build_arch}-apple-macosx${macos_minimum}"
+sparkle=$(bash scripts/prepare-sparkle.sh)
+compiler+=(-F "$sparkle" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks)
 process_status=0
-pgrep -x HanQ >/dev/null || process_status=$?
+if [[ "$output" == build/HanQ.app ]]; then
+  pgrep -x HanQ >/dev/null || process_status=$?
+else
+  # Match the candidate executable only; the installed app may keep running.
+  pgrep -f "^$PWD/$output/Contents/MacOS/HanQ([[:space:]]|$)" >/dev/null || process_status=$?
+fi
 if [[ $process_status -gt 1 ]]; then
   echo '실행 프로세스를 확인할 수 없어 교체를 중단합니다.' >&2
   exit 1
@@ -34,7 +45,7 @@ if [[ $process_status -eq 0 ]]; then
   echo '한Q를 종료한 뒤 다시 빌드하세요. 실행 중인 앱은 교체하지 않습니다.' >&2
   exit 1
 fi
-mkdir -p .build/hanq/module-cache build
+mkdir -p .build/hanq/module-cache "$(dirname "$output")"
 stage=$(mktemp -d "$PWD/.build/hanq/stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 app="$stage/HanQ.app"
@@ -43,7 +54,10 @@ if [[ ! -d Resources/HanQ.icon || ! -f Resources/HanQ.icns ]]; then
   exit 1
 fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-"${compiler[@]}" -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Sources/HanQ/HUDController.swift Sources/HanQ/RomanSwitchController.swift Sources/HanQ/FeedbackForm.swift Sources/HanQ/JamoRepair.swift Sources/HanQ/InputSafetyWatchdog.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/FreshPermissionMonitor.swift Sources/HanQ/PermissionRecovery.swift Sources/HanQ/DevelopmentTestPanels.swift Sources/HanQ/main.swift -o "$app/Contents/MacOS/HanQ"
+"${compiler[@]}" -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/*.swift -o "$app/Contents/MacOS/HanQ"
+mkdir -p "$app/Contents/Frameworks"
+ditto "$sparkle/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
+cp "$sparkle/LICENSE" "$app/Contents/Resources/Sparkle-LICENSE.txt"
 cp -R Resources/. "$app/Contents/Resources/"
 find "$app/Contents/Resources" -name .DS_Store -type f -delete
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
@@ -54,7 +68,8 @@ bash scripts/test-lifecycle.sh
 bash scripts/test-watchdog.sh
 bash scripts/test-permission-monitor.sh
 bash scripts/test-recovery.sh
-previous_app=build/HanQ.app
+bash scripts/test-update-policy.sh
+previous_app="$output"
 previous=unknown
 if [[ -f "$previous_app/Contents/Info.plist" ]]; then
   previous=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$previous_app/Contents/Info.plist")
@@ -80,17 +95,19 @@ cat > "$app/Contents/Info.plist" <<EOF
 <key>CFBundleAllowMixedLocalizations</key><true/>
 </dict></plist>
 EOF
+python3 scripts/configure-updates.py "$app/Contents/Info.plist"
+python3 scripts/build-manifest.py "$app/Contents/Resources/HanQBuild.json" "$development"
 plutil -lint "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
-codesign --verify --strict "$app"
+codesign --verify --deep --strict "$app"
 cmp LICENSE "$app/Contents/Resources/LICENSE.txt"
 if [[ -d "$previous_app" ]]; then
   mkdir -p .build/hanq/backups
   ditto "$previous_app" ".build/hanq/backups/HanQ-build-$previous-$(date +%s).app"
   mv "$previous_app" "$stage/previous.app"
 fi
-if ! mv "$app" build/HanQ.app; then
+if ! mv "$app" "$output"; then
   if [[ -d "$stage/previous.app" ]]; then mv "$stage/previous.app" "$previous_app"; fi
   exit 1
 fi
-echo "Built $PWD/build/HanQ.app · $RELEASE_VERSION ($BUILD_NUMBER) · macOS $macos_minimum+ · $build_arch"
+echo "Built $PWD/$output · $RELEASE_VERSION ($BUILD_NUMBER) · macOS $macos_minimum+ · $build_arch"

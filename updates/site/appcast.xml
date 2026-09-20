@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>한Q 업데이트</title>
+    <link>https://github.com/jungti1234/hanq</link>
+    <description>공개 배포 준비 중. 아직 설치 가능한 공개 버전이 없습니다.</description>
+    <language>ko</language>
+  </channel>
+</rss>

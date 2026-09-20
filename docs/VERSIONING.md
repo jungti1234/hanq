@@ -7,12 +7,12 @@
 | 필드 | 첫 베타 준비 값 | 용도 |
 | --- | --- | --- |
 | `APP_VERSION` | `0.1.0` | macOS 표시 버전 (`CFBundleShortVersionString`) |
-| `BUILD_NUMBER` | `71` | 업데이트 순서 (`CFBundleVersion`). 새 검증 후보·배포본마다 증가 |
+| `BUILD_NUMBER` | `74` | 업데이트 순서 (`CFBundleVersion`). 새 검증 후보·배포본마다 증가 |
 | `RELEASE_VERSION` | `0.1.0-beta.1` | 배포용 베타 식별자와 예정 Release 이름. 번들의 `HanQReleaseVersion`에 기록하며 Git 태그는 앞에 `v`를 붙임 |
 
-현재 71은 로컬 빌드·검증을 완료한 번호이며 공개 배포는 아직 하지 않았다. 첫 공개 버전은 `0.1.0-beta.1`로 준비한다. 실제 공개할 앱의 빌드 번호는 준비 과정에서 올라갈 수 있다.
+현재 74는 업데이트 설정 메뉴를 정리한 로컬 검증 후보이며 공개 배포는 아직 하지 않았다. 첫 공개 버전은 `0.1.0-beta.1`로 준비한다. 실제 공개할 앱의 빌드 번호는 준비 과정에서 올라갈 수 있다.
 
-현재 앱 정보창과 피드백 폼에는 `APP_VERSION`과 `BUILD_NUMBER`를 표시하며, `RELEASE_VERSION`의 `beta.N`은 표시하지 않는다. 베타 식별자까지 앱에 표시하는 작업은 별도로 필요하다.
+앱 정보창과 피드백 폼에는 `RELEASE_VERSION`과 `BUILD_NUMBER`를 표시해 베타 식별자까지 구분한다.
 
 ## 버전을 올리는 기준
 

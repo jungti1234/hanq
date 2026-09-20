@@ -3,7 +3,8 @@ import Darwin
 
 enum FeedbackForm {
     static func url(bundle: Bundle = .main) -> URL? {
-        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "알 수 없음"
+        let version = bundle.object(forInfoDictionaryKey: "HanQReleaseVersion") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "알 수 없음"
         let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
         let appVersion = build.map { "\(version) (\($0))" } ?? version
         let os = ProcessInfo.processInfo.operatingSystemVersion

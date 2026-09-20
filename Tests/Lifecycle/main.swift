@@ -27,3 +27,22 @@ let flags = CGEventFlags.maskCommand
 let result = owner.filter.process(type: .keyDown, key: 0, flags: flags, acceptNewPress: false)
 precondition(!result.consume && result.flags == flags)
 print("PASS: production teardown releases port/source, clears held keys, passes input, and is idempotent")
+
+// A restriction must remove the real input hook and prevent every activation route.
+_ = NSApplication.shared
+owner.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+owner.enabled = true; owner.koreanEnabled = true; owner.hanjaEnabled = true
+let prefs = UserDefaults.standard
+let before = [prefs.object(forKey: "koreanKeyEnabled"), prefs.object(forKey: "hanjaKeyEnabled")]
+owner.setUpdateRestricted(true)
+owner.startMapping()
+owner.toggleKorean(); owner.toggleHanja()
+precondition(owner.updateRestricted && !owner.enabled && owner.tap == nil)
+precondition(!owner.pendingActivation && !owner.toggleItem.isEnabled && !owner.hanjaItem.isEnabled)
+precondition(String(describing: before) == String(describing: [prefs.object(forKey: "koreanKeyEnabled"), prefs.object(forKey: "hanjaKeyEnabled")]))
+NSStatusBar.system.removeStatusItem(owner.statusItem)
+print("PASS: mandatory-update restriction disables input, blocks reactivation and preserves preferences")
+
+precondition(owner.updater.responds(to: NSSelectorFromString("updater:didFinishLoadingAppcast:")))
+precondition(owner.updater.responds(to: NSSelectorFromString("allowedChannelsForUpdater:")))
+print("PASS: Sparkle optional delegate callbacks use the expected Objective-C selectors")
