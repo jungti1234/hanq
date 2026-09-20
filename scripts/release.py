@@ -75,14 +75,15 @@ def prepare(app):
     destination.parent.mkdir(exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix='release.', dir=ROOT / '.build/hanq'))
     try:
-        payload = stage / 'payload'; payload.mkdir()
-        run('ditto', app, payload / 'HanQ.app')
-        (payload / 'Applications').symlink_to('/Applications')
         output = stage / 'output'; output.mkdir()
         name = f'HanQ-{version}-build{build}-arm64.dmg'
         dmg = output / name
-        run('hdiutil', 'create', '-quiet', '-volname', f'한Q {version}', '-srcfolder', payload,
-            '-fs', 'APFS', '-format', 'ULFO', dmg)
+        design = stage / 'design'
+        run('python3', ROOT / 'scripts/prepare-designed-dmg.py', '--app', app, '--output', design)
+        preview = json.loads((design / 'preview.json').read_text())
+        if preview['version'] != version or str(preview['build']) != build or sha(design / preview['dmg']) != preview['sha256']:
+            raise SystemExit('Designed DMG identity or checksum mismatch')
+        shutil.copyfile(design / preview['dmg'], dmg)
         run('hdiutil', 'verify', dmg)
         mount = stage / 'mount'; mount.mkdir()
         attached = False

@@ -1,0 +1,24 @@
+from pathlib import Path
+application = defines['app']
+files = [application]
+symlinks = {'Applications': '/Applications'}
+format = 'ULFO'
+filesystem = 'HFS+'
+size = '40m'
+background = defines['background']
+icon = str(Path(application) / 'Contents/Resources/HanQ.icns')
+window_rect = ((160, 140), (720, 536))
+show_status_bar = False
+show_tab_view = False
+show_toolbar = False
+show_pathbar = False
+show_sidebar = False
+default_view = 'icon-view'
+arrange_by = None
+grid_spacing = 80
+scroll_position = (0, 0)
+icon_size = 96
+text_size = 13
+label_pos = 'bottom'
+icon_locations = {'HanQ.app': (208, 260), 'Applications': (512, 260)}
+hide_extension = ['HanQ.app']
