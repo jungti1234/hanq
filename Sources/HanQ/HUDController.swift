@@ -17,7 +17,6 @@ final class HUDController {
         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private let label = NSTextField(labelWithString: "")
     private var dismissal: Timer?
-    private var generation = 0
 
     init() {
         panel.isOpaque = false
@@ -49,7 +48,6 @@ final class HUDController {
     }
 
     func show(name: String?) {
-        generation += 1
         dismissal?.invalidate()
         guard let sourceName = name, !sourceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let screen = NSScreen.main ?? NSScreen.screens.first else { hide(); return }
@@ -77,6 +75,6 @@ final class HUDController {
         dismissal = timer
     }
     func hide() {
-        generation += 1; dismissal?.invalidate(); panel.orderOut(nil)
+        dismissal?.invalidate(); panel.orderOut(nil)
     }
 }

@@ -62,10 +62,6 @@ enum JamoComposer {
     private static let vowelPairs: [String: Character] = ["ㅗㅏ":"ㅘ", "ㅗㅐ":"ㅙ", "ㅗㅣ":"ㅚ", "ㅜㅓ":"ㅝ", "ㅜㅔ":"ㅞ", "ㅜㅣ":"ㅟ", "ㅡㅣ":"ㅢ"]
     private static let finalPairs: [String: Character] = ["ㄱㅅ":"ㄳ", "ㄴㅈ":"ㄵ", "ㄴㅎ":"ㄶ", "ㄹㄱ":"ㄺ", "ㄹㅁ":"ㄻ", "ㄹㅂ":"ㄼ", "ㄹㅅ":"ㄽ", "ㄹㅌ":"ㄾ", "ㄹㅍ":"ㄿ", "ㄹㅎ":"ㅀ", "ㅂㅅ":"ㅄ"]
 
-    static func isJamo(_ scalar: Unicode.Scalar) -> Bool {
-        (0x1100...0x11FF).contains(scalar.value) || (0x3131...0x318E).contains(scalar.value)
-    }
-
     static func compose(_ text: String) -> String {
         // NFC respects explicit choseong/jungseong/jongseong roles in NFD text.
         var normalized = ""

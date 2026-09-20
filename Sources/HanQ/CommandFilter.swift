@@ -3,8 +3,6 @@ import CoreGraphics
 // Device-specific masks from the SDK's IOLLEvent.h; the aggregate Command
 // flag alone cannot distinguish both Command keys being held together.
 struct CommandFilter {
-    static let leftMask: UInt64 = 0x08
-    static let rightMask: UInt64 = 0x10
     let keyCode: Int64
     let leftDeviceMask: UInt64
     let rightDeviceMask: UInt64

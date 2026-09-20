@@ -56,7 +56,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Preserve the macOS Caps Lock setting, including on first launch.
         // Discard any pending automatic enable left by an older build.
         preferences.removeObject(forKey: "pendingInitialRomanSwitchEnable")
-        preferences.set(true, forKey: "didInitializeDefaults")
         UserDefaults.standard.register(defaults: ["hudEnabled": true])
         for key in ["koreanKeyEnabled", "hanjaKeyEnabled"] where UserDefaults.standard.object(forKey:key) == nil {
             UserDefaults.standard.set(true, forKey:key)
