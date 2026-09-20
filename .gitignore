@@ -1,0 +1,33 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Local builds, caches, backups and distribution artifacts
+/.build/
+/build/
+/DerivedData/
+/dist/
+*.xcuserstate
+xcuserdata/
+
+# Local credentials and environment settings
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.p8
+*.key
+*.mobileprovision
+*.provisionprofile
+
+# Python tooling caches
+__pycache__/
+*.py[cod]
+
+# Local agent settings
+/.codex/
+/.agents/
+
+# Internal documents are a separate private Git repository.
+/docs/private/

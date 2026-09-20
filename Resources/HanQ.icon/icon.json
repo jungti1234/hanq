@@ -1,0 +1,131 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:1.00000,1.00000,1.00000,1.00000",
+      "srgb:0.90588,0.92549,0.95686,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "02-Blue-Fold.svg",
+          "name" : "02-Blue-Fold"
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "04 · Translucent overlap and fold",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "08-Han-Letter.svg",
+          "name" : "08-Han-Letter"
+        },
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "07-Han-Blue.svg",
+          "name" : "07-Han-Blue"
+        },
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "06-Han-Shadow.svg",
+          "name" : "06-Han-Shadow"
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "03 · Han card",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "05-Q-Letter.svg",
+          "name" : "05-Q-Letter"
+        },
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "04-Blue-Transmission.svg",
+          "name" : "04-Blue-Transmission"
+        },
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "03-Q-Paper.svg",
+          "name" : "03-Q-Paper"
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "02 · Q card and blue transmission",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "01-Paper-Shadow.svg",
+          "name" : "01-Paper-Shadow"
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "01 · Soft paper shadow",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}
