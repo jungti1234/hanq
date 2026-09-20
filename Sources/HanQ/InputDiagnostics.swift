@@ -17,9 +17,9 @@ final class InputDiagnostics {
         } else { descriptor = -1 }
     }
 
-    func record(_ message: String) {
+    func record(_ message: @autoclosure () -> String) {
         guard descriptor >= 0 else { return }
-        let line = "\(Date().timeIntervalSince1970) mono=\(DispatchTime.now().uptimeNanoseconds) pid=\(getpid()) \(message)\n"
+        let line = "\(Date().timeIntervalSince1970) mono=\(DispatchTime.now().uptimeNanoseconds) pid=\(getpid()) \(message())\n"
         line.withCString { pointer in _ = write(descriptor, pointer, strlen(pointer)) }
     }
 

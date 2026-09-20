@@ -14,8 +14,11 @@ if [[ "${1:-}" == --print-version && $# -eq 1 ]]; then
   printf '%s (%s)\n' "$RELEASE_VERSION" "$BUILD_NUMBER"
   exit 0
 fi
-if [[ $# -ne 0 ]]; then
-  echo '사용법: bash scripts/build-app.sh [--print-version]' >&2
+compiler=(swiftc)
+if [[ "${1:-}" == --development && $# -eq 1 ]]; then
+  compiler+=(-D HANQ_DEVELOPMENT)
+elif [[ $# -ne 0 ]]; then
+  echo '사용법: bash scripts/build-app.sh [--print-version | --development]' >&2
   exit 1
 fi
 macos_minimum=13.0
@@ -40,12 +43,13 @@ if [[ ! -d Resources/HanQ.icon || ! -f Resources/HanQ.icns ]]; then
   exit 1
 fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Sources/HanQ/HUDController.swift Sources/HanQ/RomanSwitchController.swift Sources/HanQ/FeedbackForm.swift Sources/HanQ/JamoRepair.swift Sources/HanQ/InputSafetyWatchdog.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/FreshPermissionMonitor.swift Sources/HanQ/PermissionRecovery.swift Sources/HanQ/main.swift -o "$app/Contents/MacOS/HanQ"
+"${compiler[@]}" -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Sources/HanQ/HUDController.swift Sources/HanQ/RomanSwitchController.swift Sources/HanQ/FeedbackForm.swift Sources/HanQ/JamoRepair.swift Sources/HanQ/InputSafetyWatchdog.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/FreshPermissionMonitor.swift Sources/HanQ/PermissionRecovery.swift Sources/HanQ/DevelopmentTestPanels.swift Sources/HanQ/main.swift -o "$app/Contents/MacOS/HanQ"
 cp -R Resources/. "$app/Contents/Resources/"
 find "$app/Contents/Resources" -name .DS_Store -type f -delete
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
 swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Tests/main.swift -o "$stage/filter-tests"
 "$stage/filter-tests"
+bash scripts/test-diagnostics.sh
 bash scripts/test-lifecycle.sh
 bash scripts/test-watchdog.sh
 bash scripts/test-permission-monitor.sh

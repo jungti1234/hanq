@@ -15,6 +15,22 @@ open build/HanQ.app
 
 앱 버전은 `version.env`에서 읽으며 변경 규칙은 [버전 관리](VERSIONING.md)를 따른다. 배포 대상·번들 ID는 빌드 스크립트에서 관리하고 컴파일 아키텍처는 빌드 머신을 따른다. 기존 설치를 업데이트할 때는 번들 ID와 앱 경로를 유지하고 사용자 설정이 보존되는지 확인한다.
 
+### 수동 테스트 창을 포함한 개발 빌드
+
+일반 빌드는 수동 테스트 창을 포함하지 않는다. 개발용 검증이 필요하면 한Q를 종료한 뒤 `bash scripts/build-app.sh --development`로 빌드한다. 기존과 같은 `build/HanQ.app`을 백업·교체하므로 개발 빌드를 배포 파일로 사용하지 않는다.
+
+`bash scripts/test-development-build.sh`로 앱 초기화 없이 일반·개발 모드의 테스트 액션 포함 여부를 실행 검증할 수 있다.
+
+개발 빌드에서만 다음 실행 옵션을 사용할 수 있다. 앱이 이미 실행 중이면 먼저 종료한다.
+
+```sh
+open build/HanQ.app --args --test-jamo-panel
+# 또는
+open build/HanQ.app --args --test-hanja-panel
+```
+
+테스트 창은 Edge의 자모 변환과 TextEdit의 한자 처리를 수동으로 확인하는 도구다. 실제 우측 키 입력 검증을 대신하지 않는다. 창·버튼·지연 실행 코드는 `DevelopmentTestPanels.swift`에 있으며 `HANQ_DEVELOPMENT` 조건에서만 컴파일한다.
+
 ## 코드 구조
 
 | 위치 | 역할 |
@@ -62,6 +78,7 @@ Caps Lock 전환 설정의 비공개 HIToolbox API 호출은 `RomanSwitchControl
 
 빌드 스크립트는 `Tests/main.swift`의 로직 검사와 다음 검사를 실행한다.
 
+- `scripts/test-diagnostics.sh`: 진단 모드에서만 메시지 평가·기록
 - `scripts/test-lifecycle.sh`: 이벤트 탭 해제
 - `scripts/test-watchdog.sh`: 응답 중단 시 종료
 - `scripts/test-permission-monitor.sh`: 권한 감시 실패·중단 경로
@@ -74,6 +91,8 @@ bash scripts/test-recovery-app.sh
 ```
 
 자동 검사만으로 물리 키 입력과 대상 편집기의 IME 동작을 검증할 수는 없다. 변경한 기능에 따라 실제 우측 키 입력, 한자 후보 확정·취소, 붙여넣기·Undo·클립보드 복원, 권한 철회·재허용을 확인한다.
+
+텍스트 변환의 요청·선택 준비·정상 중단 등 상세 과정은 `--diagnose-input` 모드에서만 기록한다. 대상 앱 식별자는 상세 로그에서 제외한다. AX 읽기 실패·선택 반영 시간 초과·편집 결과 확인 실패와 권한 안전 종료·입력 소스 전환 실패는 일반 실행에서도 시스템 로그에 남긴다. 입력 문자열과 클립보드 내용은 기록하지 않는다.
 
 권한 문제는 [run-app-input-diagnostic.py](../scripts/run-app-input-diagnostic.py)로 LaunchServices를 통해 재현한다. 터미널 자식으로 직접 실행하면 일반 앱 실행과 권한 조회 결과가 다를 수 있다. 사용 가능한 옵션은 다음 명령으로 확인한다.
 

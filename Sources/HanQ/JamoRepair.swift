@@ -42,7 +42,7 @@ final class JamoRepair {
     }
 
     func request(allowHanja: Bool) {
-        NSLog("한자 요청: allowed=%d busy=%d", allowHanja ? 1 : 0, busy ? 1 : 0)
+        InputDiagnostics.shared.record("한자 요청: allowed=\(allowHanja) busy=\(busy)")
         guard AXIsProcessTrusted(), !busy, let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
         let inputSourceID = InputSourceSnapshot.read()?.id
         cancelHanjaWatch()
@@ -84,7 +84,7 @@ final class JamoRepair {
 
     private func perform(pid: pid_t, allowHanja: Bool, inputSourceID: String?, readAttempt: Int = 0) {
         guard AXIsProcessTrusted(), !busy, InputSourceSnapshot.read()?.id == inputSourceID else { return }
-        NSLog("자모 요청: app=%@", NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "unknown")
+        InputDiagnostics.shared.record("자모 요청: 접근성 읽기 시작")
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.1)
         guard let raw = attribute(app, kAXFocusedUIElementAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else {
@@ -105,7 +105,7 @@ final class JamoRepair {
         if let rawMarked = attribute(element, "AXMarkedTextRange"), CFGetTypeID(rawMarked) == AXValueGetTypeID() {
             var marked = CFRange()
             if AXValueGetValue(rawMarked as! AXValue, .cfRange, &marked), marked.length > 0 {
-                NSLog("자모 조합 생략: 입력기 조합 중")
+                InputDiagnostics.shared.record("자모 조합 생략: 입력기 조합 중")
                 return
             }
         }
@@ -127,7 +127,7 @@ final class JamoRepair {
         }
         let isHanja: Bool
         if case .hanja = action { isHanja = true } else { isHanja = false }
-        NSLog("변환 선택 준비: hanja=%d selected=%d", isHanja ? 1 : 0, originalSelection.length > 0 ? 1 : 0)
+        InputDiagnostics.shared.record("변환 선택 준비: hanja=\(isHanja) selected=\(originalSelection.length > 0)")
         var writable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &writable) == .success,
               writable.boolValue,
@@ -138,7 +138,7 @@ final class JamoRepair {
               selection(element) == originalSelection,
               attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true,
               setSelection(element, range) else {
-            NSLog("변환 중단: 선택 설정 또는 입력 상태 재확인 실패")
+            InputDiagnostics.shared.record("변환 중단: 선택 설정 또는 입력 상태 재확인 실패")
             return
         }
         busy = true
@@ -152,13 +152,13 @@ final class JamoRepair {
     /// an assistive client requests it. Retry briefly, without blocking the tap.
     private func retryRead(app: AXUIElement, pid: pid_t, allowHanja: Bool, inputSourceID: String?, attempt: Int) {
         guard attempt < 3 else {
-            NSLog("자모 조합 생략: 접근성 준비 후에도 텍스트 또는 선택 범위를 읽을 수 없음")
+            InputDiagnostics.shared.record("자모 조합 생략: 접근성 준비 후에도 텍스트 또는 선택 범위를 읽을 수 없음")
             return
         }
         if attempt == 0 {
             for name in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
                 let result = AXUIElementSetAttributeValue(app, name as CFString, kCFBooleanTrue)
-                NSLog("자모 접근성 준비: %@ result=%d", name, result.rawValue)
+                InputDiagnostics.shared.record("자모 접근성 준비: \(name) result=\(result.rawValue)")
             }
         }
         let expectedRevision = revision
@@ -185,7 +185,7 @@ final class JamoRepair {
             guard AXIsProcessTrusted(), stillFocused, unchanged, self.revision == expectedRevision,
                   InputSourceSnapshot.read()?.id == inputSourceID,
                   !IsSecureEventInputEnabled() else {
-                NSLog("변환 중단: 선택 대기 중 입력 상태 변경")
+                InputDiagnostics.shared.record("변환 중단: 선택 대기 중 입력 상태 변경")
                 self.busy = false
                 return
             }
@@ -198,7 +198,7 @@ final class JamoRepair {
                     // Wait for AX to reflect the selection before opening the
                     // native candidates. The IME owns replacement and Escape.
                     self.postHanja(pid)
-                    NSLog("한자 후보 요청 전송: 선택 확인 완료")
+                    InputDiagnostics.shared.record("한자 후보 요청 전송: 선택 확인 완료")
                     self.busy = false
                     self.watchHanjaResult(element, app: app, pid: pid, text: text, range: range)
                 }
@@ -269,7 +269,7 @@ final class JamoRepair {
                 guard self.revision == confirmed, !self.busy,
                       self.setSelection(element, correction.range) else { return }
                 self.busy = true
-                NSLog("한자 호환 보정: 원문 뒤 추가 확인")
+                InputDiagnostics.shared.record("한자 호환 보정: 원문 뒤 추가 확인")
                 self.waitForSelection(element, app: app, pid: pid, text: current, range: correction.range,
                                       originalSelection: caret, action: .paste(correction.replacement),
                                       expectedRevision: confirmed, inputSourceID: source, attempt: 0)
