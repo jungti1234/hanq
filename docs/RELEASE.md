@@ -10,7 +10,7 @@ GitHub 머지·업로드, 배포 태그 발행, 배포용 서명·공증, Draft 
 
 ## 버전과 변경 이력
 
-[버전 관리 규칙](VERSIONING.md)에 따라 `version.env`의 배포 값을 확정하고, [CHANGELOG](../CHANGELOG.md)의 해당 버전 항목을 릴리스 노트로 준비한다.
+[버전 관리 규칙](VERSIONING.md)에 따라 `version.env`의 배포 값을 확정하고, [CHANGELOG](../CHANGELOG.md)를 참고해 `docs/releases/<RELEASE_VERSION>.md`에 공개용 릴리스 노트를 작성한다. 첫 줄은 `# 한Q <RELEASE_VERSION>`으로 맞추고, 사용자에게 필요한 기능·설치 안내·알려진 제한을 정리한다. 내부 후보 빌드 이력과 준비 작업은 그대로 옮기지 않는다.
 
 ## 배포 구성
 
@@ -44,7 +44,7 @@ GitHub 머지·업로드, 배포 태그 발행, 배포용 서명·공증, Draft 
 - 업데이트 종료가 watchdog·권한 복구의 자동 재실행과 충돌하지 않게 검증한다. 앱 이름·번들 ID·설치 위치를 유지한다.
 - 프레임워크 및 포함 구성요소의 라이선스 고지를 보존한다.
 
-빌드 71 이하에는 updater가 없으므로 해당 로컬 앱은 직접 교체한다. GitHub의 Pre-release 표시는 Sparkle 채널을 분리하지 않는다. 베타·안정판 도입 시 피드 또는 채널 정책을 명시적으로 구성한다.
+GitHub의 Pre-release 표시는 Sparkle 채널을 분리하지 않는다. 베타·안정판 도입 시 피드 또는 채널 정책을 명시적으로 구성한다.
 
 ## 필수 업데이트 정책
 
@@ -89,7 +89,9 @@ python3 scripts/release.py prepare
 python3 scripts/release.py draft dist/0.1.0-beta.1-build74
 ```
 
-`prepare`는 후보 앱과 현재 빌드 입력 해시가 일치하는지 확인하고, 개발 빌드는 거부한다. APFS·ULFO DMG를 생성해 읽기 전용 마운트·앱 서명·실행 파일 일치·Applications 링크를 확인한 뒤 Sparkle 서명과 체크섬을 검증한다. `dist/<버전>-build<번호>/`에 DMG·SHA256SUMS·release-metadata.json·release-notes.md·appcast-candidate.xml을 남긴다. 기존 산출물 디렉터리는 덮어쓰지 않는다.
+`prepare`는 해당 버전의 릴리스 노트가 있고 제목의 버전이 일치하는지 먼저 확인한다. CHANGELOG에서 본문을 자동 생성하지 않는다. 후보 앱과 현재 빌드 입력 해시가 일치하는지 확인하고, 개발 빌드는 거부한다. APFS·ULFO DMG를 생성해 읽기 전용 마운트·앱 서명·실행 파일 일치·Applications 링크를 확인한 뒤 Sparkle 서명과 체크섬을 검증한다. `dist/<버전>-build<번호>/`에 DMG·SHA256SUMS·release-metadata.json·release-notes.md·appcast-candidate.xml을 남긴다. 기존 산출물 디렉터리는 덮어쓰지 않는다.
+
+노트를 수정한 경우 검토한 원본을 산출물의 `release-notes.md`에도 반영한다. `draft`는 두 파일이 다르면 중단한다. 기존 Draft의 본문 수정은 `gh release edit <태그> --notes-file docs/releases/<버전>.md`로 수행하며 공개 상태는 변경하지 않는다.
 
 `draft`는 작업 트리가 깨끗하고 빌드 입력이 추적된 커밋과 일치하는지, DMG가 변하지 않았는지, 원격에 커밋이 있는지 검사한다. 기존 태그·Release를 재사용하지 않으며 공개 Release보다 빌드가 높은지 확인한다. 검증한 파일을 Draft로 첨부할 뿐 공개하거나 운영 appcast를 수정하지 않는다. 원격의 예전 파일명에서 빌드 번호를 판독할 수 없으면 수동 검토를 위해 중단한다.
 

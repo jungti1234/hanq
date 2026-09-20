@@ -34,6 +34,23 @@ def source_hashes():
     return module.source_hashes()
 
 
+def release_notes(version):
+    if not re.fullmatch(r'\d+\.\d+\.\d+(-beta\.[1-9]\d*)?', version):
+        raise SystemExit('Invalid release notes version')
+    path = ROOT / 'docs/releases' / f'{version}.md'
+    if not path.is_file():
+        raise SystemExit(f'Write and review release notes first: {path}')
+    notes = path.read_text(encoding='utf-8')
+    if not notes.startswith(f'# 한Q {version}\n\n') or not notes.split('\n\n', 1)[1].strip():
+        raise SystemExit(f'Release notes need a matching title and non-empty body: {path}')
+    return notes
+
+
+def validate_release_notes(folder, version):
+    if (folder / 'release-notes.md').read_text(encoding='utf-8') != release_notes(version):
+        raise SystemExit('Packaged release notes differ from the reviewed version-specific notes; sync them first.')
+
+
 def prepare(app):
     app = app.resolve()
     with (app / 'Contents/Info.plist').open('rb') as f:
@@ -43,6 +60,7 @@ def prepare(app):
         raise SystemExit('Candidate is a development build or does not match current source; rebuild it.')
     version = info['HanQReleaseVersion']
     build = info['CFBundleVersion']
+    notes = release_notes(version)
     if info['CFBundleIdentifier'] != 'taek.in.hanq' or not re.fullmatch(r'\d+\.\d+\.\d+(-beta\.[1-9]\d*)?', version) or not re.fullmatch(r'[1-9]\d*', build):
         raise SystemExit('Invalid release identity')
     if run('lipo', '-archs', app / 'Contents/MacOS/HanQ') != 'arm64':
@@ -83,9 +101,7 @@ def prepare(app):
         run(sparkle / 'bin/sign_update', '--account', 'taek.in.hanq', '--verify', dmg, signature)
         digest = sha(dmg)
         (output / 'SHA256SUMS').write_text(f'{digest}  {name}\n')
-        notes = (ROOT / 'CHANGELOG.md').read_text().split('\n## ', 2)[1]
-        notes = notes.split('\n', 1)[1].strip()
-        (output / 'release-notes.md').write_text(f'# 한Q {version} (빌드 {build})\n\n{notes}\n')
+        (output / 'release-notes.md').write_text(notes, encoding='utf-8')
         rss = ET.Element('rss', {'version': '2.0'})
         channel = ET.SubElement(rss, 'channel')
         ET.SubElement(channel, 'title').text = '한Q 업데이트'
@@ -118,6 +134,7 @@ def prepare(app):
 def draft(folder):
     folder = folder.resolve()
     meta = json.loads((folder / 'release-metadata.json').read_text())
+    validate_release_notes(folder, meta['version'])
     if run('git', 'status', '--porcelain'):
         raise SystemExit('Commit the reviewed source and documents before creating a draft.')
     if meta['sourceSHA256'] != source_hashes():
