@@ -24,7 +24,25 @@ final class UpdateHarness: NSObject, NSApplicationDelegate {
         NSLayoutConstraint.activate([stack.centerXAnchor.constraint(equalTo: window.contentView!.centerXAnchor),
                                      stack.centerYAnchor.constraint(equalTo: window.contentView!.centerYAnchor)])
         let config = Bundle(path: Bundle.main.resourcePath! + "/Config.bundle")!
-        updater.start(bundle: config, policyFetch: { _, _, reply in DispatchQueue.main.async { reply(nil) }; return nil })
+        let required = Bundle.main.object(forInfoDictionaryKey: "TestRequiredPolicy") as? Bool == true
+        if required {
+            let policyData = try! Data(contentsOf: Bundle.main.resourceURL!.appendingPathComponent("required.json"))
+            updater.onRestrictionChange = { restricted in
+                precondition(restricted == (version == "1"), "Unexpected restriction for installed build")
+                var verified = data
+                verified["restricted"] = restricted
+                verified["policyChecked"] = true
+                try! JSONSerialization.data(withJSONObject: verified, options: [.prettyPrinted])
+                    .write(to: URL(fileURLWithPath: result))
+                label.stringValue = "테스트 빌드 \(version) · 필수 제한: \(restricted ? "적용" : "해제") · 설정: \(retained ? "유지" : "실패")"
+            }
+            // Only policy transport/HEAD availability are fixtures. Signature and build decisions use production code.
+            updater.start(bundle: config, policyFetch: { _, head, reply in
+                DispatchQueue.main.async { reply(head ? Data() : policyData) }; return nil
+            })
+        } else {
+            updater.start(bundle: config, policyFetch: { _, _, reply in DispatchQueue.main.async { reply(nil) }; return nil })
+        }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func applicationWillTerminate(_ notification: Notification) { updater.stop() }

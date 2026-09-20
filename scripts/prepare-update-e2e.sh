@@ -2,22 +2,26 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 sparkle=$(bash scripts/prepare-sparkle.sh)
+mode="${1:-normal}"
+[[ "$mode" == normal || "$mode" == --required ]] || { echo 'Usage: prepare-update-e2e.sh [--required]' >&2; exit 1; }
 root="$PWD/.build/hanq/update-e2e"
+[[ "$mode" != --required ]] || root="$PWD/.build/hanq/update-required-e2e"
 [[ -f "$root/port" ]] || { echo 'Start Tests/UpdateEndToEnd/server.py first' >&2; exit 1; }
 if [[ -e "$root/installed/HanQ Update E2E.app" || -e "$root/server/update.dmg" ]]; then
   echo 'Existing test run found. Stop the test app/server and move .build/hanq/update-e2e before starting a fresh run.' >&2
   exit 1
 fi
 mkdir -p "$root/new" "$root/installed" "$root/server" .build/hanq/module-cache
-swiftc -parse-as-library -module-cache-path .build/hanq/module-cache Tests/UpdateEndToEnd/key.swift -o "$root/make-key"
-"$root/make-key" "$root/test-signing.key" > "$root/public-key"
+swiftc -parse-as-library -module-cache-path .build/hanq/module-cache Sources/HanQ/UpdatePolicy.swift Tests/UpdateEndToEnd/key.swift -o "$root/make-key"
+"$root/make-key" "$root/test-signing.key" "$root/required.json" > "$root/public-key"
 swiftc -module-cache-path .build/hanq/module-cache -F "$sparkle" -framework Sparkle \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks Sources/HanQ/AppUpdater.swift Sources/HanQ/UpdatePolicy.swift \
   Sources/HanQ/UpdatePolicyClient.swift Tests/UpdateEndToEnd/main.swift -o "$root/HanQUpdateE2E"
-python3 - "$root" "$sparkle" <<'PY'
+python3 - "$root" "$sparkle" "$mode" <<'PY'
 import json, plistlib, shutil, subprocess, sys
 from pathlib import Path
-root, sparkle = map(Path, sys.argv[1:])
+root, sparkle = map(Path, sys.argv[1:3])
+required = sys.argv[3] == "--required"
 key=(root/'public-key').read_text().strip()
 port=int((root/'port').read_text())
 for folder, version in [('installed','1'), ('new','2')]:
@@ -27,7 +31,7 @@ for folder, version in [('installed','1'), ('new','2')]:
  (app/'Contents/Frameworks').mkdir(exist_ok=True)
  shutil.copy2(root/'HanQUpdateE2E',app/'Contents/MacOS/HanQUpdateE2E')
  subprocess.run(['ditto',str(sparkle/'Sparkle.framework'),str(app/'Contents/Frameworks/Sparkle.framework')],check=True)
- info=dict(CFBundleIdentifier='taek.in.hanq.sparkle-tests',CFBundleName='HanQ Update E2E',
+ info=dict(CFBundleIdentifier='taek.in.hanq.required-tests' if required else 'taek.in.hanq.sparkle-tests',CFBundleName='HanQ Update E2E',
            CFBundleExecutable='HanQUpdateE2E',CFBundlePackageType='APPL',CFBundleVersion=version,
            CFBundleShortVersionString='0.1.0',HanQReleaseVersion='0.1.0-beta.'+version,
            NSPrincipalClass='NSApplication',CFBundleAllowMixedLocalizations=True,
@@ -35,7 +39,8 @@ for folder, version in [('installed','1'), ('new','2')]:
            SUEnableAutomaticChecks=False,SUAllowsAutomaticUpdates=False,SUEnableSystemProfiling=False,
            SUEnableInstallerLauncherService=True,SUVerifyUpdateBeforeExtraction=True,
            NSAppTransportSecurity={'NSAllowsArbitraryLoads':True},
-           TestResultPath=str(root/'result.json'))
+           TestResultPath=str(root/'result.json'), TestRequiredPolicy=required)
+ shutil.copy2(root/'required.json',app/'Contents/Resources/required.json')
  with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
  config=dict(info,SUFeedURL='https://jungti1234.github.io/hanq/appcast.xml',
              HanQPolicyURL='https://jungti1234.github.io/hanq/policy.json',HanQPolicyPublicKey=key)

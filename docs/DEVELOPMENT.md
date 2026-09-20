@@ -25,6 +25,8 @@ Sparkle 2.10.0 공식 아카이브와 SHA-256은 `scripts/prepare-sparkle.sh`에
 
 실제 Sparkle 설치 검증용 별도 앱은 `Tests/UpdateEndToEnd/`와 `scripts/prepare-update-e2e.sh`에 있다. `.build/hanq/update-e2e/server`를 만든 뒤 `python3 Tests/UpdateEndToEnd/server.py .build/hanq/update-e2e`를 별도 터미널에서 실행하고 준비 스크립트를 실행한다. 서버는 127.0.0.1에만 바인딩한다. `installed/HanQ Update E2E.app`에서 테스트 업데이트를 실행해 설치·재실행 후 `result.json`의 빌드 2·설정 유지·동일 경로를 확인한다. 잘못된 서명과 취소 경로도 확인한다. 테스트 전용 HTTP 허용·번들 ID·임시 키는 해당 테스트 앱에만 포함된다. 종료 후 앱·서버를 닫고 `test-signing.key`를 삭제한다. 재실행할 때는 이전 테스트 디렉터리를 옮겨 새 환경을 만든다.
 
+필수 정책과 설치를 연결하는 검증은 `.build/hanq/update-required-e2e/server`를 만들고 같은 서버 스크립트에 `.build/hanq/update-required-e2e`를 전달한 뒤 `bash scripts/prepare-update-e2e.sh --required`로 준비한다. 별도 번들 `taek.in.hanq.required-tests`에서 동일하게 서명된 최소 빌드 2 정책을 유지하며 빌드 1의 제한 안내 → Sparkle 설치·재실행 → 빌드 2의 제한 해제를 확인한다. `result.json`의 `policyChecked`, `restricted`, 빌드·설정 유지 값을 검사한다. 정책 GET과 다운로드 가능 여부 HEAD는 테스트 응답이며, 실제 운영 HTTPS 정책 조회나 키 입력 중단·복귀를 대신하지 않는다. 종료 후 해당 서버와 테스트 앱을 종료하고 임시 `test-signing.key`를 삭제한다.
+
 이 검사는 한Q 배포본의 손쉬운 사용 권한 유지나 최초 다운로드 Gatekeeper 검증을 대신하지 않는다.
 
 ### 수동 테스트 창을 포함한 개발 빌드
