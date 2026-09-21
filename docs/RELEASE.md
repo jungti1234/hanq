@@ -135,3 +135,7 @@ python3 scripts/release.py draft dist/0.1.0-beta.1-build74
 - [Sparkle 업데이트 발행](https://sparkle-project.org/documentation/publishing/)
 - [Apple Developer ID](https://developer.apple.com/developer-id/)
 - [GitHub Release 관리](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+
+### 링크 공유 미리보기
+
+공유 이미지는 `updates/site/assets/hanq-social-v1.png`에 있으며 `scripts/render-social-card.py`로 생성한다(macOS 및 Pillow 필요). 이미지 교체 시 새 파일명을 사용하고 `index.html`의 Open Graph·Twitter 이미지 주소도 함께 갱신한다. 공유 서비스가 기존 카드 정보를 캐시할 수 있으므로 사이트 게시와 기존 메시지 카드 갱신은 구분한다.
