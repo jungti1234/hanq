@@ -1,1 +1,54 @@
-<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>한Q 업데이트</title><h1>한Q 업데이트</h1><p>한Q 첫 베타를 공개했습니다.</p><p><a href="https://github.com/jungti1234/hanq/releases/tag/v0.1.0-beta.1">첫 베타 다운로드 및 설치 안내</a></p><p><a href="https://github.com/jungti1234/hanq">한Q GitHub 저장소</a></p></html>
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="맥의 한영 전환부터 한자 입력, 잘못 친 영타와 분리된 자모 정리까지. macOS 메뉴바 앱 한Q로 간편하게.">
+  <meta name="theme-color" content="#f7f8fa">
+  <meta property="og:title" content="한Q — Mac의 한글 생활, 한큐에.">
+  <meta property="og:description" content="우측 Command로 한영 전환. 우측 Option으로 한자와 텍스트 변환. 익숙한 macOS 입력기는 그대로.">
+  <meta property="og:type" content="website">
+  <title>한Q — Mac의 한글 생활, 한큐에.</title>
+  <link rel="icon" href="assets/hanq-logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css?v=5f82dc9045">
+  <link rel="stylesheet" href="header.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 이동</a>
+<header class="header wrap site-header">
+  <a class="brand" href="#" aria-label="한Q 처음으로"><img src="assets/hanq-logo.svg" width="43" height="33" alt=""><span>한Q</span></a>
+  <nav aria-label="주 메뉴"><a href="#features">주요 기능</a><a href="#install">설치 안내</a><a class="nav-download" href="https://github.com/jungti1234/hanq/releases/tag/v0.1.0-beta.1">다운로드 <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main">
+  <section class="hero wrap">
+    <div class="hero-copy">
+      <h1>Mac의 한글 생활,<br><span>한큐에.</span></h1>
+      <p class="lead">한영 전환부터 한자 입력까지.<br>익숙한 입력기는 그대로, 손끝은 더 편하게.</p>
+      <div class="actions"><a class="button primary" href="https://github.com/jungti1234/hanq/releases/tag/v0.1.0-beta.1">한Q 베타 다운로드 <span aria-hidden="true">↓</span></a><a class="text-link" href="#features">어떤 앱인가요? <span aria-hidden="true">↘</span></a></div>
+      <p class="requirements">Apple Silicon · macOS 13 이상 · 무료 사용</p>
+    </div>
+    <div class="hero-art" aria-label="우측 Command로 한영 전환, 우측 Option으로 한자와 텍스트 변환">
+      <div class="language"><span>한</span><span class="swap" aria-hidden="true">⇄</span><span>A</span></div>
+      <div class="keys"><div class="key command"><span class="symbol">⌘</span><span>command</span><small>한 / 영</small></div><div class="key option"><span class="symbol">⌥</span><span>option</span><small>한자 · 변환</small></div></div>
+    </div>
+  </section>
+  <div class="principles wrap"><span>macOS 기본 입력기 그대로</span><span>복잡한 설정 없이</span><span>필요할 때, 메뉴바에서</span></div>
+  <section class="features wrap section" id="features">
+    <div class="section-heading"><p class="eyebrow">LESS FIXING, KEEP TYPING</p><h2>쓰는 흐름이<br>끊기지 않도록.</h2><p>자주 하는 동작은 간단하게.<br>다시 치던 글자는 그 자리에서 고치세요.</p></div>
+    <div class="feature-grid">
+      <article class="feature switching"><div class="feature-label"><span>01 / 한영 전환</span><kbd>우측 ⌘</kbd></div><h3>한영 전환,<br>익숙하게, 더 확실하게.</h3><p>익숙한 한영키 자리의 우측 Command로 한영을 전환해요. 전환이 누락되어 이전 언어로 입력되는 불편을 줄여주고, 바뀐 입력 소스 이름도 화면에 잠시 표시해요.</p><div class="switch-demo" aria-hidden="true"><span>안녕하세요</span><span>↔</span><span>Hello</span></div></article>
+      <article class="feature hanja"><div class="feature-label"><span>02 / 한자 입력</span><kbd>우측 ⌥</kbd></div><h3>찾던 한자도,<br>익숙한 방식으로.</h3><p>Apple 한국어 입력기에서 한글을 선택하고<br>우측 Option을 누르면 한자 후보창이 열려요.</p><div class="hanja-demo" aria-hidden="true"><span>한자</span><span>→</span><strong>漢字</strong></div></article>
+    </div>
+    <article class="playground"><div class="playground-copy"><p class="eyebrow">03 / 텍스트 변환</p><h3>다시 치지 말고,<br>한큐에 고치세요.</h3><p>영어로 잘못 친 글자, 흩어진 자모.<br>변환할 부분을 선택하고 우측 Option을 눌러보세요.</p><p class="fine">아래는 기능을 설명하는 예시 체험입니다.</p></div><div class="demo"><div class="demo-tabs" role="group" aria-label="변환 예시 선택"><button type="button" data-mode="english" aria-pressed="true">영타 → 한글</button><button type="button" data-mode="jamo" aria-pressed="false">자모 합치기</button></div><div class="demo-paper"><span class="paper-label">작성 중인 메모</span><p id="demo-text" aria-live="polite">오늘도 <mark>dkssud</mark>!</p><span id="demo-caption">영어로 잘못 친 부분을 선택했어요.</span></div><div class="demo-controls"><button class="demo-trigger" id="convert" type="button">우측 Option 누르기 <kbd>⌥</kbd></button><button class="reset" id="reset" type="button">다시 보기 ↺</button></div></div></article>
+    <p class="feature-note">텍스트 변환과 한자 입력은 편집기의 접근성 지원 및 입력 상태에 따라 동작이 다를 수 있어요.</p>
+  </section>
+  <section class="quiet-section"><div class="wrap quiet-inner"><div><p class="eyebrow">LESS SETUP, KEEP IT SIMPLE</p><h2>익숙함은 그대로.<br>편리함만 더하세요.</h2></div><div class="quiet-items"><div><span class="feature-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 15h10"/></svg></span><div><h3>새 입력기를 추가할 필요 없이</h3><p>macOS 기본 한글 입력과 Apple 한자 후보창을 사용해요.</p></div></div><div><span class="feature-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M2 9h20M15 6.5h.01M18 6.5h.01"/><path d="M6 6.5h3"/></svg></span><div><h3>메뉴바 한편에, 조용히</h3><p>Dock 아이콘 없이 메뉴바에 머물러요. 필요한 설정도 메뉴에서 바로 바꿀 수 있어요.</p></div></div><div><span class="feature-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 2.5 20 6v5c0 5-3.5 8.5-8 10.5C7.5 19.5 4 16 4 11V6l8-3.5Z"/><path d="m8.5 11.5 2.5 2.5 4.5-5"/></svg></span><div><h3>입력 내용은 수집하지 않아요</h3><p>작성한 글자와 클립보드 내용을 로그에 저장하거나 업데이트 확인 시 전송하지 않아요.</p></div></div></div></div></section>
+  <section class="install wrap section" id="install"><div class="install-heading"><p class="eyebrow">READY WHEN YOU ARE</p><h2>시작도, 한큐에.</h2><p>Apple Silicon · macOS 13 이상</p></div><ol class="steps"><li><span class="step-number">01</span><h3>다운로드하고</h3><p>릴리스 페이지의 Assets에서 <code>.dmg</code> 파일을 내려받으세요.</p></li><li><span class="step-number">02</span><h3>응용 프로그램에 넣고</h3><p>DMG를 열고 <code>HanQ.app</code>을 Applications 폴더로 복사한 뒤 실행하세요.</p></li><li><span class="step-number">03</span><h3>손쉬운 사용을 허용하면</h3><p>시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용에서 한Q를 허용하세요.</p></li></ol>
+    <aside class="beta-note"><span class="beta-label">BETA NOTE</span><div><h3>첫 실행 전에 확인해주세요.</h3><p>현재 베타는 Developer ID 서명·공증이 적용되지 않았어요. 실행이 차단되면 출처를 확인한 설치 파일에 한해 시스템 설정 → 개인정보 보호 및 보안에서 ‘그래도 열기’를 선택해주세요. 업데이트 후 손쉬운 사용 권한을 다시 허용해야 할 수 있어요.</p><a href="https://github.com/jungti1234/hanq#시작하기">자세한 설치 안내 <span aria-hidden="true">↗</span></a></div></aside>
+  </section>
+  <section class="closing wrap"><img src="assets/hanq-logo.svg" alt="" width="90" height="69"><h2>한글 쓰는 Mac에, 한Q.</h2><p>지금 쓰는 Mac에서 만나보세요.</p><a class="button primary" href="https://github.com/jungti1234/hanq/releases/tag/v0.1.0-beta.1">첫 베타 다운로드 <span aria-hidden="true">↓</span></a><span class="release-label">0.1.0-beta.1 · 개인·회사·단체 무료 사용</span></section>
+</main>
+<footer class="footer wrap"><a class="brand" href="#">한Q <span>Mac에서도 익숙하게. Quick하게, 한큐에.</span></a><div><a href="https://github.com/jungti1234/hanq">GitHub ↗</a><a href="https://docs.google.com/forms/d/e/1FAIpQLSd3EFa87qLHv1aYG0STEYZSD_RAjnAQAhTeQgSe3d-IEiNYyA/viewform" target="_blank" rel="noopener noreferrer" aria-label="피드백 (새 탭에서 열기)">피드백</a><a href="terms.html">이용 조건</a></div></footer>
+</body>
+</html>
