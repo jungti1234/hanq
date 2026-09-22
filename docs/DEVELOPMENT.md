@@ -63,6 +63,14 @@ open build/HanQ.app --args --test-hanja-panel
 
 [Resources/](../Resources/)에는 앱 아이콘 원본(`HanQ.icon`)과 번들 아이콘(`HanQ.icns`), 메뉴바 템플릿 이미지(`HanQ-MenuBar-Template.pdf`), 로고 원본(`HanQ-Logo.svg`)과 앱에서 사용하는 이미지(`HanQ-Logo.png`)가 있다.
 
+### 외부 키보드 설정 검증
+
+`bash scripts/test-external-keyboards.sh`는 임시 UserDefaults와 합성 이벤트로 기기 식별·설정 보존·두 키 등록·반복·놓음·기기 분리·다른 키보드 modifier 보존을 검사한다. `--inventory`는 실제 IORegistry에서 읽은 키보드 서비스 개수만 출력한다. `--ui`는 별도 테스트 프로세스에서 실제 설정 창을 열고 저장·취소·분리 경로를 확인하며 `.build/hanq/external-keyboard-setup.png`를 생성한다. 전역 이벤트 탭과 실제 한Q 설정은 사용하지 않는다.
+
+구현은 `ExternalKeyboardModel.swift`(식별·설정·키 상태), `ExternalKeyboardDevices.swift`(읽기 전용 기기 알림·비공개 이벤트 기기 필드), `ExternalKeyboardController.swift`(확인 흐름·기기별 처리), `ExternalKeyboardSetupView.swift`(확인 창 레이아웃)에 나뉜다. Quartz 비공개 필드 87의 값은 현재 키보드 서비스 목록과 정확히 일치할 때만 사용한다. 필드의 지속 지원이나 실제 키보드 입력과의 연결은 자동 검사로 보증하지 않는다.
+
+실물에서는 USB/Bluetooth 최초 연결·기연결 시작·다시 연결·앱 재시작·내장/외장 번갈아 입력·포커스 변경·물리 한영/한자키·동일 모델 두 대·외부 매핑 앱·잠자기·보안 입력을 확인한다. 일련번호가 없는 기기의 포트 변경과 연결 방식 변경은 새 기기 등록이 필요할 수 있다. 연결 위치마저 없는 기기는 재연결 시 다시 등록한다.
+
 ## 수정 시 주의할 점
 
 ### 권한과 프로세스 수명

@@ -61,6 +61,9 @@ def prepare(app):
     version = info['HanQReleaseVersion']
     build = info['CFBundleVersion']
     notes = release_notes(version)
+    html_notes = ROOT / 'updates/site/release-notes' / f'{version}.html'
+    if not html_notes.is_file():
+        raise SystemExit(f'Write update-window release notes first: {html_notes}')
     if info['CFBundleIdentifier'] != 'taek.in.hanq' or not re.fullmatch(r'\d+\.\d+\.\d+(-beta\.[1-9]\d*)?', version) or not re.fullmatch(r'[1-9]\d*', build):
         raise SystemExit('Invalid release identity')
     if run('lipo', '-archs', app / 'Contents/MacOS/HanQ') != 'arm64':
@@ -109,6 +112,8 @@ def prepare(app):
         ET.SubElement(channel, 'link').text = 'https://github.com/jungti1234/hanq'
         item = ET.SubElement(channel, 'item')
         ET.SubElement(item, 'title').text = f'한Q {version}'
+        feed = json.loads((ROOT / 'updates/config.json').read_text())['feedURL']
+        ET.SubElement(item, f'{{{SPARKLE_NS}}}releaseNotesLink').text = feed.rsplit('/', 1)[0] + f'/release-notes/{version}.html'
         for field, value in [('version', build), ('shortVersionString', version),
                              ('minimumSystemVersion', info['LSMinimumSystemVersion']), ('hardwareRequirements', 'arm64')]:
             ET.SubElement(item, f'{{{SPARKLE_NS}}}{field}').text = value

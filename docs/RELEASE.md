@@ -92,7 +92,7 @@ python3 scripts/release.py prepare
 python3 scripts/release.py draft dist/0.1.0-beta.1-build74
 ```
 
-`prepare`는 해당 버전의 릴리스 노트가 있고 제목의 버전이 일치하는지 먼저 확인한다. CHANGELOG에서 본문을 자동 생성하지 않는다. 후보 앱과 현재 빌드 입력 해시가 일치하는지 확인하고, 개발 빌드는 거부한다. 승인된 로고·설치 안내·버전 표시 디자인의 HFS+·ULFO DMG를 생성해 읽기 전용 마운트·앱 서명·실행 파일 일치·Applications 링크를 확인한 뒤 Sparkle 서명과 체크섬을 검증한다. `dist/<버전>-build<번호>/`에 DMG·SHA256SUMS·release-metadata.json·release-notes.md·appcast-candidate.xml을 남긴다. 기존 산출물 디렉터리는 덮어쓰지 않는다.
+`prepare`는 해당 버전의 릴리스 노트가 있고 제목의 버전이 일치하는지 먼저 확인한다. CHANGELOG에서 본문을 자동 생성하지 않는다. 업데이트 창용 `updates/site/release-notes/<버전>.html`도 준비해야 하며 appcast의 `sparkle:releaseNotesLink`로 연결한다. 피드 게시 시 해당 HTML을 함께 게시하고 실제 HTTPS 응답을 확인한다. 후보 앱과 현재 빌드 입력 해시가 일치하는지 확인하고, 개발 빌드는 거부한다. 승인된 로고·설치 안내·버전 표시 디자인의 HFS+·ULFO DMG를 생성해 읽기 전용 마운트·앱 서명·실행 파일 일치·Applications 링크를 확인한 뒤 Sparkle 서명과 체크섬을 검증한다. `dist/<버전>-build<번호>/`에 DMG·SHA256SUMS·release-metadata.json·release-notes.md·appcast-candidate.xml을 남긴다. 기존 산출물 디렉터리는 덮어쓰지 않는다.
 
 노트를 수정한 경우 검토한 원본을 산출물의 `release-notes.md`에도 반영한다. `draft`는 두 파일이 다르면 중단한다. 기존 Draft의 본문 수정은 `gh release edit <태그> --notes-file docs/releases/<버전>.md`로 수행하며 공개 상태는 변경하지 않는다.
 

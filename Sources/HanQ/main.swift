@@ -7,6 +7,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let updater = AppUpdater()
     var updateRestricted = false
     let jamoRepair = JamoRepair()
+    lazy var externalKeyboards: ExternalKeyboardController = {
+        let controller = ExternalKeyboardController()
+        controller.canConfigure = { [weak self] in
+            guard let self else { return false }
+            return self.permissionGranted && !self.updateRestricted && self.tap != nil && self.enabled
+                && !self.filter.consuming && !self.optionFilter.consuming
+        }
+        controller.onBeginCapture = { [weak self] in self?.jamoRepair.inputDidChange() }
+        return controller
+    }()
     let hud = HUDController()
     let inputSource = InputSourceObserver()
     var sourceObservations = 0
@@ -24,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     var permissionGranted = false
     var pendingActivation = true
-    let status = NSTextField(wrappingLabelWithString: "한영·한자 꺼짐")
+    let status = NSTextField(wrappingLabelWithString: "한영키·한자키 꺼짐")
     var tap: CFMachPort?
     var tapSource: CFRunLoopSource?
     var optionFilter = CommandFilter(keyCode: 61, left: 0x20, right: 0x40, aggregate: .maskAlternate)
@@ -70,6 +80,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         capsItem.toolTip = "시스템 설정에 반영되며, 한Q를 종료해도 유지됩니다."
         menuStatus.isEnabled = false
         statusMenu.addItem(menuStatus)
+        statusMenu.addItem(externalKeyboards.menuSeparator)
+        statusMenu.addItem(externalKeyboards.menuItem)
         statusMenu.addItem(.separator())
         toggleItem.target = self; statusMenu.addItem(toggleItem)
         capsItem.target = self; capsItem.indentationLevel = 1; statusMenu.addItem(capsItem)
@@ -256,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else { pendingActivation = false }
         }
         refreshStatus()
+        externalKeyboards.tick()
     }
 
     func setUpdateRestricted(_ restricted: Bool) {
@@ -274,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func startMapping() {
         guard !updateRestricted else { return }
-        guard !filter.consuming && !optionFilter.consuming else { status.stringValue = "우측 Command와 Option을 놓은 뒤 다시 시작하세요."; return }
+        guard !filter.consuming && !optionFilter.consuming && !externalKeyboards.consuming else { status.stringValue = "누른 한영키와 한자키를 놓은 뒤 다시 시작하세요."; return }
         guard !CGEventSource.keyState(.combinedSessionState, key: 54) && !CGEventSource.keyState(.combinedSessionState, key: 61) else {
             status.stringValue = "우측 Command와 Option을 놓은 뒤 시작하세요."; return
         }
@@ -320,10 +333,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 let active = owner.enabled && !IsSecureEventInputEnabled()
                 let key = event.getIntegerValueField(.keyboardEventKeycode)
-                let target = active && owner.koreanEnabled && type == .flagsChanged && key == 54
+                let snapshot = owner.externalKeyboards.wantsInputSource(type: type, event: event)
+                    ? InputSourceSnapshot.read() : nil
+                let externalTarget = active && owner.koreanEnabled && snapshot != nil ? KoreanEnglishSwitch.target(for: snapshot) : nil
+                let external = owner.externalKeyboards.process(type: type, event: event, active: active,
+                    koreanAllowed: externalTarget != nil, hanjaAllowed: owner.hanjaEnabled)
+                if external.korean, let externalTarget {
+                    let selection = KoreanEnglishSwitch.select(externalTarget)
+                    DispatchQueue.main.async {
+                        owner.inputSource.refresh()
+                        if selection != 0 { NSLog("입력 소스 전환 실패: %d", selection) }
+                    }
+                }
+                if external.hanja {
+                    owner.jamoRepair.request(allowHanja: snapshot.map {
+                        $0.isKorean && $0.id.hasPrefix("com.apple.inputmethod.Korean.")
+                    } == true)
+                }
+                if external.consume { return nil }
+                event.flags = external.flags
+                let legacyKey = external.handled ? Int64(-1) : key
+                let target = active && !external.handled && owner.koreanEnabled && type == .flagsChanged && key == 54
                     ? KoreanEnglishSwitch.target(for: InputSourceSnapshot.read()) : nil
                 let result = owner.filter.process(type: type,
-                    key: event.getIntegerValueField(.keyboardEventKeycode),
+                    key: legacyKey,
                     flags: event.flags, acceptNewPress: active && target != nil)
                 if let edge = result.edge {
                     if edge == "right-down" {
@@ -337,10 +370,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                     owner.refreshStatus()
                 }
-                let isKorean = active && owner.hanjaEnabled && type == .flagsChanged && key == 61
+                let isKorean = active && !external.handled && owner.hanjaEnabled && type == .flagsChanged && key == 61
                     && InputSourceSnapshot.read().map { $0.isKorean && $0.id.hasPrefix("com.apple.inputmethod.Korean.") } == true
-                let option = owner.optionFilter.process(type: type, key: key,
-                    flags: result.flags, acceptNewPress: active && owner.hanjaEnabled && result.flags.intersection([.maskCommand, .maskControl, .maskShift]).isEmpty)
+                let option = owner.optionFilter.process(type: type, key: legacyKey,
+                    flags: result.flags, acceptNewPress: active && !external.handled && owner.hanjaEnabled && result.flags.intersection([.maskCommand, .maskControl, .maskShift]).isEmpty)
                 if option.edge == "right-up", active && owner.hanjaEnabled {
                     owner.jamoRepair.request(allowHanja: isKorean)
                 }
@@ -364,6 +397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             freshPermission.start()
         }
         enabled = true
+        externalKeyboards.start()
 
         refreshStatus()
     }
@@ -389,12 +423,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         filter = CommandFilter()
         optionFilter = CommandFilter(keyCode: 61, left: 0x20, right: 0x40, aggregate: .maskAlternate)
         jamoRepair.inputDidChange()
+        externalKeyboards.stop()
         InputDiagnostics.shared.record("tap.stop.end")
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         refreshStatus()
         refreshLaunchAtLogin()
+        externalKeyboards.updateMenu()
     }
     private func refreshLaunchAtLogin() {
         switch SMAppService.mainApp.status {
