@@ -64,7 +64,7 @@
 
 ## 시작하기
 
-[첫 베타 다운로드 · 0.1.0-beta.1](https://github.com/jungti1234/hanq/releases/tag/v0.1.0-beta.1)
+[베타 다운로드 · 0.2.0-beta.1](https://github.com/jungti1234/hanq/releases/tag/v0.2.0-beta.1)
 
 이번 베타는 Developer ID 서명·공증 미적용이며, 정식 출시 전 베타 단계에서 적용할 예정입니다.
 

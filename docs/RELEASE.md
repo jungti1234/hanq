@@ -1,6 +1,6 @@
 # 한Q 배포 안내
 
-이 문서는 배포 구성과 준비 절차를 설명한다. 업데이트 메뉴·필수 업데이트 정책·DMG와 Draft Release 준비 도구를 구현했다. 브라우저 다운로드 설치와 실제 앱의 업데이트 교체·재실행·설정 보존을 확인했다. [첫 베타 0.1.0-beta.1](https://github.com/jungti1234/hanq/releases/tag/v0.1.0-beta.1)을 공개했으며 GitHub Releases에서 다운로드할 수 있다.
+이 문서는 배포 구성과 준비 절차를 설명한다. 업데이트 메뉴·필수 업데이트 정책·DMG와 Draft Release 준비 도구를 구현했다. 브라우저 다운로드 설치와 실제 앱의 업데이트 교체·재실행·설정 보존을 확인했다. [베타 0.2.0-beta.1](https://github.com/jungti1234/hanq/releases/tag/v0.2.0-beta.1)을 공개했으며 GitHub Releases에서 다운로드할 수 있다.
 
 현재 ad-hoc 서명에서는 업데이트 전후 코드 식별값이 달라 손쉬운 사용 권한을 재허용해야 할 수 있다. 검증 환경에서 저장된 이전 빌드의 권한 조건을 새 빌드가 충족하지 못함을 확인했다. Developer ID 서명 도입 후 동일 서명 정체성을 유지하는 두 버전으로 다시 검증한다. 공증과 코드 서명에 따른 권한 식별은 별개다.
 
@@ -19,10 +19,10 @@ GitHub 머지·업로드, 배포 태그 발행, 배포용 서명·공증, Draft 
 | 구성 | 역할 및 상태 |
 | --- | --- |
 | GitHub 소스 저장소 | [jungti1234/hanq](https://github.com/jungti1234/hanq) 공개 저장소에서 관리 |
-| GitHub Releases | 첫 베타 설치 파일과 릴리스 노트 제공 |
+| GitHub Releases | 베타 설치 파일과 릴리스 노트 제공 |
 | DMG | 앱과 Applications 바로가기를 포함한 후보 생성·마운트·서명 검증 구현 |
 | Sparkle 2.10.0 | 프레임워크·조회·메뉴 연결. 별도 앱에서 DMG 교체·재실행·설정 유지 확인 |
-| HTTPS appcast | GitHub Pages에 첫 베타 빌드 74 등록 |
+| HTTPS appcast | GitHub Pages에 빌드 82 및 업데이트 창용 릴리스 노트 게시 |
 | 서명된 업데이트 정책 | 최소 허용 빌드·적용 대상·사유·시점을 관리. GitHub Pages에 별도 파일 게시. 현재 제한 규칙 없음 |
 
 한Q는 단일 앱을 복사해 사용하는 구조이므로 PKG는 현재 필요하지 않다. DMG에서 Applications로 복사한 뒤 실행하도록 안내한다. GitHub의 자동 생성 `Source code (zip)`은 실행 앱이 아니다.

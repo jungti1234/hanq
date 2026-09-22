@@ -4,6 +4,18 @@
     <title>한Q 업데이트</title>
     <link>https://github.com/jungti1234/hanq</link>
     <item>
+      <title>한Q 0.2.0-beta.1</title>
+      <sparkle:releaseNotesLink>https://jungti1234.github.io/hanq/release-notes/0.2.0-beta.1.html</sparkle:releaseNotesLink>
+      <sparkle:version>82</sparkle:version>
+      <sparkle:shortVersionString>0.2.0-beta.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+      <sparkle:channel>beta</sparkle:channel>
+      <enclosure url="https://github.com/jungti1234/hanq/releases/download/v0.2.0-beta.1/HanQ-0.2.0-beta.1-build82-arm64.dmg" sparkle:edSignature="uJZVSILMn/Ez7og1oWwvr9R8wjD0cOFoKfqhsdLs5QgGgXxige2PD6IH/XP2y/Zy5oaF6tZZVJncNdl1aY+yBA==" length="3079301" type="application/octet-stream" />
+      <pubDate>Tue, 22 Sep 2026 17:06:34 +0000</pubDate>
+      <link>https://github.com/jungti1234/hanq/releases/tag/v0.2.0-beta.1</link>
+    </item>
+    <item>
       <title>한Q 0.1.0-beta.1</title>
       <sparkle:version>74</sparkle:version>
       <sparkle:shortVersionString>0.1.0-beta.1</sparkle:shortVersionString>
