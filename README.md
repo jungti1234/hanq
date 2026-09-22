@@ -60,6 +60,7 @@
   - macOS 26.4.1 (Tahoe)
   - macOS 26.5.2 (Tahoe)
   - macOS 26.6.2 (Tahoe)
+  - macOS 27.0 (Golden Gate)
   - 추가 환경 확인 시 업데이트
 
 ## 시작하기
