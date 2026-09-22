@@ -14,6 +14,8 @@ GitHub 머지·업로드, 배포 태그 발행, 배포용 서명·공증, Draft 
 
 [버전 관리 규칙](VERSIONING.md)에 따라 `version.env`의 배포 값을 확정하고, [CHANGELOG](../CHANGELOG.md)를 참고해 `docs/releases/<RELEASE_VERSION>.md`에 공개용 릴리스 노트를 작성한다. 첫 줄은 `# 한Q <RELEASE_VERSION>`으로 맞추고, 사용자에게 필요한 기능·설치 안내·알려진 제한을 정리한다. 내부 후보 빌드 이력과 준비 작업은 그대로 옮기지 않는다.
 
+게시 전에 GitHub Markdown 렌더링 결과와 업데이트 창용 HTML을 확인한다. `**업데이트 확인…**으로`처럼 문장부호 뒤에 조사가 붙으면 별표가 그대로 표시될 수 있으므로, 렌더링된 본문에 남은 Markdown 기호를 점검하고 `<strong>` 또는 일반 문구로 수정한다.
+
 ## 배포 구성
 
 | 구성 | 역할 및 상태 |
