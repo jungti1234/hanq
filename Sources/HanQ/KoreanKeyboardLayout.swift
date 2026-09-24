@@ -6,6 +6,9 @@ struct KoreanKeyboardLayout {
     enum Kind { case twoSet, threeSet }
     let kind: Kind
     let keys: [Character: Character]
+    // Preserve Apple's physical positions for features that replay real keys.
+    var physicalKeys: [UInt16: Character] = [:]
+    var shiftedPhysicalKeys: [UInt16: Character] = [:]
 
     static let twoSetID = "com.apple.inputmethod.Korean.2SetKorean"
     static let threeSetID = "com.apple.inputmethod.Korean.3SetKorean"
@@ -93,7 +96,9 @@ struct KoreanKeyboardLayout {
         guard keys.count == 94, keys.values.contains(where: { char in
             char.unicodeScalars.contains { (0x1100...0x11C2).contains($0.value) }
         }) else { return nil }
-        return KoreanKeyboardLayout(kind: .threeSet, keys: keys)
+        return KoreanKeyboardLayout(kind: .threeSet, keys: keys,
+            physicalKeys: Dictionary(uniqueKeysWithValues:lower.map{(UInt16($0.key),$0.value)}),
+            shiftedPhysicalKeys: Dictionary(uniqueKeysWithValues:upper.map{(UInt16($0.key),$0.value)}))
     }
 }
 

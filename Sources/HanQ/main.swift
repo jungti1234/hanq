@@ -7,6 +7,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let updater = AppUpdater()
     var updateRestricted = false
     let jamoRepair = JamoRepair()
+    lazy var onsetRecovery: OnsetRecoveryController = {
+        let controller = OnsetRecoveryController()
+        controller.canRun = { [weak self] in
+            guard let self else { return false }
+            return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
+        }
+        controller.canBeginRepair = { [weak self] in
+            guard let self else { return false }
+            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing
+        }
+        controller.willBeginRepair = { [weak self] in self?.jamoRepair.inputDidChange() }
+        return controller
+    }()
     lazy var externalKeyboards: ExternalKeyboardController = {
         let controller = ExternalKeyboardController()
         controller.canConfigure = { [weak self] in
@@ -128,6 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.sourceObservations += 1
             if self.permissionGranted && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name) }
         }
+        jamoRepair.canBeginEdit = { [weak self] in self?.onsetRecovery.prepareManualEdit() ?? false }
         inputSource.start()
         window.center()
         let pulse = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -327,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     DispatchQueue.main.async { owner.stopMapping() }
                     return Unmanaged.passUnretained(event)
                 }
-                if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 { return Unmanaged.passUnretained(event) }
+                if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) { return Unmanaged.passUnretained(event) }
                 if [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
                     owner.jamoRepair.inputDidChange(type: type, key: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
                 }
@@ -398,6 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         enabled = true
         externalKeyboards.start()
+        onsetRecovery.start()
 
         refreshStatus()
     }
@@ -406,6 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Called outside the tap callback. The watchdog stays armed until cleanup ends.
     func stopMapping() {
         InputDiagnostics.shared.record("tap.stop.begin present=\(tap != nil)")
+        onsetRecovery.stop()
         enabled = false
         koreanEnabled = false
         hanjaEnabled = false

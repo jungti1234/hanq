@@ -7,6 +7,8 @@ import Carbon
 final class JamoRepair {
     private var revision = 0
     private var busy = false
+    var isEditing: Bool { busy || watchingHanja }
+    var canBeginEdit: () -> Bool = { true }
     private let marker: Int64 = 0x454F5448
     private var hanjaWatchID = 0
     private var watchingHanja = false
@@ -53,6 +55,7 @@ final class JamoRepair {
                   InputSourceSnapshot.read()?.id == inputSourceID,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
                   !IsSecureEventInputEnabled() else { return }
+            guard self.canBeginEdit() else { return }
             self.perform(pid: pid, allowHanja: allowHanja, inputSourceID: inputSourceID)
         }
     }

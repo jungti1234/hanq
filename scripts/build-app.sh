@@ -64,6 +64,7 @@ cp LICENSE "$app/Contents/Resources/LICENSE.txt"
 swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Tests/main.swift -o "$stage/filter-tests"
 "$stage/filter-tests"
 bash scripts/test-external-keyboards.sh
+bash scripts/test-onset-recovery.sh
 bash scripts/test-diagnostics.sh
 bash scripts/test-lifecycle.sh
 bash scripts/test-watchdog.sh

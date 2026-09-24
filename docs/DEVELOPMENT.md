@@ -95,7 +95,13 @@ open build/HanQ.app --args --test-hanja-panel
 
 Caps Lock 전환 설정의 비공개 HIToolbox API 호출은 `RomanSwitchController.swift`에 격리한다. [Roman Switch 명세](SPEC.md#roman-switch-직접-제어--현재-구현-계약)를 기준으로 새 macOS에서 ABI·심볼 로딩 실패·설정 후 실제 상태를 확인한다. 최초 실행에 사용자의 시스템 설정을 덮어쓰지 않는다.
 
+## 첫 자음 조합 보정 개발
+
+`OnsetRecoveryController.swift`가 대상 앱과 한Q 입력 수명을 연결하고, `OnsetRecoveryEngine.swift`와 `OnsetInputGate.swift`가 보정·입력 대기를 담당한다. 실험 도구의 입력 로그와 UI는 제품에 포함하지 않는다. `bash scripts/test-onset-recovery.sh`는 실제 키 전송 없이 제품 엔진의 선택 대체·선택 해제 지연·선택 재시도·입력 순서·실패 복원을 검사한다. AppKit 검사는 제한된 실행 샌드박스 밖에서 수행한다. 실제 검증 시 독립 OnsetRecoveryProbe를 먼저 종료하여 두 보정기가 겹치지 않게 한다.
+
 ## 검증과 진단
+
+첫 자음 보정을 제외한 비교 진단은 실행 중인 한Q를 종료한 뒤 `open build/HanQ.app --args --disable-onset-recovery`로 시작한다. 해당 실행에만 적용하며 일반 실행은 보정을 활성화한다.
 
 `bash scripts/test-versioning.sh`는 기존 앱이 없는 작업 폴더에서도 버전이 동일한지와 버전 형식 검사를 확인한다. `bash scripts/build-app.sh --print-version`으로 앱을 교체하지 않고 현재 배포 준비 번호를 확인할 수 있다.
 
