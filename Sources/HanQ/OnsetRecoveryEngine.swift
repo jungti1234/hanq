@@ -9,9 +9,6 @@ func onsetSourceID()->String {
 struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange }
 final class OnsetRecoveryEngine:NSObject {
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
-    var statusText=""
-    var startEnabled=true
-    var stopEnabled=false
     var canBeginRepair: () -> Bool = { true }
     var willBeginRepair: () -> Void = {}
     var didStop:(()->Void)?
@@ -43,18 +40,11 @@ final class OnsetRecoveryEngine:NSObject {
     var gate:OnsetInputGate?
     var gateThread:OnsetGateThread?
     var lastEditable:OnsetSnapshot?
-    var outsideBaseline:OnsetSnapshot?
-    var cachedSnapshot:OnsetSnapshot?
-    var cachedReason=""
-    var cachedAt=0.0
-    var tap:CFMachPort?
-    var runSource:CFRunLoopSource?
     var timer:Timer?
     var lastSource=""
     var onset=OnsetRecoveryDetector()
     var plan:OnsetRecoveryPlan?
     var planElement:AXUIElement?
-    var planStart=0.0
     var matchCount=0
     var matchingRoman=""
     var recovering=false
@@ -63,8 +53,6 @@ final class OnsetRecoveryEngine:NSObject {
     var lastText:String?
     var unavailableReason=""
     var lastAvailability=""
-    var started=0.0
-    var replayCount=0
     var postedToGate=0
     var acknowledgmentWaitBegan:Double?
     var acknowledgmentClock:()->Double = { ProcessInfo.processInfo.systemUptime }
@@ -106,9 +94,8 @@ final class OnsetRecoveryEngine:NSObject {
         retainedInput.append(contentsOf:pending);pending=[]
         recovering=false;rollingBack=false;waitingForContext=true
         resumeObservedAt=nil;resumeField=nil;currentPlan=nil;plan=nil;onset.cancel()
-        cachedSnapshot=nil;cachedAt=0;outsideBaseline=nil;lastEditable=nil
+        lastEditable=nil
         log("repair_paused",["reason":reason,"retainedEvents":retainedInput.count])
-        statusText="보정 대기 · 입력창 확인 후 자동 재개"
     }
     func resumeIfReady(now:Double=ProcessInfo.processInfo.systemUptime){
         guard enabled,waitingForContext else{return}
@@ -121,10 +108,9 @@ final class OnsetRecoveryEngine:NSObject {
         }
         guard now-since>=0.1 else{return}
         waitingForContext=false;resumeObservedAt=nil;resumeField=nil
-        onset.cancel();plan=nil;currentPlan=nil;planElement=nil;outsideBaseline=nil
-        lastEditable=snap;cachedSnapshot=snap;cachedAt=ProcessInfo.processInfo.systemUptime;cachedReason=""
+        onset.cancel();plan=nil;currentPlan=nil;planElement=nil
+        lastEditable=snap
         log("repair_resumed",["retainedEvents":retainedInput.count])
-        statusText="보정 재개 · 새 입력부터 감지"
     }
     func retainPrefixRemainder(){
         let rest=prefixRemainder;prefixRemainder=[]
@@ -215,7 +201,6 @@ final class OnsetRecoveryEngine:NSObject {
         if let testPost { testPost(event) } else { postedToGate+=1;event.post(tap:.cghidEventTap) };return true }
     var heldKeys=Set<Int64>()
     var lastAXFailure=""
-    var diagnosticQueued=false
     var accessibilityRequested=false
     var lastFocusRoute=""
     let systemAX=AXUIElementCreateSystemWide()
@@ -256,11 +241,9 @@ final class OnsetRecoveryEngine:NSObject {
         gate?.stop();collectHeld()
         enabled=false;recovering=false;rollingBack=false;plan=nil;onset.cancel()
         // Detach before logging or making any further accessibility calls.
-        if let tap{CGEvent.tapEnable(tap:tap,enable:false);CFMachPortInvalidate(tap)};tap=nil
-        if let runSource{CFRunLoopRemoveSource(CFRunLoopGetMain(),runSource,.commonModes)};runSource=nil
         timer?.invalidate();timer=nil
         log("safety_stop",["reason":reason,"retainedEvents":pending.count])
-        closeSession();statusText="관찰 종료: " + reason;didStop?()
+        closeSession();didStop?()
     }
     func collectHeld(){
         for event in gate?.take() ?? [] {
@@ -286,20 +269,6 @@ final class OnsetRecoveryEngine:NSObject {
             gate?.beat();return
         }
         sample();gate?.beat()
-    }
-    func diagnosticSample(){
-        guard enabled else{return}
-        guard AXIsProcessTrusted() else{emergencyStop("accessibility_permission_revoked");return}
-        let snap=snapshot();observeAvailability(snap)
-        if let snap,lastText != snap.text{lastText=snap.text;log("observed_text",["text":snap.text,"selection":[snap.selection.location,snap.selection.length],"source":currentSource()])}
-    }
-    func diagnosticEvent(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
-        // Listen-only callback: no AX calls, logging, waiting, or event suppression.
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            enabled=false
-            DispatchQueue.main.async{[weak self] in self?.emergencyStop("event_tap_disabled")}
-        }
-        return Unmanaged.passUnretained(event)
     }
     func snapshot()->OnsetSnapshot?{
         if let testSnapshot{return testSnapshot()}
@@ -334,7 +303,6 @@ final class OnsetRecoveryEngine:NSObject {
         }
         guard let snap else{
             plan=nil;heldKeys=[]
-            statusText="감지 대기: " + unavailableReason
             return
         }
         observeFieldChanges(snap.element)
@@ -344,7 +312,6 @@ final class OnsetRecoveryEngine:NSObject {
             // A new composer is a new transaction boundary. Never reuse the old field's repair range.
             lastSource=onsetSourceID()
         }
-        statusText="감지 중 · " + (currentLayout() != nil ? "한국어" : "영어/기타")
     }
     func setRange(_ element:AXUIElement,_ range:NSRange)->AXError{guard gate?.healthy() ?? true else{return .cannotComplete};if let testSetRange{return testSetRange(element,range)};var cf=CFRange(location:range.location,length:range.length);return AXUIElementSetAttributeValue(element,kAXSelectedTextRangeAttribute as CFString,AXValueCreate(.cfRange,&cf)!)}
     // Deliberately discard all probe payloads: they can contain user text and keys.
@@ -352,7 +319,7 @@ final class OnsetRecoveryEngine:NSObject {
         InputDiagnostics.shared.record("onset.\(kind)")
     }
     @objc func start(){
-        guard !enabled,tap==nil else{return}
+        guard !enabled else{return}
         guard AXIsProcessTrusted(),!IsSecureEventInputEnabled() else{return}
         target=NSWorkspace.shared.frontmostApplication
         guard let target,OnsetRecoveryController.supports(pid:target.processIdentifier) else{return}
@@ -362,7 +329,7 @@ final class OnsetRecoveryEngine:NSObject {
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}
         gate.beat();gateThread=OnsetGateThread(gate)
-        enabled=true;recovering=false;lastEditable=nil;outsideBaseline=nil;pending=[];plan=nil;locked=nil;lastText=nil;lastSource=onsetSourceID();heldKeys=[];started=ProcessInfo.processInfo.systemUptime
+        enabled=true;recovering=false;lastEditable=nil;pending=[];plan=nil;locked=nil;lastText=nil;lastSource=onsetSourceID();heldKeys=[]
         log("session_start",["toolVersion":"0.1.19","build":20,"mode":"first_consonant","targetPID":target.processIdentifier,"source":lastSource])
         timer=Timer.scheduledTimer(withTimeInterval:0.02,repeats:true){[weak self] _ in self?.automaticTick()}
         gateThread?.start()
@@ -376,13 +343,7 @@ final class OnsetRecoveryEngine:NSObject {
             CFRunLoopAddSource(CFRunLoopGetMain(),AXObserverGetRunLoopSource(observer),.commonModes)
         }
         log("observer_created",["result":observerResult.rawValue])
-        startEnabled=false;stopEnabled=true;statusText="자동 보정 대기 · 한국어 상태에서 입력창 밖을 클릭한 뒤 타이핑하세요."
 
-    }
-    func sourceChanged(_ now:String,_ snap:OnsetSnapshot){
-        guard now != lastSource else{return}
-        log("source_change",["from":lastSource,"to":now]);lastSource=now
-        plan=nil;onset.cancel();matchCount=0;matchingRoman=""
     }
     func event(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
         if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==0x454F5448{return Unmanaged.passUnretained(event)}
@@ -393,7 +354,7 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func sample(){
         guard enabled,!recovering else{return}
-        let observed=snapshot();cachedSnapshot=observed;cachedReason=unavailableReason;cachedAt=ProcessInfo.processInfo.systemUptime;observeAvailability(observed)
+        let observed=snapshot();observeAvailability(observed)
         sampleEarly(observed)
     }
 
@@ -552,7 +513,6 @@ final class OnsetRecoveryEngine:NSObject {
             for (index,event) in events.enumerated(){
                 prefixRemainder=Array(events.dropFirst(index))
                 guard post(event) else{park("prefix_post_rejected");return}
-                replayCount+=1
             }
             prefixRemainder=[]
             log("prefix_posted",["events":events.count,"mode":"ordered_burst"])
@@ -565,7 +525,6 @@ final class OnsetRecoveryEngine:NSObject {
             let fromBuffer=prefix.isEmpty
             guard post(event) else{park("buffer_post_rejected");return}
             if fromBuffer{pending.removeFirst()}
-            replayCount+=1
             if fromBuffer {
                 postedBuffered+=1
                 log("buffer_event_posted",["id":saved.getIntegerValueField(.eventSourceUserData),"code":saved.getIntegerValueField(.keyboardEventKeycode),"eventType":saved.type.rawValue,"rollback":rollback])
@@ -588,8 +547,8 @@ final class OnsetRecoveryEngine:NSObject {
             self.log(rollback ? "rollback_finished" : "recovery_finished",["bufferedEvents":self.nextBufferedID-self.bufferedBase,"postedEvents":self.postedBuffered,"pendingEvents":0,"postingIsNotAppAcknowledgment":true,"recoveryMs":(ProcessInfo.processInfo.systemUptime-self.recoveryBegan)*1000])
             if let snap=self.snapshot(){self.log("after_replay_snapshot",["text":snap.text,"source":self.lastSource,"selection":[snap.selection.location,snap.selection.length]])}
             if rollback{
-                self.gate?.stop();self.enabled=false;self.didStop?();self.statusText="복구 중단 · 원래 커서 복귀 후 대기 키 \(self.postedBuffered)개 재전달"
-            }else{self.statusText="복구 키 전달 완료 · 이어서 입력하세요."}
+                self.gate?.stop();self.enabled=false;self.didStop?()
+            }
             if self.stopAfterRollback{self.stopAfterRollback=false;self.closeSession()}
         }
     }
@@ -631,7 +590,6 @@ final class OnsetRecoveryEngine:NSObject {
         // Keep uncertain input in memory; never inject it into a different field.
         log("pending_retained",["reason":reason,"events":pending.map{["id":$0.getIntegerValueField(.eventSourceUserData),"eventType":Int($0.type.rawValue),"code":$0.getIntegerValueField(.keyboardEventKeycode),"flags":$0.flags.rawValue]}])
         recovering=false;rollingBack=false;enabled=false;plan=nil;didStop?()
-        statusText="자동 반환 중단: \(reason). 미전달 이벤트 \(pending.count)개 보존"
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
     @objc func stop(){
@@ -648,10 +606,6 @@ final class OnsetRecoveryEngine:NSObject {
         axObserver=nil;observedField=nil;updateQueued=false
         gate?.stop();collectHeld()
         enabled=false;timer?.invalidate();timer=nil
-        if let tap{CGEvent.tapEnable(tap:tap,enable:false);CFMachPortInvalidate(tap)};tap=nil
-        if let runSource{CFRunLoopRemoveSource(CFRunLoopGetMain(),runSource,.commonModes)};runSource=nil
         log("session_end",["undeliveredEvents":pending.count+retainedInput.count])
-        startEnabled=pending.isEmpty;stopEnabled=false
-        if pending.isEmpty{statusText="종료 · 결과 파일을 확인하세요."}
     }
 }

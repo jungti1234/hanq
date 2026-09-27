@@ -137,7 +137,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
             }
             p.sample();let deadline=Date().addingTimeInterval(0.5)
             while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
-            testCheck(text==syllable && !p.recovering && p.pending.isEmpty,"code=\(code) text=\(text) sent=\(sent.count) pending=\(p.pending.count) status=\(p.statusText)")
+            testCheck(text==syllable && !p.recovering && p.pending.isEmpty,"code=\(code) text=\(text) sent=\(sent.count) pending=\(p.pending.count) enabled=\(p.enabled) recovering=\(p.recovering) waiting=\(p.waitingForContext)")
             testCheck(sent.count==6 && sent[3].type == .flagsChanged && !sent[3].flags.contains(.maskShift),"Shift release stays ordered before vowel")
             p.closeSession()
         }
@@ -342,7 +342,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     }
     let deadline=Date().addingTimeInterval(2)
     while probe.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
-    guard !probe.recovering && codes==[13,40,1] && probe.pending.isEmpty && text=="잔" else { print("FAIL recovery codes=\(codes) pending=\(probe.pending.count) status=\(probe.statusText) requests=\(selectionRequests)"); exit(1) }
+    guard !probe.recovering && codes==[13,40,1] && probe.pending.isEmpty && text=="잔" else { print("FAIL recovery codes=\(codes) pending=\(probe.pending.count) enabled=\(probe.enabled) recovering=\(probe.recovering) waiting=\(probe.waitingForContext) requests=\(selectionRequests)"); exit(1) }
     if ignoreFirst{testCheck(selectionRequests==2,"ignored first selection retried once");print("PASS: ignored first selection request recovered by one bounded retry")}
     print("PASS: single consonant replay followed by buffered vowel and final consonant; simulated editor, no source switching or actual key posting")
 } else if ProcessInfo.processInfo.arguments.contains("--test-selected-replacement") {
