@@ -92,7 +92,7 @@ final class OnsetRecoveryController: NSObject {
     }
     func prepareManualEdit() -> Bool {
         guard engine?.recovering != true else { return false }
-        engine?.onset.cancel(); engine?.plan = nil
+        engine?.onset.cancel()
         return true
     }
 

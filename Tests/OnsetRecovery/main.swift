@@ -299,17 +299,15 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     let b=OnsetSnapshot(element:second,text:"",selection:NSRange(location:0,length:0))
     owner.observeAvailability(a)
     testCheck(owner.locked.map{CFEqual($0,first)} == true)
-    owner.plan=OnsetRecoveryPlan(before:"draft",caret:5)
-    owner.planElement=first;owner.matchCount=1;owner.heldKeys=[2]
+    owner.planElement=first
     owner.observeAvailability(a)
-    testCheck(owner.plan != nil && owner.matchCount==1)
+    testCheck(owner.planElement.map{CFEqual($0,first)} == true)
     owner.observeAvailability(b)
     testCheck(owner.locked.map{CFEqual($0,second)} == true)
-    testCheck(owner.plan==nil && owner.planElement==nil && owner.matchCount==0 && owner.heldKeys.isEmpty)
-    owner.plan=OnsetRecoveryPlan(before:"",caret:0)
+    testCheck(owner.planElement==nil)
     owner.unavailableReason="selection_unreadable"
     owner.observeAvailability(nil)
-    testCheck(owner.plan==nil && owner.lastAvailability=="selection_unreadable")
+    testCheck(owner.lastAvailability=="selection_unreadable")
     owner.observeAvailability(b)
     testCheck(owner.lastAvailability=="tracking")
     print("PASS: initial binding, stable field, recreated field cancellation, unavailable state, resumed tracking")

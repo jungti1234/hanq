@@ -43,10 +43,7 @@ final class OnsetRecoveryEngine:NSObject {
     var timer:Timer?
     var lastSource=""
     var onset=OnsetRecoveryDetector()
-    var plan:OnsetRecoveryPlan?
     var planElement:AXUIElement?
-    var matchCount=0
-    var matchingRoman=""
     var recovering=false
     var pending:[CGEvent]=[]
     var currentPlan:OnsetRecoveryPlan?
@@ -93,7 +90,7 @@ final class OnsetRecoveryEngine:NSObject {
         pending.append(contentsOf:gate?.cancelHold() ?? [])
         retainedInput.append(contentsOf:pending);pending=[]
         recovering=false;rollingBack=false;waitingForContext=true
-        resumeObservedAt=nil;resumeField=nil;currentPlan=nil;plan=nil;onset.cancel()
+        resumeObservedAt=nil;resumeField=nil;currentPlan=nil;onset.cancel()
         lastEditable=nil
         log("repair_paused",["reason":reason,"retainedEvents":retainedInput.count])
     }
@@ -108,7 +105,7 @@ final class OnsetRecoveryEngine:NSObject {
         }
         guard now-since>=0.1 else{return}
         waitingForContext=false;resumeObservedAt=nil;resumeField=nil
-        onset.cancel();plan=nil;currentPlan=nil;planElement=nil
+        onset.cancel();currentPlan=nil;planElement=nil
         lastEditable=snap
         log("repair_resumed",["retainedEvents":retainedInput.count])
     }
@@ -199,7 +196,6 @@ final class OnsetRecoveryEngine:NSObject {
         if testPost == nil && (!AXIsProcessTrusted() || IsSecureEventInputEnabled()){return false}
         if event.getIntegerValueField(.keyboardEventKeycode)==51 && !OnsetDeletionKey.hasDeletePayload(event){emergencyStop("unsafe_delete_payload_blocked");return false}
         if let testPost { testPost(event) } else { postedToGate+=1;event.post(tap:.cghidEventTap) };return true }
-    var heldKeys=Set<Int64>()
     var lastAXFailure=""
     var accessibilityRequested=false
     var lastFocusRoute=""
@@ -239,7 +235,7 @@ final class OnsetRecoveryEngine:NSObject {
         recoveryEpoch+=1;waitingForContext=false
         retainPrefixRemainder()
         gate?.stop();collectHeld()
-        enabled=false;recovering=false;rollingBack=false;plan=nil;onset.cancel()
+        enabled=false;recovering=false;rollingBack=false;onset.cancel()
         // Detach before logging or making any further accessibility calls.
         timer?.invalidate();timer=nil
         log("safety_stop",["reason":reason,"retainedEvents":pending.count])
@@ -301,14 +297,11 @@ final class OnsetRecoveryEngine:NSObject {
             log("tracking_state",["state":availability])
             lastAvailability=availability
         }
-        guard let snap else{
-            plan=nil;heldKeys=[]
-            return
-        }
+        guard let snap else{return}
         observeFieldChanges(snap.element)
         if locked == nil || !CFEqual(locked!,snap.element){
             log("field_changed",["previousFieldExisted":locked != nil,"source":onsetSourceID(),"text":snap.text,"selection":[snap.selection.location,snap.selection.length]])
-            locked=snap.element;plan=nil;planElement=nil;matchCount=0;matchingRoman="";heldKeys=[];lastText=nil
+            locked=snap.element;planElement=nil;lastText=nil
             // A new composer is a new transaction boundary. Never reuse the old field's repair range.
             lastSource=onsetSourceID()
         }
@@ -329,7 +322,7 @@ final class OnsetRecoveryEngine:NSObject {
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}
         gate.beat();gateThread=OnsetGateThread(gate)
-        enabled=true;recovering=false;lastEditable=nil;pending=[];plan=nil;locked=nil;lastText=nil;lastSource=onsetSourceID();heldKeys=[]
+        enabled=true;recovering=false;lastEditable=nil;pending=[];locked=nil;lastText=nil;lastSource=onsetSourceID()
         log("session_start",["toolVersion":"0.1.19","build":20,"mode":"first_consonant","targetPID":target.processIdentifier,"source":lastSource])
         timer=Timer.scheduledTimer(withTimeInterval:0.02,repeats:true){[weak self] _ in self?.automaticTick()}
         gateThread?.start()
@@ -362,12 +355,12 @@ final class OnsetRecoveryEngine:NSObject {
         guard canBeginRepair() else{onset.cancel();emergencyStop("manual_edit_busy");return}
         var writable:DarwinBoolean=false
         let canSelect=testCanSelect?() ?? (AXUIElementIsAttributeSettable(snap.element,kAXSelectedTextRangeAttribute as CFString,&writable) == .success && writable.boolValue)
-        guard canSelect else{plan=nil;log("recovery_unsupported",["reason":"selection_not_writable"]);emergencyStop("early_selection_not_writable");return}
-        guard gate?.claimEarly() ?? true else{plan=nil;return}
+        guard canSelect else{log("recovery_unsupported",["reason":"selection_not_writable"]);emergencyStop("early_selection_not_writable");return}
+        guard gate?.claimEarly() ?? true else{return}
         willBeginRepair()
         recoveryBegan=ProcessInfo.processInfo.systemUptime
         recoveryEpoch+=1
-        recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;plan=nil;postedBuffered=0
+        recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;postedBuffered=0
         bufferedBase=nextBufferedID-Int64(pending.count)
         log("repair_started",["pair":candidate.roman,"text":snap.text])
         replaceAndReplay(candidate,snap)
@@ -400,7 +393,7 @@ final class OnsetRecoveryEngine:NSObject {
               snap.selection==NSRange(location:end+added,length:0),
               actual.substring(to:end)==original.substring(to:end),
               actual.substring(from:end+added)==original.substring(from:end) else{return false}
-        plan=nil;onset.cancel()
+        onset.cancel()
         log("repair_skipped_following_input",["addedUTF16":added])
         drain([])
         return true
@@ -538,7 +531,7 @@ final class OnsetRecoveryEngine:NSObject {
                 self.scheduleRecovery(0.002){[weak self] in self?.drain([],rollback:rollback)};return
             }
             if self.gate?.finishIfEmpty()==false{self.drain([],rollback:rollback);return}
-            self.recovering=false;self.rollingBack=false;self.currentPlan=nil;self.lastSource=self.currentSource();self.heldKeys=[]
+            self.recovering=false;self.rollingBack=false;self.currentPlan=nil;self.lastSource=self.currentSource()
             self.log(rollback ? "rollback_finished" : "recovery_finished",["bufferedEvents":self.nextBufferedID-self.bufferedBase,"postedEvents":self.postedBuffered,"pendingEvents":0,"postingIsNotAppAcknowledgment":true,"recoveryMs":(ProcessInfo.processInfo.systemUptime-self.recoveryBegan)*1000])
             if let snap=self.snapshot(){self.log("after_replay_snapshot",["text":snap.text,"source":self.lastSource,"selection":[snap.selection.location,snap.selection.length]])}
             if rollback{
@@ -550,7 +543,7 @@ final class OnsetRecoveryEngine:NSObject {
     func abort(_ reason:String){
         guard recovering else{return}
         if rollingBack{return}
-        rollingBack=true;rollbackReason=reason;plan=nil
+        rollingBack=true;rollbackReason=reason
         log("rollback_started",["reason":reason,"originalRoman":currentPlan?.roman ?? "","pendingEvents":pending.count])
         attemptRollback(remaining:15,requested:false)
     }
@@ -584,7 +577,7 @@ final class OnsetRecoveryEngine:NSObject {
         gate?.stop();collectHeld()
         // Keep uncertain input in memory; never inject it into a different field.
         log("pending_retained",["reason":reason,"events":pending.map{["id":$0.getIntegerValueField(.eventSourceUserData),"eventType":Int($0.type.rawValue),"code":$0.getIntegerValueField(.keyboardEventKeycode),"flags":$0.flags.rawValue]}])
-        recovering=false;rollingBack=false;enabled=false;plan=nil;didStop?()
+        recovering=false;rollingBack=false;enabled=false;didStop?()
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
     @objc func stop(){
