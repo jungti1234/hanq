@@ -520,18 +520,13 @@ final class OnsetRecoveryEngine:NSObject {
             return
         }
         // Remove only the event being posted; later physical keys remain in the queue.
-        if let saved=prefix.first ?? pending.first {
+        if let saved=pending.first {
             guard let event=prepareEvent(saved) else{if rollback{park("event_allocation_failed")}else{abort("event_allocation_failed")};return}
-            let fromBuffer=prefix.isEmpty
             guard post(event) else{park("buffer_post_rejected");return}
-            if fromBuffer{pending.removeFirst()}
-            if fromBuffer {
-                postedBuffered+=1
-                log("buffer_event_posted",["id":saved.getIntegerValueField(.eventSourceUserData),"code":saved.getIntegerValueField(.keyboardEventKeycode),"eventType":saved.type.rawValue,"rollback":rollback])
-            }
-            let rest=fromBuffer ? []:Array(prefix.dropFirst())
-            let delay=fromBuffer ? 0.001:0.01
-            scheduleRecovery(delay){[weak self] in self?.drain(rest,rollback:rollback)}
+            pending.removeFirst()
+            postedBuffered+=1
+            log("buffer_event_posted",["id":saved.getIntegerValueField(.eventSourceUserData),"code":saved.getIntegerValueField(.keyboardEventKeycode),"eventType":saved.type.rawValue,"rollback":rollback])
+            scheduleRecovery(0.001){[weak self] in self?.drain([],rollback:rollback)}
             return
         }
         scheduleRecovery{[weak self] in

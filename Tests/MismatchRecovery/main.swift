@@ -83,7 +83,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         event.setIntegerValueField(.eventSourceUserData,value:0) // Simulate mutable source metadata.
         probe.pending.append(event);probe.pendingSources[id]=item.2
     }
-    probe.drain([])
+    probe.drain()
     let deadline=Date().addingTimeInterval(0.5)
     while probe.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
     probeTestCheck(!probe.recovering && probe.pending.isEmpty)
@@ -343,7 +343,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     changed.testPost={_ in changedPosts+=1}
     let event=CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:true)!;event.flags=[]
     probeTestCheck(changed.event(.keyDown,event)==nil && changedReads==0)
-    changed.drain([])
+    changed.drain()
     probeTestCheck(!changed.recovering && changedPosts==0 && changed.retained.count==1)
     print("PASS: selection overwrite posts no Backspace; queued vowel composes once; key callback makes zero AX reads; changed field receives no replay")
 } else if ProcessInfo.processInfo.arguments.contains("--test-snapshot-retry") {

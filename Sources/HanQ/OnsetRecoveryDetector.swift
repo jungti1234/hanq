@@ -24,7 +24,7 @@ struct OnsetRecoveryDetector {
     mutating func entered(time:Double) {
         guard var f=first,f.entered==nil else{return}
         guard time-f.time>=0,time-f.time<=0.35 else{first=nil;return}
-        if f.entered==nil{f.entered=time;first=f}
+        f.entered=time;first=f
     }
     mutating func firstConsonant(time:Double,text:String,selection:NSRange,previousText:String?=nil)->OnsetRecoveryPlan? {
         guard let f=first,let entry=f.entered,time>=entry,time-f.time<=0.35,

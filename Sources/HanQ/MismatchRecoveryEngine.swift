@@ -379,7 +379,6 @@ final class MismatchRecoveryEngine:NSObject {
         if keyboard{log("key_observed",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"source":mismatchSourceID(),"candidateActive":plan != nil])}
         sourceChanged(currentSource(),snap)
         if type == .keyDown{heldKeys.insert(event.getIntegerValueField(.keyboardEventKeycode))}
-        if type == .keyUp{heldKeys.remove(event.getIntegerValueField(.keyboardEventKeycode))}
         if type == .keyDown{
             let disallowed=event.flags.intersection([.maskCommand,.maskControl,.maskAlternate])
             guard MismatchKeyboardLayout.supports(currentSource()),disallowed.isEmpty,
@@ -563,7 +562,7 @@ final class MismatchRecoveryEngine:NSObject {
             confirmDeliveryProgress(postedBuffered)
             if let repaired=ledgerAfterRepair{ledger=repaired;ledgerAfterRepair=nil}
             if ledger==nil{ledger=MismatchReplayLedger(before:candidate.before,caret:candidate.caret);ledger?.append(source:recoverySourceID,keys:candidate.codes)}
-            drain([],verifiedSnapshot:snap);return
+            drain(verifiedSnapshot:snap);return
         }
         // Deletion was already observed before replay. A complete reappearance
         // of exactly those Roman keys is a failed replay, not missing AX output.
@@ -621,11 +620,11 @@ final class MismatchRecoveryEngine:NSObject {
         event.setIntegerValueField(.eventSourceUserData,value:marker)
         return event
     }
-    func drain(_ prefix:[CGEvent],rollback:Bool=false,sourceAttempts:Int=45,verifiedSnapshot:MismatchSnapshot?=nil){
+    func drain(rollback:Bool=false,sourceAttempts:Int=45,verifiedSnapshot:MismatchSnapshot?=nil){
         guard recovering,rollingBack==rollback else{return}
         guard ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park("delivery_deadline");return}
-        guard let snap=verifiedSnapshot ?? recoverySnapshot("delivery",retry:{[weak self] in self?.drain(prefix,rollback:rollback,sourceAttempts:sourceAttempts)}) else{return}
-        if systemSwitch.busy{later(0.01){[weak self] in self?.drain(prefix,rollback:rollback,sourceAttempts:sourceAttempts)};return}
+        guard let snap=verifiedSnapshot ?? recoverySnapshot("delivery",retry:{[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts)}) else{return}
+        if systemSwitch.busy{later(0.01){[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts)};return}
         // Prepare every event before removing anything from the queue.
         // A release retains its original key identity, but does not insert text.
         // Never change the input source just to deliver an old key-up.
@@ -638,16 +637,15 @@ final class MismatchRecoveryEngine:NSObject {
                 guard chooseSource(nextSource)==noErr else{park("delivery_source_selection_failed");return}
                 log("delivery_source_requested",["source":nextSource])
             }
-            later(0.01){[weak self] in self?.drain(prefix,rollback:rollback,sourceAttempts:sourceAttempts-1)};return
+            later(0.01){[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts-1)};return
         }
         let count=pending.prefix{$0.type == .keyUp || (pendingSources[bufferedID($0)] ?? recoverySourceID)==nextSource}.count
         let group=Array(pending.prefix(count))
-        let all=prefix+group
         var nextLedger=ledger
         var deliveredKeys:[(UInt16,Bool)]=[]
         if !rollback,let _=nextLedger {
             var keys:[(UInt16,Bool)]=[]
-            for event in all where event.type == .keyDown {
+            for event in group where event.type == .keyDown {
                 let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode)),shift=event.flags.contains(.maskShift)
                 guard event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty,MismatchRecoveryPlan.character(code,shift) != nil else{park("unsupported_buffered_edit");return}
                 keys.append((code,shift))
@@ -655,15 +653,13 @@ final class MismatchRecoveryEngine:NSObject {
             deliveredKeys=keys
             nextLedger?.append(source:nextSource,keys:keys)
         }
-        let prepared=all.compactMap{prepareEvent($0)}
-        guard prepared.count==all.count else{if rollback{park("event_allocation_failed")}else{abort("event_allocation_failed")};return}
+        let prepared=group.compactMap{prepareEvent($0)}
+        guard prepared.count==group.count else{if rollback{park("event_allocation_failed")}else{abort("event_allocation_failed")};return}
         let buffered=group;pending.removeFirst(count)
         for (index,event) in prepared.enumerated(){
             post(event)
-            if index>=prefix.count {
-                let saved=buffered[index-prefix.count];postedBuffered+=1
-                log("buffer_event_posted",["inputSource":pendingSources[bufferedID(saved)] ?? recoverySourceID,"deliverySource":nextSource,"id":bufferedID(saved),"originTimestamp":String(saved.timestamp),"postedTimestamp":String(event.timestamp),"code":saved.getIntegerValueField(.keyboardEventKeycode),"eventType":saved.type.rawValue,"rollback":rollback])
-            }
+            let saved=buffered[index];postedBuffered+=1
+            log("buffer_event_posted",["inputSource":pendingSources[bufferedID(saved)] ?? recoverySourceID,"deliverySource":nextSource,"id":bufferedID(saved),"originTimestamp":String(saved.timestamp),"postedTimestamp":String(event.timestamp),"code":saved.getIntegerValueField(.keyboardEventKeycode),"eventType":saved.type.rawValue,"rollback":rollback])
         }
         replayCount+=prepared.count
         if !rollback,let expected=nextLedger {
@@ -747,7 +743,7 @@ final class MismatchRecoveryEngine:NSObject {
     }
     func finishDelivery(rollback:Bool,verifiedSnapshot:MismatchSnapshot?=nil){
         guard recovering,rollingBack==rollback else{return}
-        if !pending.isEmpty || currentSource() != intendedSource{drain([],rollback:rollback,verifiedSnapshot:verifiedSnapshot);return}
+        if !pending.isEmpty || currentSource() != intendedSource{drain(rollback:rollback,verifiedSnapshot:verifiedSnapshot);return}
         recoveryEpoch+=1;recovering=false;rollingBack=false;currentPlan=nil;lastSource=currentSource();heldKeys=[]
         log(rollback ? "rollback_finished":"recovery_finished",["bufferedEvents":nextBufferedID,"postedEvents":postedBuffered,"pendingEvents":0,"textVerified":!rollback && ledger != nil,"postingIsNotAppAcknowledgment":rollback || ledger==nil])
         if let snap=verifiedSnapshot{log("after_replay_snapshot",["text":snap.text,"source":lastSource,"selection":[snap.selection.location,snap.selection.length]])}
@@ -776,7 +772,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         if snap.selection==caret,currentSource()==recoverySourceID {
             log("rollback_caret_verified",["selection":[caret.location,caret.length]])
-            drain([],rollback:true);return
+            drain(rollback:true);return
         }
         if !requested {
             let result=setRange(field,caret)
