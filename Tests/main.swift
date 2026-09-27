@@ -111,18 +111,18 @@ check(JamoComposer.targetRange(in: "", selection: NSRange(location: 0, length: 0
 check(JamoComposer.targetRange(in: paragraphText, selection: NSRange(location: 0, length: 9)) == NSRange(location: 0, length: 9), "explicit selection overrides paragraph")
 check(JamoComposer.targetRange(in: "😀ㅇㅏ", selection: NSRange(location: 2, length: 0)) == NSRange(location: 0, length: 4), "UTF16 paragraph range")
 check(JamoComposer.targetRange(in: "a", selection: NSRange(location: 2, length: 0)) == nil, "invalid selection rejected")
-check(JamoComposer.hasHanjaTarget(in: "ㅋㅋ 한글", selection: NSRange(location: 5, length: 0)), "leftover jamo elsewhere does not block Hanja")
-check(!JamoComposer.hasHanjaTarget(in: "한글 abc", selection: NSRange(location: 6, length: 0)), "English caret does not request Hanja")
-check(!JamoComposer.hasHanjaTarget(in: "한글 ", selection: NSRange(location: 3, length: 0)), "space does not request Hanja")
+check(JamoComposer.hanjaTargetRange(in: "ㅋㅋ 한글", selection: NSRange(location: 5, length: 0)) != nil, "leftover jamo elsewhere does not block Hanja")
+check(JamoComposer.hanjaTargetRange(in: "한글 abc", selection: NSRange(location: 6, length: 0)) == nil, "English caret does not request Hanja")
+check(JamoComposer.hanjaTargetRange(in: "한글 ", selection: NSRange(location: 3, length: 0)) == nil, "space does not request Hanja")
 print("PASS: \(checks) total assertions including jamo composition and paragraph scope")
 
 let reportedJamo = "ㄹㅣㄴㅣㅇㅓ"
 check(JamoComposer.compose(reportedJamo) == "리니어", "reported jamo composes to Linear")
-check(!JamoComposer.hasHanjaTarget(in: reportedJamo, selection: NSRange(location: (reportedJamo as NSString).length, length: 0)), "reported jamo never triggers Hanja at caret")
-check(!JamoComposer.hasHanjaTarget(in: reportedJamo, selection: NSRange(location: 0, length: (reportedJamo as NSString).length)), "selected jamo never triggers Hanja")
-check(!JamoComposer.hasHanjaTarget(in: "ㄹ한", selection: NSRange(location: 0, length: 2)), "mixed selection ending in syllable is not a Hanja target")
-check(JamoComposer.hasHanjaTarget(in: "한국", selection: NSRange(location: 0, length: 2)), "precomposed selection supports Hanja")
-check(JamoComposer.hasHanjaTarget(in: "한국", selection: NSRange(location: 2, length: 0)), "precomposed caret supports Hanja")
+check(JamoComposer.hanjaTargetRange(in: reportedJamo, selection: NSRange(location: (reportedJamo as NSString).length, length: 0)) == nil, "reported jamo never triggers Hanja at caret")
+check(JamoComposer.hanjaTargetRange(in: reportedJamo, selection: NSRange(location: 0, length: (reportedJamo as NSString).length)) == nil, "selected jamo never triggers Hanja")
+check(JamoComposer.hanjaTargetRange(in: "ㄹ한", selection: NSRange(location: 0, length: 2)) == nil, "mixed selection ending in syllable is not a Hanja target")
+check(JamoComposer.hanjaTargetRange(in: "한국", selection: NSRange(location: 0, length: 2)) != nil, "precomposed selection supports Hanja")
+check(JamoComposer.hanjaTargetRange(in: "한국", selection: NSRange(location: 2, length: 0)) != nil, "precomposed caret supports Hanja")
 print("PASS: \(checks) total assertions including reported jamo and Hanja routing")
 
 let hanjaRanges: [(String, NSRange, NSRange?)] = [

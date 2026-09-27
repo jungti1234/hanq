@@ -1,8 +1,8 @@
 import Foundation
 
 func check(_ ok:Bool,_ name:String){if !ok{FileHandle.standardError.write(Data("FAIL: \(name)\n".utf8));exit(1)}}
-func candidate(_ text:String,_ caret:Int,_ baseline:String?=nil,_ code:UInt16=15,_ shift:Bool=false,_ time:Double=0.1)->RecoveryPlan? {
-    var d=OnsetDetector()
+func candidate(_ text:String,_ caret:Int,_ baseline:String?=nil,_ code:UInt16=15,_ shift:Bool=false,_ time:Double=0.1)->OnsetRecoveryPlan? {
+    var d=OnsetRecoveryDetector()
     d.outsideKey(code:code,shift:shift,time:0,korean:true,plain:true)
     d.entered(time:0.05)
     return d.firstConsonant(time:time,text:text,selection:NSRange(location:caret,length:0),previousText:baseline)
@@ -19,7 +19,7 @@ check(candidate("ㄱ",1,nil,15,false,0.36)==nil,"expired key excluded")
 for (code,text):(UInt16,String) in [(15,"ㄲ"),(14,"ㄸ"),(12,"ㅃ"),(17,"ㅆ"),(13,"ㅉ")] {
     check(candidate(text,1,nil,code,true)?.codes.first?.1==true,"double consonant retains Shift")
 }
-var d=OnsetDetector()
+var d=OnsetRecoveryDetector()
 d.outsideKey(code:15,shift:false,time:0,korean:false,plain:true)
 check(d.first==nil,"English excluded")
 d.outsideKey(code:15,shift:false,time:0,korean:true,plain:false)

@@ -19,7 +19,6 @@ for group in detector gate delete; do
         gate) fixture=Tests/OnsetRecovery/Gate/main.swift; sources=(Sources/HanQ/OnsetInputGate.swift) ;;
         delete) fixture=Tests/OnsetRecovery/DeleteKey/main.swift; sources=(Sources/HanQ/OnsetDeletionKey.swift) ;;
     esac
-    sed -e 's/RecoveryPlan/OnsetRecoveryPlan/g' -e 's/OnsetDetector/OnsetRecoveryDetector/g' -e 's/InputGate/OnsetInputGate/g' -e 's/DeletionKey/OnsetDeletionKey/g' "$fixture" > "$stage/main.swift"
-    swiftc -module-cache-path .build/hanq/module-cache "${sources[@]}" "$stage/main.swift" -o "$stage/$group"
+    swiftc -module-cache-path .build/hanq/module-cache "${sources[@]}" "$fixture" -o "$stage/$group"
     "$stage/$group"
 done

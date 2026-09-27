@@ -124,10 +124,6 @@ enum JamoComposer {
         return NSRange(location: start, length: contentsEnd - start)
     }
 
-    static func hasHanjaTarget(in text: String, selection: NSRange) -> Bool {
-        hanjaTargetRange(in: text, selection: selection) != nil
-    }
-
     /// Select the Hangul immediately before the caret so the IME receives a
     /// replacement range, not an insertion point. AX ranges use UTF-16 offsets.
     static func hanjaTargetRange(in text: String, selection: NSRange) -> NSRange? {
