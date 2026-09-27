@@ -326,11 +326,6 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "eo",
-    "text": "ㅓ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
     "keys": "eu",
     "text": "ㅡ"
   },
@@ -561,11 +556,6 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "aa",
-    "text": "ㅏㅏ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
     "keys": "yae",
     "text": "ㅒ"
   },
@@ -638,11 +628,6 @@
     "source": "com.apple.inputmethod.Korean.HNCRomaja",
     "keys": "ei",
     "text": "ㅔ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "eo",
-    "text": "ㅓㅗ"
   },
   {
     "source": "com.apple.inputmethod.Korean.HNCRomaja",
@@ -873,11 +858,6 @@
     "source": "com.apple.inputmethod.Korean.HNCRomaja",
     "keys": "ss",
     "text": "ㅅㅅ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "aa",
-    "text": "ㅏㅏ"
   },
   {
     "source": "com.apple.inputmethod.Korean.HNCRomaja",
@@ -1158,16 +1138,6 @@
     "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
     "keys": "gange",
     "text": "간게"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "hangug",
-    "text": "한국"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "haneul",
-    "text": "하늘"
   },
   {
     "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
@@ -1456,16 +1426,6 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "hangug",
-    "text": "한국"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "haneul",
-    "text": "하너ㅜㄹ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
     "keys": "gags",
     "text": "갃"
   },
@@ -1496,38 +1456,8 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.2SetKorean",
-    "keys": "ga",
-    "text": "ㅎㅁ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.2SetKorean",
-    "keys": "gan",
-    "text": "ㅎ무"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.2SetKorean",
     "keys": "ganga",
     "text": "ㅎ뭏ㅁ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.2SetKorean",
-    "keys": "hangug",
-    "text": "ㅗ무혛"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.2SetKorean",
-    "keys": "haneul",
-    "text": "ㅗ무뎌ㅣ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.2SetKorean",
-    "keys": "kfs",
-    "text": "ㅏㄹㄴ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.2SetKorean",
-    "keys": "jfs",
-    "text": "ㅓㄹㄴ"
   },
   {
     "source": "com.apple.inputmethod.Korean.2SetKorean",
@@ -1596,38 +1526,8 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.3SetKorean",
-    "keys": "ga",
-    "text": "ㅡ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.3SetKorean",
-    "keys": "gan",
-    "text": "ㅡㅅ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.3SetKorean",
     "keys": "ganga",
     "text": "ㅡ승"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.3SetKorean",
-    "keys": "hangug",
-    "text": "ㄴ스드"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.3SetKorean",
-    "keys": "haneul",
-    "text": "ㄴ셔ㄷㅈ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.3SetKorean",
-    "keys": "kfs",
-    "text": "간"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.3SetKorean",
-    "keys": "jfs",
-    "text": "안"
   },
   {
     "source": "com.apple.inputmethod.Korean.3SetKorean",
@@ -1696,38 +1596,8 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.390Sebulshik",
-    "keys": "ga",
-    "text": "ㅡ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.390Sebulshik",
-    "keys": "gan",
-    "text": "ㅡㅅ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.390Sebulshik",
     "keys": "ganga",
     "text": "ㅡ승"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.390Sebulshik",
-    "keys": "hangug",
-    "text": "ㄴ스드"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.390Sebulshik",
-    "keys": "haneul",
-    "text": "ㄴ셔ㄷㅈ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.390Sebulshik",
-    "keys": "kfs",
-    "text": "간"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.390Sebulshik",
-    "keys": "jfs",
-    "text": "안"
   },
   {
     "source": "com.apple.inputmethod.Korean.390Sebulshik",
@@ -1796,68 +1666,8 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "ga",
-    "text": "가"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "gan",
-    "text": "간"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "ganga",
-    "text": "간가"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "hangug",
-    "text": "한국"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "haneul",
-    "text": "하늘"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "kfs",
-    "text": "ㅋㅍㅅ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "jfs",
-    "text": "ㅈㅍㅅ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
     "keys": "galm",
     "text": "갊"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "yae",
-    "text": "ㅒ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "yeo",
-    "text": "ㅕ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "weo",
-    "text": "ㅝ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "wae",
-    "text": "ㅙ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
-    "keys": "gweon",
-    "text": "권"
   },
   {
     "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
@@ -1896,68 +1706,8 @@
   },
   {
     "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "ga",
-    "text": "가"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "gan",
-    "text": "간"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "ganga",
-    "text": "간가"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "hangug",
-    "text": "한국"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "haneul",
-    "text": "하너ㅜㄹ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "kfs",
-    "text": "ㅋㅍㅅ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "jfs",
-    "text": "ㅈㅍㅅ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
     "keys": "galm",
     "text": "갊"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "yae",
-    "text": "ㅑㅓ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "yeo",
-    "text": "ㅕㅗ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "weo",
-    "text": "ㅡㅓㅗ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "wae",
-    "text": "ㅡㅏㅓ"
-  },
-  {
-    "source": "com.apple.inputmethod.Korean.HNCRomaja",
-    "keys": "gweon",
-    "text": "그ㅓㅗㄴ"
   },
   {
     "source": "com.apple.inputmethod.Korean.HNCRomaja",

@@ -103,9 +103,9 @@ Caps Lock 전환 설정의 비공개 HIToolbox API 호출은 `RomanSwitchControl
 
 `MismatchRecoveryController.swift`는 제품 수명·설정, `MismatchRecoveryEngine.swift`는 감지·선택 덮어쓰기·결과 확인, `MismatchTextReader.swift`와 `MismatchSnapshotWorker.swift`는 본문 좌표와 비동기 조회를 담당한다. 앱별 예외 목록은 두지 않는다. `MismatchSourceSwitch.swift`와 `MismatchSwitchGate.swift`가 소스 재지정·복구 중 한영 경계를 처리한다. 시험 도구의 원문 로그·장치 감시는 제품에 포함하지 않는다.
 
-`bash scripts/test-mismatch-recovery.sh`는 제품 소스로 19개 회귀 모드와 제품 수명·진단 비밀값 제외 검사를 실행한다. 실제 키 전송은 테스트 대역을 사용한다. 통합 빌드는 이 검사와 기존 첫 자음·앱 수명 검사를 함께 수행한다. 실제 앱 시험에서는 독립 AutoRecoveryProbe를 종료한다. 제품 진단은 복구 상태만 기록하므로 실제 문자 대조에는 별도 시험 driver의 기대값·결과를 사용한다. `--disable-mismatch-recovery`로 해당 실행에서만 복구를 끄고 비교할 수 있다. 일반 실행에서는 저장된 켜기/끄기 설정을 사용하지 않으며, 이전 `mismatchRecoveryEnabled` 값은 시작 시 제거한다. 독립 자동 복구 실험 앱 실행 중에는 제품 감시를 시작하지 않는다.
+`bash scripts/test-mismatch-recovery.sh`는 제품 소스로 19개 회귀 모드와 제품 수명·진단 비밀값 제외 검사를 실행한다. 실제 키 전송은 테스트 대역을 사용한다. 통합 빌드는 이 검사와 기존 첫 자음·앱 수명 검사를 함께 수행한다. 이전에 설치한 독립 AutoRecoveryProbe가 있다면 실제 앱 시험 전에 종료한다. 제품 진단은 복구 상태만 기록하므로 실제 문자 대조에는 별도 시험 driver의 기대값·결과를 사용한다. `--disable-mismatch-recovery`로 해당 실행에서만 복구를 끄고 비교할 수 있다. 일반 실행에서는 저장된 켜기/끄기 설정을 사용하지 않으며, 이전 `mismatchRecoveryEnabled` 값은 시작 시 제거한다. 독립 자동 복구 실험 앱 실행 중에는 제품 감시를 시작하지 않는다.
 
-`MismatchKeyboardLayout.swift`는 Apple 한국어 다섯 배열의 물리 키 대응과 복구 결과 조합을 담당한다. `Tests/MismatchRecovery/NativeLayoutExpectations.json`에는 실제 IME에서 관측한 399개 결과를 보존한다. 중복 관측을 포함하며 모든 키 조합을 검증한 자료는 아니다. 배열 검사에서는 이 결과와 소스 ID 유지·숫자 자모·정상 영문 제외를 확인한다. 공유 조합기의 기존 기본 동작은 유지한다.
+`MismatchKeyboardLayout.swift`는 Apple 한국어 다섯 배열의 물리 키 대응과 복구 결과 조합을 담당한다. `Tests/MismatchRecovery/NativeLayoutExpectations.json`에는 실제 IME에서 관측한 결과 중 중복을 제외한 349개 사례를 보존한다. 모든 키 조합을 검증한 자료는 아니다. 배열 검사에서는 이 결과와 소스 ID 유지·숫자 자모·정상 영문 제외를 확인한다. 공유 조합기의 기존 기본 동작은 유지한다.
 
 `bash scripts/test-mismatch-native-layouts.sh`는 별도 AppKit 입력창에서 실제 다섯 IME와 제품 복구 엔진을 연결한다. 원래 키와 대기 중인 모음·종성의 최종 문자·커서·전송 횟수·잔여 키·소스 ID를 확인한다. 이 검사는 본문 조회와 선택 변경에 테스트 대역을 사용하고 소스를 직접 선택하므로, 설치본의 전역 접근성 조회·전환 단축키·물리 키 검증은 별도로 수행한다. 시험마다 새 입력창을 사용해 이전 IME 조합이 다음 사례로 넘어가지 않게 한다.
 
