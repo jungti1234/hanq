@@ -36,24 +36,12 @@ struct KeyboardBinding: Codable, Equatable {
     var label: String {
         switch keyCode {
         case 54: return "오른쪽 Command (⌘)"
-        case 55: return "왼쪽 Command (⌘)"
-        case 58: return "왼쪽 Option / Alt (⌥)"
         case 61: return "오른쪽 Option / Alt (⌥)"
-        case 59: return "왼쪽 Control (⌃)"
         case 62: return "오른쪽 Control (⌃)"
-        case 56: return "왼쪽 Shift (⇧)"
         case 60: return "오른쪽 Shift (⇧)"
         case 102: return "언어 키 (英数 / 한자)"
         case 104: return "언어 키 (かな / 한영)"
         case 110: return "메뉴 키"
-        case 105: return "F13"
-        case 107: return "F14"
-        case 113: return "F15"
-        case 106: return "F16"
-        case 64: return "F17"
-        case 79: return "F18"
-        case 80: return "F19"
-        case 90: return "F20"
         default: return "지원하지 않는 키"
         }
     }
