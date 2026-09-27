@@ -46,3 +46,21 @@ print("PASS: mandatory-update restriction disables input, blocks reactivation an
 precondition(owner.updater.responds(to: NSSelectorFromString("updater:didFinishLoadingAppcast:")))
 precondition(owner.updater.responds(to: NSSelectorFromString("allowedChannelsForUpdater:")))
 print("PASS: Sparkle optional delegate callbacks use the expected Objective-C selectors")
+
+// Product repair paths must never edit the same field concurrently.
+let combined=AppDelegate()
+combined.koreanEnabled=false
+precondition(!combined.mismatchRecovery.engine.canToggleRightCommand())
+combined.koreanEnabled=true
+precondition(combined.mismatchRecovery.engine.canToggleRightCommand())
+combined.mismatchRecovery.engine.recovering=true
+precondition(!combined.onsetRecovery.canBeginRepair())
+combined.mismatchRecovery.engine.recovering=false
+let onset=OnsetRecoveryEngine();combined.onsetRecovery.engine=onset
+onset.recovering=true
+precondition(!combined.mismatchRecovery.engine.canObserve())
+precondition(!combined.mismatchRecovery.engine.canBeginRepair())
+onset.recovering=false
+precondition(combined.mismatchRecovery.engine.canObserve())
+precondition(combined.mismatchRecovery.engine.canBeginRepair())
+print("PASS: product onset/mismatch exclusion and right Command preference")

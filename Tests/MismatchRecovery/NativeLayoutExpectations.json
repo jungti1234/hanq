@@ -1,0 +1,1997 @@
+[
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "ga",
+    "text": "ㅎㅁ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "gan",
+    "text": "ㅎ무"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "gana",
+    "text": "ㅎ뭄"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "gagga",
+    "text": "ㅎㅁㅎㅎㅁ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "ssang",
+    "text": "ㄴㄴ뭏"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "hangug",
+    "text": "ㅗ무혛"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "ch",
+    "text": "초"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "eo",
+    "text": "대"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "haneul",
+    "text": "ㅗ무뎌ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "kfs",
+    "text": "ㅏㄹㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "jfs",
+    "text": "ㅓㄹㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "ga",
+    "text": "ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "gan",
+    "text": "ㅡㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "gana",
+    "text": "ㅡㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "gagga",
+    "text": "ㅡㅡㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "ssang",
+    "text": "ᆫᆫᆼ스"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "hangug",
+    "text": "ㄴ스드"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "ch",
+    "text": "ㅔㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "eo",
+    "text": "ㅕㅊ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "haneul",
+    "text": "ㄴ셔ㄷㅈ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "kfs",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "jfs",
+    "text": "안"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "ga",
+    "text": "ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "gan",
+    "text": "ㅡㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "gana",
+    "text": "ㅡㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "gagga",
+    "text": "ㅡㅡㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "ssang",
+    "text": "ᆫᆫᆼ스"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "hangug",
+    "text": "ㄴ스드"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "ch",
+    "text": "ㅔㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "eo",
+    "text": "ㅕㅊ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "haneul",
+    "text": "ㄴ셔ㄷㅈ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "kfs",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "jfs",
+    "text": "안"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ga",
+    "text": "가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gan",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gana",
+    "text": "가나"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gagga",
+    "text": "각가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ssang",
+    "text": "ㅅ상"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "hangug",
+    "text": "한국"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ch",
+    "text": "ㅊㅎ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "eo",
+    "text": "ㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "haneul",
+    "text": "하늘"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "kfs",
+    "text": "ㅋㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "jfs",
+    "text": "ㅈㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ga",
+    "text": "가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gan",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gana",
+    "text": "가나"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gagga",
+    "text": "각가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ssang",
+    "text": "ㅅ상"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "hangug",
+    "text": "한국"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ch",
+    "text": "ㅊㅎ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "eo",
+    "text": "ㅓㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "haneul",
+    "text": "하너ㅜㄹ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "kfs",
+    "text": "ㅋㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "jfs",
+    "text": "ㅈㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "aa",
+    "text": "ㅏㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ae",
+    "text": "ㅐ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ai",
+    "text": "ㅏㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ao",
+    "text": "ㅏㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "au",
+    "text": "ㅏㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ay",
+    "text": "ㅏㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "aw",
+    "text": "ㅏㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ea",
+    "text": "ㅔㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ee",
+    "text": "ㅔㅔ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ei",
+    "text": "ㅔㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "eo",
+    "text": "ㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "eu",
+    "text": "ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ey",
+    "text": "ㅔㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ew",
+    "text": "ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ia",
+    "text": "ㅑ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ie",
+    "text": "ㅖ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ii",
+    "text": "ㅢ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "io",
+    "text": "ㅛ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "iu",
+    "text": "ㅠ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "iy",
+    "text": "ㅢ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "iw",
+    "text": "ㅠ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "oa",
+    "text": "ㅗㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "oe",
+    "text": "ㅚ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "oi",
+    "text": "ㅗㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "oo",
+    "text": "ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ou",
+    "text": "ㅗㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "oy",
+    "text": "ㅗㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ow",
+    "text": "ㅗㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ua",
+    "text": "ㅘ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ue",
+    "text": "ㅞ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ui",
+    "text": "ㅟ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "uo",
+    "text": "ㅜㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "uu",
+    "text": "ㅜㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "uy",
+    "text": "ㅟ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "uw",
+    "text": "ㅜㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ya",
+    "text": "ㅑ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ye",
+    "text": "ㅖ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yi",
+    "text": "ㅢ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yo",
+    "text": "ㅛ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yu",
+    "text": "ㅠ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yy",
+    "text": "ㅢ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yw",
+    "text": "ㅠ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "wa",
+    "text": "ㅘ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "we",
+    "text": "ㅞ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "wi",
+    "text": "ㅟ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "wo",
+    "text": "ㅜㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "wu",
+    "text": "ㅜㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "wy",
+    "text": "ㅟ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ww",
+    "text": "ㅜㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ng",
+    "text": "ㅇ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ang",
+    "text": "ㅏㅇ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "anga",
+    "text": "ㅏ아"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ange",
+    "text": "ㅏ에"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "angga",
+    "text": "ㅏㅇ가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "angs",
+    "text": "ㅏㅇㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "angsa",
+    "text": "ㅏㅇ사"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ss",
+    "text": "ㅅㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "aa",
+    "text": "ㅏㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yae",
+    "text": "ㅒ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yeo",
+    "text": "ㅕ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "weo",
+    "text": "ㅝ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "wae",
+    "text": "ㅙ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gweon",
+    "text": "권"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "aa",
+    "text": "ㅏㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ae",
+    "text": "ㅏㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ai",
+    "text": "ㅐ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ao",
+    "text": "ㅏㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "au",
+    "text": "ㅏㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ay",
+    "text": "ㅐ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "aw",
+    "text": "ㅏㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ea",
+    "text": "ㅓㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ee",
+    "text": "ㅓㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ei",
+    "text": "ㅔ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "eo",
+    "text": "ㅓㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "eu",
+    "text": "ㅓㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ey",
+    "text": "ㅔ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ew",
+    "text": "ㅓㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ia",
+    "text": "ㅑ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ie",
+    "text": "ㅕ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ii",
+    "text": "ㅣㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "io",
+    "text": "ㅛ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "iu",
+    "text": "ㅠ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "iy",
+    "text": "ㅣㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "iw",
+    "text": "ㅣㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "oa",
+    "text": "ㅘ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "oe",
+    "text": "ㅗㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "oi",
+    "text": "ㅚ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "oo",
+    "text": "ㅗㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ou",
+    "text": "ㅗㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "oy",
+    "text": "ㅚ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ow",
+    "text": "ㅗㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ua",
+    "text": "ㅜㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ue",
+    "text": "ㅝ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ui",
+    "text": "ㅟ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "uo",
+    "text": "ㅜㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "uu",
+    "text": "ㅜㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "uy",
+    "text": "ㅟ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "uw",
+    "text": "ㅜㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ya",
+    "text": "ㅑ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ye",
+    "text": "ㅕ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yi",
+    "text": "ㅣㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yo",
+    "text": "ㅛ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yu",
+    "text": "ㅠ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yy",
+    "text": "ㅣㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yw",
+    "text": "ㅣㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "wa",
+    "text": "ㅡㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "we",
+    "text": "ㅡㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "wi",
+    "text": "ㅢ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "wo",
+    "text": "ㅡㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "wu",
+    "text": "ㅡㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "wy",
+    "text": "ㅢ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ww",
+    "text": "ㅡㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ng",
+    "text": "ㅇ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ang",
+    "text": "ㅏㅇ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "anga",
+    "text": "ㅏ아"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ange",
+    "text": "ㅏ어"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "angga",
+    "text": "ㅏㅇ가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "angs",
+    "text": "ㅏㅇㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "angsa",
+    "text": "ㅏㅇ사"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ss",
+    "text": "ㅅㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "aa",
+    "text": "ㅏㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yae",
+    "text": "ㅑㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yeo",
+    "text": "ㅕㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "weo",
+    "text": "ㅡㅓㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "wae",
+    "text": "ㅡㅏㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gweon",
+    "text": "그ㅓㅗㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gaa",
+    "text": "가ㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gae",
+    "text": "개"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gai",
+    "text": "가ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gao",
+    "text": "가ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gau",
+    "text": "가ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gay",
+    "text": "가ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gaw",
+    "text": "가ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gea",
+    "text": "게ㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gee",
+    "text": "게ㅔ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gei",
+    "text": "게ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "geo",
+    "text": "거"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "geu",
+    "text": "그"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gey",
+    "text": "게ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gew",
+    "text": "그"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gia",
+    "text": "갸"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gie",
+    "text": "계"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gii",
+    "text": "긔"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gio",
+    "text": "교"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "giu",
+    "text": "규"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "giy",
+    "text": "긔"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "giw",
+    "text": "규"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "goa",
+    "text": "고ㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "goe",
+    "text": "괴"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "goi",
+    "text": "고ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "goo",
+    "text": "구"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gou",
+    "text": "고ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "goy",
+    "text": "고ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gow",
+    "text": "고ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gua",
+    "text": "과"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gue",
+    "text": "궤"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gui",
+    "text": "귀"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "guo",
+    "text": "구ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "guu",
+    "text": "구ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "guy",
+    "text": "귀"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "guw",
+    "text": "구ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gya",
+    "text": "갸"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gye",
+    "text": "계"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gyi",
+    "text": "긔"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gyo",
+    "text": "교"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gyu",
+    "text": "규"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gyy",
+    "text": "긔"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gyw",
+    "text": "규"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gwa",
+    "text": "과"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gwe",
+    "text": "궤"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gwi",
+    "text": "귀"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gwo",
+    "text": "구ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gwu",
+    "text": "구ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gwy",
+    "text": "귀"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gww",
+    "text": "구ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ganga",
+    "text": "간가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gange",
+    "text": "간게"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "hangug",
+    "text": "한국"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "haneul",
+    "text": "하늘"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gags",
+    "text": "갃"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ganj",
+    "text": "갅"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "galg",
+    "text": "갉"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "galb",
+    "text": "갋"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gabs",
+    "text": "값"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gangsa",
+    "text": "강사"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gaa",
+    "text": "가ㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gae",
+    "text": "가ㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gai",
+    "text": "개"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gao",
+    "text": "가ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gau",
+    "text": "가ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gay",
+    "text": "개"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gaw",
+    "text": "가ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gea",
+    "text": "거ㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gee",
+    "text": "거ㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gei",
+    "text": "게"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "geo",
+    "text": "거ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "geu",
+    "text": "거ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gey",
+    "text": "게"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gew",
+    "text": "거ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gia",
+    "text": "갸"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gie",
+    "text": "겨"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gii",
+    "text": "기ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gio",
+    "text": "교"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "giu",
+    "text": "규"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "giy",
+    "text": "기ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "giw",
+    "text": "기ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "goa",
+    "text": "과"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "goe",
+    "text": "고ㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "goi",
+    "text": "괴"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "goo",
+    "text": "고ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gou",
+    "text": "고ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "goy",
+    "text": "괴"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gow",
+    "text": "고ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gua",
+    "text": "구ㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gue",
+    "text": "궈"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gui",
+    "text": "귀"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "guo",
+    "text": "구ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "guu",
+    "text": "구ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "guy",
+    "text": "귀"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "guw",
+    "text": "구ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gya",
+    "text": "갸"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gye",
+    "text": "겨"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gyi",
+    "text": "기ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gyo",
+    "text": "교"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gyu",
+    "text": "규"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gyy",
+    "text": "기ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gyw",
+    "text": "기ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gwa",
+    "text": "그ㅏ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gwe",
+    "text": "그ㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gwi",
+    "text": "긔"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gwo",
+    "text": "그ㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gwu",
+    "text": "그ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gwy",
+    "text": "긔"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gww",
+    "text": "그ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ganga",
+    "text": "간가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gange",
+    "text": "간거"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "hangug",
+    "text": "한국"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "haneul",
+    "text": "하너ㅜㄹ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gags",
+    "text": "갃"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ganj",
+    "text": "갅"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "galg",
+    "text": "갉"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "galb",
+    "text": "갋"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gabs",
+    "text": "값"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gangsa",
+    "text": "강사"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "ga",
+    "text": "ㅎㅁ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "gan",
+    "text": "ㅎ무"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "ganga",
+    "text": "ㅎ뭏ㅁ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "hangug",
+    "text": "ㅗ무혛"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "haneul",
+    "text": "ㅗ무뎌ㅣ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "kfs",
+    "text": "ㅏㄹㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "jfs",
+    "text": "ㅓㄹㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "galm",
+    "text": "ㅎ미ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "yae",
+    "text": "ㅛㅁㄷ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "yeo",
+    "text": "ㅛ대"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "weo",
+    "text": "ㅈ대"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "wae",
+    "text": "ㅈㅁㄷ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "gweon",
+    "text": "ㅎㅈ대ㅜ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "GAN",
+    "text": "ㅎ무"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "KFS",
+    "text": "ㅏㄹㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "QWERTY",
+    "text": "ㅃㅉㄸㄲ쑈"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "123",
+    "text": "123"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "rkskek",
+    "text": "가나다"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "gksrmf",
+    "text": "한글"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.2SetKorean",
+    "keys": "dks",
+    "text": "안"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "ga",
+    "text": "ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "gan",
+    "text": "ㅡㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "ganga",
+    "text": "ㅡ승"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "hangug",
+    "text": "ㄴ스드"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "haneul",
+    "text": "ㄴ셔ㄷㅈ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "kfs",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "jfs",
+    "text": "안"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "galm",
+    "text": "ㅡㅈㅎ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "yae",
+    "text": "려"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "yeo",
+    "text": "려ㅊ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "weo",
+    "text": "ᆯㅕㅊ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "wae",
+    "text": "ᆯᆼㅕ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "gweon",
+    "text": "ㅡㅕㅊㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "GAN",
+    "text": "ㅒ-"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "KFS",
+    "text": "2ᆱᆭ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "QWERTY",
+    "text": "ᇁᇀᆬᆶᆳ5"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "123",
+    "text": "ᇂᆻᆸ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "rkskek",
+    "text": "ㅐ껴ㄱ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "gksrmf",
+    "text": "ㅡ개하"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.3SetKorean",
+    "keys": "dks",
+    "text": "ㅣㄱ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "ga",
+    "text": "ㅡ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "gan",
+    "text": "ㅡㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "ganga",
+    "text": "ㅡ승"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "hangug",
+    "text": "ㄴ스드"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "haneul",
+    "text": "ㄴ셔ㄷㅈ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "kfs",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "jfs",
+    "text": "안"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "galm",
+    "text": "ㅡㅈㅎ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "yae",
+    "text": "려"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "yeo",
+    "text": "려ㅊ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "weo",
+    "text": "ᆯㅕㅊ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "wae",
+    "text": "ᆯᆼㅕ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "gweon",
+    "text": "ㅡㅕㅊㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "GAN",
+    "text": "/ᆮ0"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "KFS",
+    "text": "5ᆩᆭ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "QWERTY",
+    "text": "ᇁᇀᆿㅒ;<"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "123",
+    "text": "ᇂᆻᆸ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "rkskek",
+    "text": "ㅐ껴ㄱ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "gksrmf",
+    "text": "ㅡ개하"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.390Sebulshik",
+    "keys": "dks",
+    "text": "ㅣㄱ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ga",
+    "text": "가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gan",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "ganga",
+    "text": "간가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "hangug",
+    "text": "한국"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "haneul",
+    "text": "하늘"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "kfs",
+    "text": "ㅋㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "jfs",
+    "text": "ㅈㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "galm",
+    "text": "갊"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yae",
+    "text": "ㅒ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "yeo",
+    "text": "ㅕ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "weo",
+    "text": "ㅝ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "wae",
+    "text": "ㅙ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gweon",
+    "text": "권"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "GAN",
+    "text": "ㄲ아N"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "KFS",
+    "text": "KFㅆ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "QWERTY",
+    "text": "Q우에RT이"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "123",
+    "text": "123"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "rkskek",
+    "text": "ㄹㅋㅅ켘"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "gksrmf",
+    "text": "ㄱㅋㅅㄹㅁㅍ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.GongjinCheongRomaja",
+    "keys": "dks",
+    "text": "ㄷㅋㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ga",
+    "text": "가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gan",
+    "text": "간"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "ganga",
+    "text": "간가"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "hangug",
+    "text": "한국"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "haneul",
+    "text": "하너ㅜㄹ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "kfs",
+    "text": "ㅋㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "jfs",
+    "text": "ㅈㅍㅅ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "galm",
+    "text": "갊"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yae",
+    "text": "ㅑㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "yeo",
+    "text": "ㅕㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "weo",
+    "text": "ㅡㅓㅗ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "wae",
+    "text": "ㅡㅏㅓ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gweon",
+    "text": "그ㅓㅗㄴ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "GAN",
+    "text": "ㄲ아N"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "KFS",
+    "text": "KFㅆ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "QWERTY",
+    "text": "Q으어RT이"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "123",
+    "text": "123"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "rkskek",
+    "text": "ㄹㅋㅅ컼"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "gksrmf",
+    "text": "ㄱㅋㅅㄹㅁㅍ"
+  },
+  {
+    "source": "com.apple.inputmethod.Korean.HNCRomaja",
+    "keys": "dks",
+    "text": "ㄷㅋㅅ"
+  }
+]

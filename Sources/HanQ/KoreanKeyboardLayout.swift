@@ -42,19 +42,19 @@ struct KoreanKeyboardLayout {
     private static let threeSet = readSystemLayout(named: "3SetHangul")
     private static let threeSet390 = readSystemLayout(named: "390Hangul")
 
-    private static func readSystemLayout(named name: String) -> KoreanKeyboardLayout? {
+    static func readSystemLayout(named name: String, romanized:Bool=false) -> KoreanKeyboardLayout? {
         // Resource locations differ between app-based and extension-based macOS IMEs.
         let root = "/System/Library/Input Methods/KoreanIM.app/Contents/"
         for resources in ["PlugIns/KIM_Extension.appex/Contents/Resources/", "Resources/"] {
             let url = URL(fileURLWithPath: root + resources + name + ".keylayout")
-            if let data = try? Data(contentsOf: url), let layout = parseSystemLayout(data) { return layout }
+            if let data = try? Data(contentsOf: url), let layout = parseSystemLayout(data,romanized:romanized) { return layout }
         }
         return nil
     }
 
     /// Reads Apple's installed tables instead of shipping a second, drifting copy.
     /// Only the known, stateless ANSI maps and modifier structure are accepted.
-    static func parseSystemLayout(_ data: Data) -> KoreanKeyboardLayout? {
+    static func parseSystemLayout(_ data: Data, romanized:Bool=false) -> KoreanKeyboardLayout? {
         guard var xml = String(data: data, encoding: .utf8) else { return nil }
         // Apple's XML 1.1 files include control-key entities forbidden by XML 1.0.
         // They are irrelevant to printable-key conversion; replace them before parsing.
@@ -77,7 +77,7 @@ struct KoreanKeyboardLayout {
               delegate.modifiers[0] == ["caps?"],
               delegate.modifiers[1] == ["anyShift caps?"],
               let lower = delegate.maps[0], let upper = delegate.maps[1],
-              let roman = delegate.maps[2], let shiftedRoman = delegate.maps[5] else { return nil }
+              let roman = delegate.maps[2], let shiftedRoman = delegate.maps[romanized ? 3:5] else { return nil }
         var keys: [Character: Character] = [:]
         for (input, output) in [(roman, lower), (shiftedRoman, upper)] {
             // Main typing block only: keypad digits cannot stand in for top-row keys.
@@ -94,9 +94,9 @@ struct KoreanKeyboardLayout {
             }
         }
         guard keys.count == 94, keys.values.contains(where: { char in
-            char.unicodeScalars.contains { (0x1100...0x11C2).contains($0.value) }
+            char.unicodeScalars.contains { (0x1100...0x11C2).contains($0.value) || (romanized && (0x3131...0x3163).contains($0.value)) }
         }) else { return nil }
-        return KoreanKeyboardLayout(kind: .threeSet, keys: keys,
+        return KoreanKeyboardLayout(kind: romanized ? .twoSet:.threeSet, keys: keys,
             physicalKeys: Dictionary(uniqueKeysWithValues:lower.map{(UInt16($0.key),$0.value)}),
             shiftedPhysicalKeys: Dictionary(uniqueKeysWithValues:upper.map{(UInt16($0.key),$0.value)}))
     }
@@ -121,12 +121,12 @@ private final class LayoutParser: NSObject, XMLParserDelegate {
             if let index = modifierIndex, let keys = attributes["keys"] { modifiers[index, default: []].insert(keys) }
         case "keyMap" where inANSI:
             mapIndex = attributes["index"].flatMap(Int.init)
-            if let index = mapIndex, [0, 1, 2, 5].contains(index) {
+            if let index = mapIndex, [0, 1, 2, 3, 5].contains(index) {
                 if maps[index] != nil || attributes["baseMapSet"] != nil { invalid = true }
                 maps[index] = [:]
             }
         case "key" where inANSI:
-            guard let index = mapIndex, [0, 1, 2, 5].contains(index),
+            guard let index = mapIndex, [0, 1, 2, 3, 5].contains(index),
                   let code = attributes["code"].flatMap(Int.init), (0...50).contains(code) else { return }
             guard let output = attributes["output"], output.count == 1, attributes["action"] == nil,
                   maps[index]?[code] == nil else { invalid = true; return }

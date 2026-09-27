@@ -15,9 +15,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         controller.canBeginRepair = { [weak self] in
             guard let self else { return false }
-            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing
+            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && !self.mismatchRecovery.busy
         }
-        controller.willBeginRepair = { [weak self] in self?.jamoRepair.inputDidChange() }
+        controller.willBeginRepair = { [weak self] in
+            self?.mismatchRecovery.engine.cancelDetection()
+            self?.jamoRepair.inputDidChange()
+        }
+        return controller
+    }()
+    lazy var mismatchRecovery: MismatchRecoveryController = {
+        let controller=MismatchRecoveryController()
+        controller.canRun = { [weak self] in
+            guard let self else{return false}
+            return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
+        }
+        controller.engine.canToggleRightCommand = { [weak self] in self?.koreanEnabled == true }
+        controller.engine.canObserve = { [weak self] in
+            guard let self else{return false}
+            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing &&
+                self.onsetRecovery.engine?.recovering != true && self.onsetRecovery.engine?.gate?.reservation() == nil
+        }
+        controller.engine.canBeginRepair = { [weak self] in
+            guard let self else{return false}
+            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && self.onsetRecovery.prepareManualEdit()
+        }
+        controller.engine.willBeginRepair = { [weak self] in self?.jamoRepair.inputDidChange() }
+        controller.engine.didRetainInput = { [weak self] in
+            DispatchQueue.main.async{self?.refreshStatus()}
+        }
         return controller
     }()
     lazy var externalKeyboards: ExternalKeyboardController = {
@@ -25,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.canConfigure = { [weak self] in
             guard let self else { return false }
             return self.permissionGranted && !self.updateRestricted && self.tap != nil && self.enabled
-                && !self.filter.consuming && !self.optionFilter.consuming
+                && !self.filter.consuming && !self.optionFilter.consuming && !self.mismatchRecovery.busy
         }
         controller.onBeginCapture = { [weak self] in self?.jamoRepair.inputDidChange() }
         return controller
@@ -59,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let toggleItem = NSMenuItem(title: "한영키 사용", action: #selector(toggleKorean), keyEquivalent: "")
     let hanjaItem = NSMenuItem(title: "한자키 사용", action: #selector(toggleHanja), keyEquivalent: "")
     let capsItem = NSMenuItem(title: "한/A (Caps Lock) 키로 입력 소스 전환", action: #selector(toggleCaps), keyEquivalent: "")
+    let retainedMismatchItem = NSMenuItem(title:"복구 중 보관된 입력 복사", action:#selector(copyMismatchInput), keyEquivalent:"")
     let hudItem = NSMenuItem(title: "입력 소스 변경 시 화면에 표시", action: #selector(toggleHUD), keyEquivalent: "")
     let loginItem = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     let menuStatus = NSMenuItem(title: "준비 중", action: nil, keyEquivalent: "")
@@ -81,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Preserve the macOS Caps Lock setting, including on first launch.
         // Discard any pending automatic enable left by an older build.
         preferences.removeObject(forKey: "pendingInitialRomanSwitchEnable")
+        preferences.removeObject(forKey: "mismatchRecoveryEnabled")
         UserDefaults.standard.register(defaults: ["hudEnabled": true])
         for key in ["koreanKeyEnabled", "hanjaKeyEnabled"] where UserDefaults.standard.object(forKey:key) == nil {
             UserDefaults.standard.set(true, forKey:key)
@@ -99,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.target = self; statusMenu.addItem(toggleItem)
         capsItem.target = self; capsItem.indentationLevel = 1; statusMenu.addItem(capsItem)
         hanjaItem.target = self; statusMenu.addItem(hanjaItem)
+        retainedMismatchItem.target=self;statusMenu.addItem(retainedMismatchItem)
         statusMenu.addItem(.separator())
         hudItem.target = self; hudItem.state = UserDefaults.standard.bool(forKey: "hudEnabled") ? .on : .off
         statusMenu.addItem(hudItem)
@@ -141,7 +169,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.sourceObservations += 1
             if self.permissionGranted && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name) }
         }
-        jamoRepair.canBeginEdit = { [weak self] in self?.onsetRecovery.prepareManualEdit() ?? false }
+        jamoRepair.canBeginEdit = { [weak self] in
+            guard let self else{return false}
+            return self.mismatchRecovery.prepareManualEdit() && self.onsetRecovery.prepareManualEdit()
+        }
         inputSource.start()
         window.center()
         let pulse = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -353,7 +384,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let external = owner.externalKeyboards.process(type: type, event: event, active: active,
                     koreanAllowed: externalTarget != nil, hanjaAllowed: owner.hanjaEnabled)
                 if external.korean, let externalTarget {
-                    let selection = KoreanEnglishSwitch.select(externalTarget)
+                    let selection: OSStatus
+                    if owner.mismatchRecovery.busy {
+                        owner.mismatchRecovery.engine.userToggleDuringRecovery();selection=0
+                    } else {selection = KoreanEnglishSwitch.select(externalTarget)}
                     DispatchQueue.main.async {
                         owner.inputSource.refresh()
                         if selection != 0 { NSLog("입력 소스 전환 실패: %d", selection) }
@@ -413,6 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         enabled = true
         externalKeyboards.start()
         onsetRecovery.start()
+        mismatchRecovery.start()
 
         refreshStatus()
     }
@@ -421,6 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Called outside the tap callback. The watchdog stays armed until cleanup ends.
     func stopMapping() {
         InputDiagnostics.shared.record("tap.stop.begin present=\(tap != nil)")
+        mismatchRecovery.stop()
         onsetRecovery.stop()
         enabled = false
         koreanEnabled = false
@@ -482,7 +518,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         refreshLaunchAtLogin()
     }
+    @objc func copyMismatchInput(){mismatchRecovery.copyRetained();refreshStatus()}
     func refreshStatus() {
+        retainedMismatchItem.isHidden=mismatchRecovery.engine.retained.isEmpty
+        retainedMismatchItem.isEnabled = !mismatchRecovery.busy
+
         status.stringValue = "한영키 \(koreanEnabled ? "켜짐" : "꺼짐") · 한자키 \(hanjaEnabled ? "켜짐" : "꺼짐")"
         if filter.consuming || optionFilter.consuming { status.stringValue += " · 누른 우측 키를 놓아주세요" }
         toggleItem.state = koreanEnabled ? .on : .off

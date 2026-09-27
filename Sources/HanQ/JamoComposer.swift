@@ -22,7 +22,7 @@ enum JamoComposer {
 
     /// Three-set tables preserve initial/medial/final roles. Never feed these
     /// through the two-set greedy composer, which would move finals to initials.
-    static func composeThreeSet(_ text: String) -> String {
+    static func composeThreeSet(_ text: String, preserveStandaloneFinals:Bool=false) -> String {
         var scalars: [Unicode.Scalar] = []
         for scalar in text.unicodeScalars {
             if let last = scalars.last, let combined = combineThreeSet(last.value, scalar.value),
@@ -37,7 +37,7 @@ enum JamoComposer {
             switch scalar.value {
             case 0x1100...0x1112: return String(initials[Int(scalar.value - 0x1100)])
             case 0x1161...0x1175: return String(vowels[Int(scalar.value - 0x1161)])
-            case 0x11A8...0x11C2: return String(finals[Int(scalar.value - 0x11A7)])
+            case 0x11A8...0x11C2: return preserveStandaloneFinals ? String(scalar):String(finals[Int(scalar.value - 0x11A7)])
             default: return String(scalar)
             }
         }.joined()
@@ -62,7 +62,8 @@ enum JamoComposer {
     private static let vowelPairs: [String: Character] = ["ㅗㅏ":"ㅘ", "ㅗㅐ":"ㅙ", "ㅗㅣ":"ㅚ", "ㅜㅓ":"ㅝ", "ㅜㅔ":"ㅞ", "ㅜㅣ":"ㅟ", "ㅡㅣ":"ㅢ"]
     private static let finalPairs: [String: Character] = ["ㄱㅅ":"ㄳ", "ㄴㅈ":"ㄵ", "ㄴㅎ":"ㄶ", "ㄹㄱ":"ㄺ", "ㄹㅁ":"ㄻ", "ㄹㅂ":"ㄼ", "ㄹㅅ":"ㄽ", "ㄹㅌ":"ㄾ", "ㄹㅍ":"ㄿ", "ㄹㅎ":"ㅀ", "ㅂㅅ":"ㅄ"]
 
-    static func compose(_ text: String) -> String {
+    static func compose(_ text: String, vowelCombinations:[String:Character]?=nil) -> String {
+        let vowelPairs=vowelCombinations ?? Self.vowelPairs
         // NFC respects explicit choseong/jungseong/jongseong roles in NFD text.
         var normalized = ""
         var run = ""

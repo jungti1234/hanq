@@ -65,6 +65,7 @@ swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sourc
 "$stage/filter-tests"
 bash scripts/test-external-keyboards.sh
 bash scripts/test-onset-recovery.sh
+bash scripts/test-mismatch-recovery.sh
 bash scripts/test-diagnostics.sh
 bash scripts/test-lifecycle.sh
 bash scripts/test-watchdog.sh
