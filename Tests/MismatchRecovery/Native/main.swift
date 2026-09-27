@@ -69,7 +69,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
         for code in keys.dropFirst(){
             for down in [true,false]{
                 let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;event.flags=[]
-                guard p.event(down ? .keyDown:.keyUp,event)==nil else{finish(false,"queued key escaped: \(id), recovering=\(p.recovering), suspended=\(p.suspended), status=\(p.statusText), text=\(self.view.string), active=\(NSApp.isActive)");return}
+                guard p.event(down ? .keyDown:.keyUp,event)==nil else{finish(false,"queued key escaped: \(id), recovering=\(p.recovering), suspended=\(p.suspended), pending=\(p.pending.count) retained=\(p.retained.count), text=\(self.view.string), active=\(NSApp.isActive)");return}
             }
         }
         began=ProcessInfo.processInfo.systemUptime

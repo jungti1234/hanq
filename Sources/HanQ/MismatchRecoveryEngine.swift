@@ -19,11 +19,9 @@ final class MismatchRecoveryEngine:NSObject {
     func reportMismatch(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot){
         detectionCount+=1
         log(detectionOnly ? "mismatch_detected_only":"mismatch_notice",["text":snap.text,"physicalKeys":candidate.replayRoman,"caret":candidate.caret,"count":detectionCount])
-        plan=nil;matchCount=0;matchingRoman=""
-        statusText=detectionOnly ? "감지 전용": "복구 확인 중"
+        plan=nil
     }
     let marker:Int64=0x48414E514155544F
-    var statusText="대기 중"
     var enabled=false
     var target:NSRunningApplication?
     var followsFrontmost=false
@@ -39,7 +37,7 @@ final class MismatchRecoveryEngine:NSObject {
         recoveryEpoch+=1;plan=nil;planElement=nil;locked=nil;lastText=nil;heldKeys=[]
         target=next;ax=next.map{AXUIElementCreateApplication($0.processIdentifier)}
         if let ax{AXUIElementSetMessagingTimeout(ax,0.05)}
-        preparationAttempts=0;nextPreparation=0;focusErrors=[:];focusRoute=""
+        focusErrors=[:];focusRoute=""
         log("target_app_changed",["pid":next?.processIdentifier ?? 0,"bundleID":next?.bundleIdentifier ?? "","name":next?.localizedName ?? ""])
     }
     var ax:AXUIElement?
@@ -58,9 +56,6 @@ final class MismatchRecoveryEngine:NSObject {
         intendedSource=intendedSource==recoverySourceID ? englishID:recoverySourceID
         log("user_source_boundary",["source":intendedSource,"afterBufferedID":nextBufferedID,"origin":"right_command"])
     }
-    var auditIncomplete=false
-    var sessionSequence:UInt64=0
-    var sessionScope=""
     var runSource:CFRunLoopSource?
     var timer:Timer?
     var lastSource=""
@@ -68,8 +63,6 @@ final class MismatchRecoveryEngine:NSObject {
     var plan:MismatchRecoveryPlan?
     var planElement:AXUIElement?
     var planStart=0.0
-    var matchCount=0
-    var matchingRoman=""
     var recovering=false
     var pending:[CGEvent]=[]
     var retained:[CGEvent]=[]
@@ -109,7 +102,6 @@ final class MismatchRecoveryEngine:NSObject {
     var lastSampleSnapshot:MismatchSnapshot?
     var unavailableReason=""
     var lastAvailability=""
-    var sourceCycleStarted=false
     var started=0.0
     var replayCount=0
     var rollingBack=false
@@ -216,8 +208,6 @@ final class MismatchRecoveryEngine:NSObject {
     let systemAX=AXUIElementCreateSystemWide()
     var focusErrors:[String:String]=[:]
     var focusRoute=""
-    var preparationAttempts=0
-    var nextPreparation=0.0
     var testFocusedRead:((AXUIElement)->AXUIElement?)?
     var heldKeys=Set<Int64>()
     func attr(_ element:AXUIElement,_ name:String)->CFTypeRef?{var value:CFTypeRef?;guard AXUIElementCopyAttributeValue(element,name as CFString,&value) == .success else{return nil};return value}
@@ -295,25 +285,20 @@ final class MismatchRecoveryEngine:NSObject {
                 ProcessInfo.processInfo.systemUptime-planStart<=0.2
             if !retryable {plan=nil;heldKeys=[]}
             if retryable && plan != nil {log("candidate_read_retry",["ageMs":(ProcessInfo.processInfo.systemUptime-planStart)*1000])}
-            statusText=unavailableReason == "focused_element_unreadable" ? "복구 불가 · 입력칸을 읽지 못했습니다. 현재 키는 차단하지 않습니다.":"감지 대기: " + unavailableReason
             return
         }
         if locked == nil || !CFEqual(locked!,snap.element){
             log("field_changed",["previousFieldExisted":locked != nil,"source":mismatchSourceID(),"text":snap.text,"selection":[snap.selection.location,snap.selection.length]])
-            locked=snap.element;plan=nil;planElement=nil;matchCount=0;matchingRoman="";heldKeys=[];lastText=nil
+            locked=snap.element;plan=nil;planElement=nil;heldKeys=[];lastText=nil
             // A new composer is a new transaction boundary. Never reuse the old field's repair range.
             lastSource=mismatchSourceID()
         }
-        statusText="감지 중 · " + (MismatchKeyboardLayout.supports(currentSource()) ? "한국어" : "영어/기타")
     }
     func setRange(_ element:AXUIElement,_ range:NSRange)->AXError{guard !detectionOnly else{return .cannotComplete};if let testSetRange{return testSetRange(element,range)};var cf=CFRange(location:range.location,length:range.length);return AXUIElementSetAttributeValue(element,kAXSelectedTextRangeAttribute as CFString,AXValueCreate(.cfRange,&cf)!)}
-    let logFormatter:ISO8601DateFormatter = {
-        let f=ISO8601DateFormatter();f.formatOptions=[.withInternetDateTime,.withFractionalSeconds];return f
-    }()
     func sourceChanged(_ now:String,_ snap:MismatchSnapshot){
         guard now != lastSource else{return}
         let previous=lastSource;lastSource=now;log("source_change",["from":previous,"to":now])
-        plan=nil;matchCount=0;matchingRoman=""
+        plan=nil
         if previous.hasPrefix("com.apple.keylayout."){englishID=previous}
 
     }
@@ -367,7 +352,7 @@ final class MismatchRecoveryEngine:NSObject {
                     if type == .keyUp{keyDownSources.removeValue(forKey:code)}
                     nextBufferedID+=1;pendingSources[nextBufferedID]=inputSource
                     bufferedIdentities[ObjectIdentifier(copy)]=nextBufferedID;pending.append(copy)
-                    log("key_buffered",["id":nextBufferedID,"sessionSequence":sessionSequence,"inputSource":inputSource,"eventType":type.rawValue,"eventTimestamp":String(event.timestamp),"code":event.getIntegerValueField(.keyboardEventKeycode),"flags":event.flags.rawValue])
+                    log("key_buffered",["id":nextBufferedID,"inputSource":inputSource,"eventType":type.rawValue,"eventTimestamp":String(event.timestamp),"code":event.getIntegerValueField(.keyboardEventKeycode),"flags":event.flags.rawValue])
                 }else{abort("buffer_allocation_failed");return Unmanaged.passUnretained(event)}
                 if pending.count>256{abort("buffer_limit")}
                 return nil
@@ -385,7 +370,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard let snap=observed else{
             // A new untracked event breaks the exact key sequence. Sampling-only
             // outages may retry, but never silently omit a key from that sequence.
-            plan=nil;matchCount=0
+            plan=nil
             if type == .keyDown,unavailableReason != "target_not_frontmost",unavailableReason != "secure_input",unavailableReason != "accessibility_permission" {
                 log("untracked_key",["code":event.getIntegerValueField(.keyboardEventKeycode),"source":mismatchSourceID(),"reason":unavailableReason])
             }
@@ -400,10 +385,9 @@ final class MismatchRecoveryEngine:NSObject {
             guard MismatchKeyboardLayout.supports(currentSource()),disallowed.isEmpty,
                   let candidate=MismatchRecoveryPlan.next(previous:plan,text:snap.text,selection:snap.selection,
                     code:UInt16(event.getIntegerValueField(.keyboardEventKeycode)),shift:event.flags.contains(.maskShift),sourceID:currentSource()) else{
-                plan=nil;matchCount=0;log("candidate_cancelled",["reason":"non_korean_or_non_printable_or_selection"]);return Unmanaged.passUnretained(event)
+                plan=nil;log("candidate_cancelled",["reason":"non_korean_or_non_printable_or_selection"]);return Unmanaged.passUnretained(event)
             }
             plan=candidate;planElement=snap.element;planStart=ProcessInfo.processInfo.systemUptime
-            matchCount=0;matchingRoman=""
 
             log("key",["code":event.getIntegerValueField(.keyboardEventKeycode),"roman":candidate.roman,"source":mismatchSourceID()])
         }else if !keyboard || (type == .flagsChanged && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty){plan=nil;log("candidate_cancelled",["reason":"navigation_or_modifier"])}
@@ -422,12 +406,11 @@ final class MismatchRecoveryEngine:NSObject {
         guard let candidate=plan else{return}
         if ProcessInfo.processInfo.systemUptime-planStart>5{log("candidate_cancelled",["reason":"timeout"]);plan=nil;return}
         if candidate.matches(text:snap.text,selection:snap.selection){
-            if matchingRoman==candidate.roman{matchCount+=1}else{matchingRoman=candidate.roman;matchCount=1}
             // Exact text/range + the observed physical sequence establishes the
             // mismatch. Do not wait for all keys to be released: their up events
             // are preserved in the same ordered queue as subsequent down events.
             if detectionOnly{reportMismatch(candidate,snap)}else{beginRecovery(candidate,snap)}
-        }else{matchCount=0}
+        }
     }
     func beginRecovery(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot){
         guard canBeginRepair(),MismatchKeyboardLayout.supports(candidate.sourceID),candidate.matches(text:snap.text,selection:snap.selection) else{return}
@@ -442,7 +425,7 @@ final class MismatchRecoveryEngine:NSObject {
         verifiedProgressEvents = -1
         recoveryDeadline=ProcessInfo.processInfo.systemUptime+2.5
         willBeginRepair()
-        recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;plan=nil;pending=[];nextBufferedID=0;postedBuffered=0;sourceCycleStarted=true
+        recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;plan=nil;pending=[];nextBufferedID=0;postedBuffered=0
         intendedSource=recoverySourceID;pendingSources=[:];bufferedIdentities=[:];keyDownSources=Dictionary(uniqueKeysWithValues:heldKeys.map{($0,recoverySourceID)})
         koreanRetries=0;interruptedSourceRestores=0;ledger=nil;ledgerAfterRepair=nil;snapshotWaitStarted=nil
         log("mismatch_confirmed",["roman":candidate.roman,"text":snap.text])
@@ -768,7 +751,6 @@ final class MismatchRecoveryEngine:NSObject {
         recoveryEpoch+=1;recovering=false;rollingBack=false;currentPlan=nil;lastSource=currentSource();heldKeys=[]
         log(rollback ? "rollback_finished":"recovery_finished",["bufferedEvents":nextBufferedID,"postedEvents":postedBuffered,"pendingEvents":0,"textVerified":!rollback && ledger != nil,"postingIsNotAppAcknowledgment":rollback || ledger==nil])
         if let snap=verifiedSnapshot{log("after_replay_snapshot",["text":snap.text,"source":lastSource,"selection":[snap.selection.location,snap.selection.length]])}
-        statusText=rollback ? "이번 복구 중단 · 대기 키 반환 후 감시 계속":"복구 문장 확인 완료 · 이어서 입력하세요."
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
     func abort(_ reason:String){
@@ -813,9 +795,8 @@ final class MismatchRecoveryEngine:NSObject {
         retained.append(contentsOf:pending);pending=[]
         suspended=true
         didRetainInput()
-        recovering=false;rollingBack=false;plan=nil;planElement=nil;currentPlan=nil;heldKeys=[];matchCount=0
+        recovering=false;rollingBack=false;plan=nil;planElement=nil;currentPlan=nil;heldKeys=[]
         log("monitor_suspended")
-        statusText="입력 복구 중단 · 보관된 입력을 메뉴에서 확인하세요."
 
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
@@ -827,7 +808,6 @@ final class MismatchRecoveryEngine:NSObject {
         }.joined()
         guard !text.isEmpty else{retained=[];pending=[];suspended=false;return}
         NSPasteboard.general.clearContents();NSPasteboard.general.setString(text,forType:.string)
-        statusText="보관된 입력을 복사했습니다."
         retained=[];pending=[];suspended=false
     }
     @objc func stop(){
@@ -846,7 +826,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard let app,app.processIdentifier != ProcessInfo.processInfo.processIdentifier else{return false}
         return !app.isTerminated
     }
-    func cancelDetection(){plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[];matchCount=0}
+    func cancelDetection(){plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[]}
     func log(_ kind:String,_ fields:@autoclosure ()->[String:Any]=[:]) {
         // Deliberately never evaluate fields: they can contain typed text, keys,
         // editor identifiers or clipboard content copied from the experiment.

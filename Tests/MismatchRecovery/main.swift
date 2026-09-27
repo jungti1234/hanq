@@ -245,12 +245,12 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     owner.observeAvailability(a)
     probeTestCheck(owner.locked.map{CFEqual($0,first)} == true)
     owner.plan=MismatchRecoveryPlan(before:"draft",caret:5)
-    owner.planElement=first;owner.matchCount=1;owner.heldKeys=[2]
+    owner.planElement=first;owner.heldKeys=[2]
     owner.observeAvailability(a)
-    probeTestCheck(owner.plan != nil && owner.matchCount==1)
+    probeTestCheck(owner.plan != nil && owner.planElement.map{CFEqual($0,first)} == true && owner.heldKeys==[2])
     owner.observeAvailability(b)
     probeTestCheck(owner.locked.map{CFEqual($0,second)} == true)
-    probeTestCheck(owner.plan==nil && owner.planElement==nil && owner.matchCount==0 && owner.heldKeys.isEmpty)
+    probeTestCheck(owner.plan==nil && owner.planElement==nil && owner.heldKeys.isEmpty)
     owner.plan=MismatchRecoveryPlan(before:"",caret:0)
     owner.unavailableReason="selection_unreadable"
     owner.observeAvailability(nil)
