@@ -30,8 +30,6 @@ final class OnsetInputGate {
     var holdUntil:Double=0
     var heartbeat:Double=0
     var held:[CGEvent]=[]
-    var passedDowns:[(CGEvent,Double)]=[]
-    func recentPassedDowns()->[(CGEvent,Double)]{lock.lock();defer{lock.unlock()};return passedDowns}
     let marker:Int64
     var deliver:((CGEvent)->Void)?
     var failed:((String)->Void)?
@@ -97,7 +95,6 @@ final class OnsetInputGate {
             hintUntil=0;holdUntil=now+0.35
         }
         if let copy=event.copy(){
-            if type == .keyDown{passedDowns.append((copy,now));if passedDowns.count>8{passedDowns.removeFirst()}}
             DispatchQueue.main.async{self.deliver?(copy)}
         }
         return Unmanaged.passUnretained(event)
