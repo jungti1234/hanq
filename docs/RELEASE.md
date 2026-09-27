@@ -82,6 +82,12 @@ GitHub의 Pre-release 표시는 Sparkle 채널을 분리하지 않는다. 베타
 
 정책 키는 키체인의 서비스 `taek.in.hanq.update-policy` / 계정 `ed25519`, Sparkle 키는 `generate_keys --account taek.in.hanq`로 관리한다. `bash scripts/policy-tool.sh public-key`는 공개키만 출력한다. 키체인을 삭제하거나 Mac을 이전하기 전에 개인키의 안전한 백업·복구를 별도로 준비해야 한다. 개인키를 저장소·로그·릴리스 첨부 파일에 넣지 않는다.
 
+## 0.3.0 배포 시 함께 반영할 문서 보완
+
+- 0.2.0 외부 키보드 지원에 도움을 준 양갱 님·망고언니 님의 감사 내용을 CHANGELOG의 0.2.0 항목, `docs/releases/0.2.0-beta.1.md`, `updates/site/release-notes/0.2.0-beta.1.html`에 보완했다.
+- 0.3.0 공개 시 기존 0.2.0 GitHub Release 본문도 수정된 Markdown으로 갱신하고, 기존 0.2.0 HTML을 gh-pages에 함께 게시한다. 이 보완만으로 기존 태그·DMG·서명·앱 버전은 변경하지 않는다.
+- 현재는 소스 문서에 준비한 상태이며 공개 페이지의 감사 내용은 아직 갱신하지 않았다. 0.3.0 배포 후 감사 내용의 공개 반영을 확인하면 이 절(제목과 목록 전체)을 삭제한다. 완료 이력은 개발 타임라인에만 남긴다.
+
 ## 매번 배포할 때의 절차
 
 다음은 유지관리자 또는 요청받은 AI가 수행할 배포 절차다. 로컬 준비와 GitHub Draft 생성은 별도 명령이다.
