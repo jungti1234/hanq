@@ -196,6 +196,57 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     busy.unavailableReason="not_supported_text_field";busy.testSource={onsetKoreanID};busy.sampleEarly(nil)
     testCheck(productGate.receive(.keyDown,key(15)) != nil && productGate.reservation()==nil,"manual edits disarm early capture")
     print("PASS: actual early gate + sample + selection + drain composes gan; precollected keys preserved; clipboard unused; rejected physical/prefix posts retained; stale hints skipped")
+} else if ProcessInfo.processInfo.arguments.contains("--test-early-publication") {
+    func key(_ code:CGKeyCode)->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!;e.flags=[];return e}
+    for scenario in ["text", "caret", "existing", "timeout", "field", "changed", "source", "selection"] {
+        let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true}
+        let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
+        _=g.receive(.keyDown,key(15));_ = g.receive(.keyDown,key(40));_ = g.receive(.keyDown,key(1))
+        let began=g.reservation()!.time
+        let originalField=AXUIElementCreateApplication(12345);var field=originalField
+        let base=scenario=="existing" ? "앞뒤":"";let offset=scenario=="existing" ? 1:0
+        var text=base;var range=NSRange(location:offset,length:0);var source=onsetKoreanID;var sent:[Int64]=[]
+        if scenario=="existing"{p.earlyBaseline=OnsetSnapshot(element:field,text:base,selection:range)}
+        if scenario=="caret"{text="ㄱ"}
+        p.testSource={source};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
+        p.testSetRange={_,r in range=r;return .success}
+        p.testPost={e in
+            _=g.receive(e.type,e);guard e.type == .keyDown else{return}
+            let code=e.getIntegerValueField(.keyboardEventKeycode);sent.append(code)
+            if code==15{range=NSRange(location:offset+1,length:0)}
+            if code==40{text=(base as NSString).replacingCharacters(in:NSRange(location:offset,length:0),with:"가")}
+            if code==1{text=(base as NSString).replacingCharacters(in:NSRange(location:offset,length:0),with:"간")}
+        }
+        p.sampleEarly(p.testSnapshot!(),now:began+0.01)
+        p.sampleEarly(p.testSnapshot!(),now:began+0.10)
+        testCheck(sent.isEmpty && g.reservation() != nil && p.earlyWaiting,"hold until publication, never renew reservation")
+        switch scenario {
+        case "timeout":
+            p.sampleEarly(p.testSnapshot!(),now:began+0.301)
+        case "field":field=AXUIElementCreateApplication(12346);p.sampleEarly(p.testSnapshot!())
+        case "changed":text="other";range=NSRange(location:5,length:0);p.sampleEarly(p.testSnapshot!())
+        case "source":source="com.apple.keylayout.ABC";p.sampleEarly(p.testSnapshot!())
+        case "selection":range=NSRange(location:0,length:1);p.sampleEarly(p.testSnapshot!())
+        default:
+            text=(base as NSString).replacingCharacters(in:NSRange(location:offset,length:0),with:"ㄱ");range=NSRange(location:offset+1,length:0)
+            p.sampleEarly(p.testSnapshot!(),now:began+0.12)
+        }
+        let end=Date().addingTimeInterval(0.3)
+        while p.recovering && Date()<end{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
+        if ["field","changed","source","selection"].contains(scenario){
+            testCheck(sent.isEmpty && !p.enabled && p.pending.count+p.retainedInput.count==2,"changed context retains both keys without replay")
+        }else if scenario=="timeout"{
+            testCheck(sent==[40,1] && g.reservation()==nil && g.holdUntil==0 && p.pending.isEmpty && !p.recovering,"timeout releases originals exactly once without editing onset")
+            p.sampleEarly(p.testSnapshot!());testCheck(sent==[40,1],"no duplicate timeout replay")
+        }else{
+            testCheck(sent==[15,40,1] && text==(base as NSString).replacingCharacters(in:NSRange(location:offset,length:0),with:"간") && !p.recovering,"delayed onset/caret composes in order")
+        }
+        p.closeSession()
+    }
+    let d=OnsetRecoveryDetector()
+    testCheck(!d.awaitingFirstConsonant(text:"ㄱㅏ",selection:NSRange(location:0,length:0),previousText:nil,previousCaret:nil,code:15,shift:false))
+    testCheck(!d.awaitingFirstConsonant(text:"old",selection:NSRange(location:0,length:0),previousText:nil,previousCaret:nil,code:15,shift:false))
+    print("PASS: delayed text/caret/existing context, bounded release once, field/body/source/selection cancellation with retained keys")
 } else if ProcessInfo.processInfo.arguments.contains("--test-restart") {
     let c=OnsetRecoveryController();c.active=true
     var time=0.0;var ready=false;var allowed=true;var launches=0;var probe=false

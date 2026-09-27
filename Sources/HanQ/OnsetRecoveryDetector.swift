@@ -4,6 +4,18 @@ struct OnsetRecoveryDetector {
     var layout:OnsetKeyboardLayout = .twoSet
     struct First { let code:UInt16; let shift:Bool; let time:Double; var entered:Double? }
     var first:First?
+    // Only an unchanged pre-key value or a single onset with a stale caret is
+    // evidence of publication lag. Unrelated edits must not extend the wait.
+    func awaitingFirstConsonant(text:String,selection:NSRange,previousText:String?,previousCaret:Int?,code:UInt16,shift:Bool)->Bool {
+        let baseline=previousText ?? ""
+        let caret=previousCaret ?? 0
+        guard selection == NSRange(location:caret,length:0),caret>=0,caret<=baseline.utf16.count else{return false}
+        if text==baseline{return true}
+        let original=baseline as NSString
+        return layout.variants(code:code,shift:shift).contains { onset in
+            text==original.replacingCharacters(in:NSRange(location:caret,length:0),with:onset)
+        }
+    }
     mutating func outsideKey(code:UInt16,shift:Bool,time:Double,korean:Bool,plain:Bool) {
         first=nil
         guard korean,plain,!layout.variants(code:code,shift:shift).isEmpty else{return}

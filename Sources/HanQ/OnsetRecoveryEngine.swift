@@ -140,12 +140,17 @@ final class OnsetRecoveryEngine:NSObject {
         return cachedLayout
     }
     var earlyBaseline:OnsetSnapshot?
+    var earlyObservationTime:Double?
+    var earlyObservedField:AXUIElement?
+    var earlyWaiting=false
     var bufferedBase:Int64=0
-    func sampleEarly(_ observed:OnsetSnapshot?){
+    func sampleEarly(_ observed:OnsetSnapshot?,now:Double=ProcessInfo.processInfo.systemUptime){
         guard let gate else{return}
         guard canBeginRepair() else{gate.configureEarly(false);if gate.reservation() != nil{emergencyStop("manual_edit_busy")};return}
-        let now=ProcessInfo.processInfo.systemUptime
         if let reservation=gate.reservation() {
+            if earlyObservationTime != reservation.time {
+                earlyObservationTime=reservation.time;earlyObservedField=nil;earlyWaiting=false
+            }
             guard currentSource()==reservation.sourceID,let layout=currentLayout() else{emergencyStop("early_source_changed");return}
             repairSourceID=reservation.sourceID
             guard let snap=observed else{
@@ -153,6 +158,8 @@ final class OnsetRecoveryEngine:NSObject {
                 return
             }
             guard snap.selection.length==0 else{emergencyStop("early_selection_changed");return}
+            if let field=earlyObservedField,!CFEqual(field,snap.element){emergencyStop("early_field_changed");return}
+            earlyObservedField=snap.element
             let baseline=earlyBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0.text:nil}
             var detector=OnsetRecoveryDetector(layout:layout)
             detector.outsideKey(code:reservation.code,shift:reservation.shift,time:reservation.time,korean:true,plain:true)
@@ -163,6 +170,15 @@ final class OnsetRecoveryEngine:NSObject {
                 log("early_candidate",["code":reservation.code,"heldMs":(now-reservation.time)*1000])
                 beginRecovery(candidate,snap)
             }else{
+                let caret=baseline == nil ? nil:earlyBaseline?.selection.location
+                let awaiting=detector.awaitingFirstConsonant(text:snap.text,selection:snap.selection,previousText:baseline,previousCaret:caret,code:reservation.code,shift:reservation.shift)
+                // Leave 50ms inside the existing 350ms gate reservation to claim
+                // and release on the next 20ms observation. Never renew its deadline.
+                if awaiting,now-reservation.time<0.30 {
+                    if !earlyWaiting{log("early_waiting_for_text")}
+                    earlyWaiting=true;return
+                }
+                if earlyWaiting && !awaiting{emergencyStop("early_context_changed");return}
                 // Nothing can be safely selected. Keep the app's current text and only
                 // forward the original follow-up events in the same field.
                 guard gate.claimEarly() else{emergencyStop("early_claim_failed");return}
@@ -172,6 +188,7 @@ final class OnsetRecoveryEngine:NSObject {
             }
             return
         }
+        earlyObservationTime=nil;earlyObservedField=nil;earlyWaiting=false
         let layout=currentLayout()
         let eligible=observed==nil && unavailableReason=="not_supported_text_field" && layout != nil
         if eligible{earlyBaseline=lastEditable}
