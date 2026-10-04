@@ -45,7 +45,7 @@ enum MismatchKeyboardLayout {
     }
     private static let positions:[Character:(UInt16,Bool)] = {
         var result:[Character:(UInt16,Bool)]=[:]
-        for code in Array(MismatchRecoveryPlan.keys.keys)+Array(MismatchRecoveryPlan.punctuation.keys) {
+        for code in Array(PhysicalLetterKeys.letters.keys)+Array(MismatchRecoveryPlan.punctuation.keys) {
             for shift in [false,true] {
                 if let char=MismatchRecoveryPlan.character(code,shift)?.first,result[char]==nil{result[char]=(code,shift)}
             }

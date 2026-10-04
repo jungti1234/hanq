@@ -387,7 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let selection: OSStatus
                     if owner.mismatchRecovery.busy {
                         owner.mismatchRecovery.engine.userToggleDuringRecovery();selection=0
-                    } else {selection = KoreanEnglishSwitch.select(externalTarget)}
+                    } else {selection = InputSourceAccess.select(externalTarget)}
                     DispatchQueue.main.async {
                         owner.inputSource.refresh()
                         if selection != 0 { NSLog("입력 소스 전환 실패: %d", selection) }
@@ -409,7 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let edge = result.edge {
                     if edge == "right-down" {
                         if let target {
-                            let result = KoreanEnglishSwitch.select(target)
+                            let result = InputSourceAccess.select(target)
                             DispatchQueue.main.async {
                                 owner.inputSource.refresh()
                                 if result != 0 { NSLog("입력 소스 전환 실패: %d", result) }

@@ -61,6 +61,8 @@ open build/HanQ.app --args --test-hanja-panel
 | [InputDiagnostics.swift](../Sources/HanQ/InputDiagnostics.swift) | 입력 진단 |
 | [Tests/](../Tests/), [scripts/](../scripts/) | 자동 검사와 빌드·진단 도구 |
 
+InputSourceAccess는 현재 입력 소스 ID 조회와 지정 ID 선택만 담당한다. 전환 대상·배열 대체 정책은 각 호출부에 유지한다. PhysicalLetterKeys는 첫 자음·불일치 복구에서 사용하는 영문 물리 키 표를 공유한다.
+
 [Resources/](../Resources/)에는 앱 아이콘 원본(`HanQ.icon`)과 번들 아이콘(`HanQ.icns`), 메뉴바 템플릿 이미지(`HanQ-MenuBar-Template.pdf`), 로고 원본(`HanQ-Logo.svg`)과 앱에서 사용하는 이미지(`HanQ-Logo.png`)가 있다.
 
 빌드에는 실행용 ICNS·메뉴 PDF·로고 PNG만 복사한다. HanQ.icon과 HanQ-Logo.svg 편집 원본은 저장소에 유지하며 앱 번들에는 포함하지 않는다.

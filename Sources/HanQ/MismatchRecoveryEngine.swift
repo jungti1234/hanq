@@ -2,15 +2,6 @@ import AppKit
 import Carbon
 
 let mismatchKoreanID="com.apple.inputmethod.Korean.2SetKorean"
-func mismatchSourceID()->String {
-    guard let s=TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),let p=TISGetInputSourceProperty(s,kTISPropertyInputSourceID) else{return "unknown"}
-    return Unmanaged<CFString>.fromOpaque(p).takeUnretainedValue() as String
-}
-func mismatchSelectSource(_ id:String)->OSStatus {
-    let query=[kTISPropertyInputSourceID as String:id,kTISPropertyInputSourceIsEnabled as String:true,kTISPropertyInputSourceIsSelectCapable as String:true] as CFDictionary
-    guard let list=TISCreateInputSourceList(query,false)?.takeRetainedValue() as? [TISInputSource],let s=list.first else{return -50}
-    return TISSelectInputSource(s)
-}
 struct MismatchSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var selectedText:String?=nil }
 final class MismatchRecoveryEngine:NSObject {
     let detectionOnly:Bool
@@ -121,7 +112,7 @@ final class MismatchRecoveryEngine:NSObject {
     var testSelectSource:((String)->OSStatus)?
     var testSelectionWritable:((AXUIElement)->Bool)?
     var testPost:((CGEvent)->Void)?
-    func currentSource()->String { testSource?() ?? mismatchSourceID() }
+    func currentSource()->String { testSource?() ?? InputSourceAccess.currentID() }
     let systemSwitch=MismatchSourceSwitch()
     var ledger:MismatchReplayLedger?
     var ledgerAfterRepair:MismatchReplayLedger?
@@ -288,10 +279,10 @@ final class MismatchRecoveryEngine:NSObject {
             return
         }
         if locked == nil || !CFEqual(locked!,snap.element){
-            log("field_changed",["previousFieldExisted":locked != nil,"source":mismatchSourceID(),"text":snap.text,"selection":[snap.selection.location,snap.selection.length]])
+            log("field_changed",["previousFieldExisted":locked != nil,"source":InputSourceAccess.currentID(),"text":snap.text,"selection":[snap.selection.location,snap.selection.length]])
             locked=snap.element;plan=nil;planElement=nil;heldKeys=[];lastText=nil
             // A new composer is a new transaction boundary. Never reuse the old field's repair range.
-            lastSource=mismatchSourceID()
+            lastSource=InputSourceAccess.currentID()
         }
     }
     func setRange(_ element:AXUIElement,_ range:NSRange)->AXError{guard !detectionOnly else{return .cannotComplete};if let testSetRange{return testSetRange(element,range)};var cf=CFRange(location:range.location,length:range.length);return AXUIElementSetAttributeValue(element,kAXSelectedTextRangeAttribute as CFString,AXValueCreate(.cfRange,&cf)!)}
@@ -361,7 +352,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         if type == .keyUp {
             heldKeys.remove(event.getIntegerValueField(.keyboardEventKeycode))
-            log("key_observed",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"source":mismatchSourceID(),"candidateActive":plan != nil])
+            log("key_observed",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"source":InputSourceAccess.currentID(),"candidateActive":plan != nil])
             return Unmanaged.passUnretained(event)
         }
         // sample() already read this callback's pre-insertion state. No edit or
@@ -372,11 +363,11 @@ final class MismatchRecoveryEngine:NSObject {
             // outages may retry, but never silently omit a key from that sequence.
             plan=nil
             if type == .keyDown,unavailableReason != "target_not_frontmost",unavailableReason != "secure_input",unavailableReason != "accessibility_permission" {
-                log("untracked_key",["code":event.getIntegerValueField(.keyboardEventKeycode),"source":mismatchSourceID(),"reason":unavailableReason])
+                log("untracked_key",["code":event.getIntegerValueField(.keyboardEventKeycode),"source":InputSourceAccess.currentID(),"reason":unavailableReason])
             }
             return Unmanaged.passUnretained(event)
         }
-        if keyboard{log("key_observed",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"source":mismatchSourceID(),"candidateActive":plan != nil])}
+        if keyboard{log("key_observed",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"source":InputSourceAccess.currentID(),"candidateActive":plan != nil])}
         sourceChanged(currentSource(),snap)
         if type == .keyDown{heldKeys.insert(event.getIntegerValueField(.keyboardEventKeycode))}
         if type == .keyDown{
@@ -388,7 +379,7 @@ final class MismatchRecoveryEngine:NSObject {
             }
             plan=candidate;planElement=snap.element;planStart=ProcessInfo.processInfo.systemUptime
 
-            log("key",["code":event.getIntegerValueField(.keyboardEventKeycode),"roman":candidate.roman,"source":mismatchSourceID()])
+            log("key",["code":event.getIntegerValueField(.keyboardEventKeycode),"roman":candidate.roman,"source":InputSourceAccess.currentID()])
         }else if !keyboard || (type == .flagsChanged && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty){plan=nil;log("candidate_cancelled",["reason":"navigation_or_modifier"])}
         return Unmanaged.passUnretained(event)
     }
@@ -401,7 +392,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard let snap=observed else{return}
         lastSampleSnapshot=snap
         sourceChanged(currentSource(),snap)
-        if lastText != snap.text{log("text",["text":snap.text,"source":mismatchSourceID(),"selection":[snap.selection.location,snap.selection.length]]);lastText=snap.text}
+        if lastText != snap.text{log("text",["text":snap.text,"source":InputSourceAccess.currentID(),"selection":[snap.selection.location,snap.selection.length]]);lastText=snap.text}
         guard let candidate=plan else{return}
         if ProcessInfo.processInfo.systemUptime-planStart>5{log("candidate_cancelled",["reason":"timeout"]);plan=nil;return}
         if candidate.matches(text:snap.text,selection:snap.selection){
@@ -437,7 +428,7 @@ final class MismatchRecoveryEngine:NSObject {
         if !systemSwitch.busy,currentSource()==id{completion();return}
         guard remaining>0 else{log("source_switch_timeout",["wanted":id,"actual":currentSource()]);abort("source_switch_timeout");return}
         if remaining==30,!systemSwitch.busy,currentSource() != id {
-            let result=testSelectSource?(id) ?? mismatchSelectSource(id)
+            let result=testSelectSource?(id) ?? InputSourceAccess.select(id)
             log("source_wait_direct_fallback",["target":id,"result":result,"actual":currentSource()])
         }
         later(0.01){[weak self] in self?.waitSource(id,remaining:remaining-1,completion:completion)}
@@ -467,7 +458,7 @@ final class MismatchRecoveryEngine:NSObject {
             candidate=restored;currentPlan=restored
         }
         guard currentSource()==recoverySourceID else{
-            log("waiting_for_korean_source",["source":mismatchSourceID(),"remaining":remaining])
+            log("waiting_for_korean_source",["source":InputSourceAccess.currentID(),"remaining":remaining])
             guard remaining>0 else{abort("korean_source_timeout");return}
             self.later(0.01){[weak self] in self?.replaceAndReplay(candidate,before,remaining:remaining-1)};return
         }
@@ -515,7 +506,7 @@ final class MismatchRecoveryEngine:NSObject {
         log("interrupted_source_restore",["stage":stage,"source":currentSource(),"targetSource":targetSource,"intendedSource":intendedSource,"attempt":interruptedSourceRestores,"pendingEvents":pending.count])
         // This is a known target restoration, not a toggle. Another Control-
         // Space can be lost among modifier transitions or toggle the wrong way.
-        let result=testSelectSource?(targetSource) ?? mismatchSelectSource(targetSource)
+        let result=testSelectSource?(targetSource) ?? InputSourceAccess.select(targetSource)
         log("interrupted_source_direct_selection",["target":targetSource,"result":result,"stage":stage])
         guard result==noErr else{park(stage+"_source_restore_failed");return}
         waitSource(targetSource,completion:resume)
@@ -799,7 +790,7 @@ final class MismatchRecoveryEngine:NSObject {
     @objc func copyPending(){
         let text=(retained+pending).filter{$0.type == .keyDown}.map{event -> String in
             let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            guard let key=MismatchRecoveryPlan.keys[code],event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{return "[keyCode:\(code)]"}
+            guard let key=PhysicalLetterKeys.letters[code],event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{return "[keyCode:\(code)]"}
             return event.flags.contains(.maskShift) ? key.uppercased():key
         }.joined()
         guard !text.isEmpty else{retained=[];pending=[];suspended=false;return}
@@ -841,7 +832,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard let tap else{log("start_failed");return}
         runSource=CFMachPortCreateRunLoopSource(kCFAllocatorDefault,tap,0)
         CFRunLoopAddSource(CFRunLoopGetMain(),runSource,.commonModes)
-        enabled=true;recovering=false;plan=nil;locked=nil;lastText=nil;lastSource=mismatchSourceID();started=ProcessInfo.processInfo.systemUptime
+        enabled=true;recovering=false;plan=nil;locked=nil;lastText=nil;lastSource=InputSourceAccess.currentID();started=ProcessInfo.processInfo.systemUptime
         switchGate=MismatchSwitchGate(accepts:{[weak self] in
             guard let self,self.enabled,!self.suspended,self.recovering,self.canToggleRightCommand(),!IsSecureEventInputEnabled(),let target=self.target else{return false}
             return NSWorkspace.shared.frontmostApplication?.processIdentifier==target.processIdentifier

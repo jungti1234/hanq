@@ -10,10 +10,9 @@ struct MismatchRecoveryPlan {
     // Normal mismatch detection remains ASCII-only.
     var verifiedReplacement:String?
     var codes: [(UInt16, Bool)] = []
-    static let keys: [UInt16:String] = [0:"a",1:"s",2:"d",3:"f",4:"h",5:"g",6:"z",7:"x",8:"c",9:"v",11:"b",12:"q",13:"w",14:"e",15:"r",16:"y",17:"t",31:"o",32:"u",34:"i",35:"p",37:"l",38:"j",40:"k",45:"n",46:"m"]
     static let punctuation: [UInt16:(String,String)] = [18:("1","!"),19:("2","@"),20:("3","#"),21:("4","$"),23:("5","%"),22:("6","^"),26:("7","&"),28:("8","*"),25:("9","("),29:("0",")"),27:("-","_"),24:("=","+"),33:("[","{"),30:("]","}"),42:("\\","|"),41:(";",":"),39:("'","\""),43:(",","<"),47:(".",">"),44:("/","?"),50:("`","~"),49:(" "," ")]
     static func character(_ code:UInt16,_ shift:Bool)->String? {
-        if let key=keys[code]{return shift ? key.uppercased():key}
+        if let key=PhysicalLetterKeys.letters[code]{return shift ? key.uppercased():key}
         guard let pair=punctuation[code] else{return nil}
         return shift ? pair.1:pair.0
     }

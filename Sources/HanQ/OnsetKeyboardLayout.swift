@@ -18,7 +18,7 @@ struct OnsetKeyboardLayout {
         }
         var normal:[UInt16:String]=[:],shifted:[UInt16:String]=[:]
         if layout.kind == .twoSet {
-            for (code,key) in OnsetRecoveryPlan.keys {
+            for (code,key) in PhysicalLetterKeys.letters {
                 if let char=layout.keys[Character(key)],let value=initial(char){normal[code]=value}
                 if let char=layout.keys[Character(key.uppercased())],let value=initial(char){shifted[code]=value}
             }

@@ -2,10 +2,6 @@ import AppKit
 import Carbon
 
 let onsetKoreanID="com.apple.inputmethod.Korean.2SetKorean"
-func onsetSourceID()->String {
-    guard let s=TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),let p=TISGetInputSourceProperty(s,kTISPropertyInputSourceID) else{return "unknown"}
-    return Unmanaged<CFString>.fromOpaque(p).takeUnretainedValue() as String
-}
 struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange }
 final class OnsetRecoveryEngine:NSObject {
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
@@ -190,7 +186,7 @@ final class OnsetRecoveryEngine:NSObject {
     var testSetRange:((AXUIElement,NSRange)->AXError)?
     var testSource:(()->String)?
     var testPost:((CGEvent)->Void)?
-    func currentSource()->String { testSource?() ?? onsetSourceID() }
+    func currentSource()->String { testSource?() ?? InputSourceAccess.currentID() }
     @discardableResult func post(_ event:CGEvent)->Bool {
         if gate?.healthy()==false{return false}
         if testPost == nil && (!AXIsProcessTrusted() || IsSecureEventInputEnabled()){return false}
@@ -300,10 +296,10 @@ final class OnsetRecoveryEngine:NSObject {
         guard let snap else{return}
         observeFieldChanges(snap.element)
         if locked == nil || !CFEqual(locked!,snap.element){
-            log("field_changed",["previousFieldExisted":locked != nil,"source":onsetSourceID(),"text":snap.text,"selection":[snap.selection.location,snap.selection.length]])
+            log("field_changed",["previousFieldExisted":locked != nil,"source":InputSourceAccess.currentID(),"text":snap.text,"selection":[snap.selection.location,snap.selection.length]])
             locked=snap.element;planElement=nil;lastText=nil
             // A new composer is a new transaction boundary. Never reuse the old field's repair range.
-            lastSource=onsetSourceID()
+            lastSource=InputSourceAccess.currentID()
         }
     }
     func setRange(_ element:AXUIElement,_ range:NSRange)->AXError{guard gate?.healthy() ?? true else{return .cannotComplete};if let testSetRange{return testSetRange(element,range)};var cf=CFRange(location:range.location,length:range.length);return AXUIElementSetAttributeValue(element,kAXSelectedTextRangeAttribute as CFString,AXValueCreate(.cfRange,&cf)!)}
@@ -322,7 +318,7 @@ final class OnsetRecoveryEngine:NSObject {
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}
         gate.beat();gateThread=OnsetGateThread(gate)
-        enabled=true;recovering=false;lastEditable=nil;pending=[];locked=nil;lastText=nil;lastSource=onsetSourceID()
+        enabled=true;recovering=false;lastEditable=nil;pending=[];locked=nil;lastText=nil;lastSource=InputSourceAccess.currentID()
         log("session_start",["toolVersion":"0.1.19","build":20,"mode":"first_consonant","targetPID":target.processIdentifier,"source":lastSource])
         timer=Timer.scheduledTimer(withTimeInterval:0.02,repeats:true){[weak self] _ in self?.automaticTick()}
         gateThread?.start()

@@ -115,12 +115,4 @@ enum KoreanEnglishSwitch {
         romanSourceID(current: current, available: InputSourceSnapshot.available(),
                       rememberedKorean: UserDefaults.standard.string(forKey: "lastKoreanSourceID"))
     }
-    static func select(_ id: String) -> OSStatus {
-        let query = [kTISPropertyInputSourceID as String: id,
-                     kTISPropertyInputSourceIsEnabled as String: true,
-                     kTISPropertyInputSourceIsSelectCapable as String: true] as CFDictionary
-        guard let list = TISCreateInputSourceList(query, false)?.takeRetainedValue() as? [TISInputSource],
-              let source = list.first else { return OSStatus(-50) }
-        return TISSelectInputSource(source)
-    }
 }

@@ -56,7 +56,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
         p.testSetRange={ [weak self] _,range in self?.view.setSelectedRange(range);return .success }
         p.testSelectionWritable={_ in true}
         // The engine decides the target IDs; the fixture selects real IMEs directly.
-        p.testSelectSource={id in let result=mismatchSelectSource(id);print("select",id,result,mismatchSourceID());return result}
+        p.testSelectSource={id in let result=InputSourceAccess.select(id);print("select",id,result,InputSourceAccess.currentID());return result}
         posts=0
         p.testPost={ [weak self] event in
             guard let self,NSApp.isActive,self.window.firstResponder === self.view else{return}
@@ -77,7 +77,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
             guard let self else{return}
             if !p.recovering {
                 self.timer?.invalidate()
-                guard self.view.string=="앞🙂간뒤",self.view.selectedRange()==NSRange(location:4,length:0),p.retained.isEmpty,p.pending.isEmpty,self.posts==6,mismatchSourceID()==id else{self.finish(false,"\(id): text=\(self.view.string), posts=\(self.posts), retained=\(p.retained.count)");return}
+                guard self.view.string=="앞🙂간뒤",self.view.selectedRange()==NSRange(location:4,length:0),p.retained.isEmpty,p.pending.isEmpty,self.posts==6,InputSourceAccess.currentID()==id else{self.finish(false,"\(id): text=\(self.view.string), posts=\(self.posts), retained=\(p.retained.count)");return}
                 print("PASS:",id,"간; 3 down/up pairs, source preserved");fflush(stdout)
                 p.closeSession();DispatchQueue.main.asyncAfter(deadline:.now()+0.1){self.next()}
             } else if ProcessInfo.processInfo.systemUptime-self.began>8{self.finish(false,"timeout: \(id)")}

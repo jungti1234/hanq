@@ -51,7 +51,7 @@ extension AppDelegate {
     }
 
     @objc private func testHanjaSource() {
-        _ = KoreanEnglishSwitch.select("com.apple.inputmethod.Korean.2SetKorean")
+        _ = InputSourceAccess.select("com.apple.inputmethod.Korean.2SetKorean")
     }
 
     @objc private func testHanjaRepair() {
