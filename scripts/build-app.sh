@@ -49,17 +49,22 @@ mkdir -p .build/hanq/module-cache "$(dirname "$output")"
 stage=$(mktemp -d "$PWD/.build/hanq/stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 app="$stage/HanQ.app"
-if [[ ! -d Resources/HanQ.icon || ! -f Resources/HanQ.icns ]]; then
-  echo '앱 아이콘 리소스가 없습니다: Resources/HanQ.icon 및 Resources/HanQ.icns' >&2
-  exit 1
-fi
+runtime_resources=(HanQ.icns HanQ-MenuBar-Template.pdf HanQ-Logo.png)
+for resource in "${runtime_resources[@]}"; do
+  if [[ ! -f "Resources/$resource" ]]; then
+    echo "앱 리소스가 없습니다: Resources/$resource" >&2
+    exit 1
+  fi
+done
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 "${compiler[@]}" -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/*.swift -o "$app/Contents/MacOS/HanQ"
 mkdir -p "$app/Contents/Frameworks"
 ditto "$sparkle/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 cp "$sparkle/LICENSE" "$app/Contents/Resources/Sparkle-LICENSE.txt"
-cp -R Resources/. "$app/Contents/Resources/"
-find "$app/Contents/Resources" -name .DS_Store -type f -delete
+# Keep editable artwork in the repository, outside the distributed bundle.
+for resource in "${runtime_resources[@]}"; do
+  cp "Resources/$resource" "$app/Contents/Resources/"
+done
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
 swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Tests/main.swift -o "$stage/filter-tests"
 "$stage/filter-tests"

@@ -63,6 +63,8 @@ open build/HanQ.app --args --test-hanja-panel
 
 [Resources/](../Resources/)에는 앱 아이콘 원본(`HanQ.icon`)과 번들 아이콘(`HanQ.icns`), 메뉴바 템플릿 이미지(`HanQ-MenuBar-Template.pdf`), 로고 원본(`HanQ-Logo.svg`)과 앱에서 사용하는 이미지(`HanQ-Logo.png`)가 있다.
 
+빌드에는 실행용 ICNS·메뉴 PDF·로고 PNG만 복사한다. HanQ.icon과 HanQ-Logo.svg 편집 원본은 저장소에 유지하며 앱 번들에는 포함하지 않는다.
+
 ### 외부 키보드 설정 검증
 
 `bash scripts/test-external-keyboards.sh`는 임시 UserDefaults와 합성 이벤트로 기기 식별·설정 보존·두 키 등록·반복·놓음·기기 분리·다른 키보드 modifier 보존을 검사한다. `--inventory`는 실제 IORegistry에서 읽은 키보드 서비스 개수만 출력한다. `--ui`는 별도 테스트 프로세스에서 실제 설정 창을 열고 저장·취소·분리 경로를 확인하며 `.build/hanq/external-keyboard-setup.png`를 생성한다. 전역 이벤트 탭과 실제 한Q 설정은 사용하지 않는다.
