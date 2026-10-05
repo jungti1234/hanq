@@ -6,7 +6,7 @@ func runLayoutTests(){
     let field=AXUIElementCreateApplication(12345)
     for id in ids {
         probeTestCheck(MismatchKeyboardLayout.supports(id),"installed layout unavailable: \(id)")
-        let compatibility=MismatchKeyboardLayout.load(id)!.kind == .twoSet
+        let compatibility=MismatchKeyboardLayout.load(id)!.kind != .threeSet
         let initial:Character=compatibility ? "ㄱ":"ᄀ"
         let vowel:Character=compatibility ? "ㅏ":"ᅡ"
         let final:Character=compatibility ? "ㄴ":"ᆫ"

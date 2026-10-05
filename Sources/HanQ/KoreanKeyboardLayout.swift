@@ -3,7 +3,7 @@ import Foundation
 /// Converts QWERTY ASCII keystrokes using the explicitly selected Korean layout.
 /// Unavailable or unsupported layouts use the product default: two-set Korean.
 struct KoreanKeyboardLayout {
-    enum Kind { case twoSet, threeSet }
+    enum Kind { case twoSet, threeSet, gongjinRoman, hncRoman }
     let kind: Kind
     let keys: [Character: Character]
     // Preserve Apple's physical positions for features that replay real keys.
@@ -14,11 +14,17 @@ struct KoreanKeyboardLayout {
     static let threeSetID = "com.apple.inputmethod.Korean.3SetKorean"
     static let threeSet390ID = "com.apple.inputmethod.Korean.390Sebulshik"
 
+    static let gongjinID = "com.apple.inputmethod.Korean.GongjinCheongRomaja"
+    static let hncID = "com.apple.inputmethod.Korean.HNCRomaja"
+    static let supportedIDs = [twoSetID, threeSetID, threeSet390ID, gongjinID, hncID]
+
     static func load(sourceID: String?) -> KoreanKeyboardLayout? {
         switch sourceID {
         case twoSetID: return twoSet
         case threeSetID: return threeSet
         case threeSet390ID: return threeSet390
+        case gongjinID: return gongjin
+        case hncID: return hnc
         default: return nil
         }
     }
@@ -41,6 +47,15 @@ struct KoreanKeyboardLayout {
 
     private static let threeSet = readSystemLayout(named: "3SetHangul")
     private static let threeSet390 = readSystemLayout(named: "390Hangul")
+
+    private static let gongjin = romanLayout(named: "GJCRomaja", kind: .gongjinRoman)
+    private static let hnc = romanLayout(named: "HNCRomaja", kind: .hncRoman)
+
+    private static func romanLayout(named name: String, kind: Kind) -> KoreanKeyboardLayout? {
+        guard let table = readSystemLayout(named: name, romanized: true) else { return nil }
+        return KoreanKeyboardLayout(kind: kind, keys: table.keys,
+            physicalKeys: table.physicalKeys, shiftedPhysicalKeys: table.shiftedPhysicalKeys)
+    }
 
     static func readSystemLayout(named name: String, romanized:Bool=false) -> KoreanKeyboardLayout? {
         // Resource locations differ between app-based and extension-based macOS IMEs.

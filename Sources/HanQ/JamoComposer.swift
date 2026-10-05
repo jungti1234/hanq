@@ -16,7 +16,12 @@ enum JamoComposer {
         guard scalars.allSatisfy({ (0x20...0x7E).contains($0.value) || [9, 10, 13].contains($0.value) }),
               scalars.contains(where: { (65...90).contains($0.value) || (97...122).contains($0.value) }) else { return nil }
         let jamo = String(selected.map { layout.keys[$0] ?? $0 })
-        let result = layout.kind == .twoSet ? compose(jamo) : composeThreeSet(jamo)
+        let result: String
+        switch layout.kind {
+        case .twoSet: result = compose(jamo)
+        case .threeSet: result = composeThreeSet(jamo)
+        case .gongjinRoman, .hncRoman: result = composeRomanized(jamo, kind: layout.kind)
+        }
         return result == selected ? nil : result
     }
 
@@ -145,5 +150,31 @@ enum JamoComposer {
         }
         guard start < selection.location else { return nil }
         return NSRange(location: start, length: selection.location - start)
+    }
+}
+
+extension JamoComposer {
+    // Apple Romanized layouts have phonetic vowel combinations absent in two-set.
+    static func composeRomanized(_ text:String,kind:KoreanKeyboardLayout.Kind)->String {
+        var pairs: [String:Character] = kind == .gongjinRoman ? ["ㅏㅔ":"ㅐ","ㅔㅗ":"ㅓ","ㅔㅜ":"ㅡ","ㅣㅏ":"ㅑ","ㅣㅔ":"ㅖ","ㅣㅣ":"ㅢ","ㅣㅗ":"ㅛ","ㅣㅜ":"ㅠ","ㅗㅔ":"ㅚ","ㅗㅗ":"ㅜ","ㅜㅏ":"ㅘ","ㅜㅔ":"ㅞ","ㅜㅣ":"ㅟ"] : ["ㅏㅣ":"ㅐ","ㅓㅣ":"ㅔ","ㅣㅏ":"ㅑ","ㅣㅓ":"ㅕ","ㅣㅗ":"ㅛ","ㅣㅜ":"ㅠ","ㅗㅏ":"ㅘ","ㅗㅣ":"ㅚ","ㅜㅓ":"ㅝ","ㅜㅣ":"ㅟ","ㅡㅣ":"ㅢ"]
+        if kind == .gongjinRoman{pairs.merge(["ㅑㅔ":"ㅒ","ㅖㅗ":"ㅕ","ㅞㅗ":"ㅝ","ㅘㅔ":"ㅙ"]){_,new in new}}
+        let vowels=Set(Array("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"))
+        let initials=Set(Array("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"))
+        var output:[Character]=[]
+        let chars=Array(text);var i=0
+        while i<chars.count {
+            if i+1<chars.count {
+                let pair=String(chars[i...i+1])
+                if let combined=pairs[pair]{output.append(combined);i+=2;continue}
+                if pair=="ㄴㄱ" {
+                    let syllable=output.count>=2 && vowels.contains(output[output.count-1]) && initials.contains(output[output.count-2])
+                    let nextVowel=i+2<chars.count && vowels.contains(chars[i+2])
+                    if !syllable || !nextVowel{output.append("ㅇ");i+=2;continue}
+                }
+            }
+            if let last=output.last,let combined=pairs[String([last,chars[i]])]{output[output.count-1]=combined}
+            else{output.append(chars[i])};i+=1
+        }
+        return JamoComposer.compose(String(output),vowelCombinations:[:])
     }
 }

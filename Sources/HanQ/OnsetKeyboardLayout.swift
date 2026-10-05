@@ -11,13 +11,13 @@ struct OnsetKeyboardLayout {
         guard let layout=KoreanKeyboardLayout.load(sourceID:sourceID) else{return nil}
         func initial(_ char:Character)->String? {
             guard let scalar=char.unicodeScalars.first,char.unicodeScalars.count==1 else{return nil}
-            if layout.kind == .twoSet{return initials.contains(char) ? String(char):nil}
+            if layout.kind != .threeSet{return initials.contains(char) ? String(char):nil}
             // Three-set final consonant keys must not be treated as initial keys.
             guard (0x1100...0x1112).contains(scalar.value) else{return nil}
             return String(char)
         }
         var normal:[UInt16:String]=[:],shifted:[UInt16:String]=[:]
-        if layout.kind == .twoSet {
+        if layout.physicalKeys.isEmpty {
             for (code,key) in PhysicalLetterKeys.letters {
                 if let char=layout.keys[Character(key)],let value=initial(char){normal[code]=value}
                 if let char=layout.keys[Character(key.uppercased())],let value=initial(char){shifted[code]=value}

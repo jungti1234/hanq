@@ -10,9 +10,9 @@ func testCheck(_ condition:@autoclosure ()->Bool,_ message:@autoclosure ()->Stri
 if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     func key(_ code:UInt16,_ down:Bool=true,_ shift:Bool=false)->CGEvent{let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;e.flags=shift ? .maskShift:[];return e}
     var cases=0
-    for id in [KoreanKeyboardLayout.twoSetID,KoreanKeyboardLayout.threeSetID,KoreanKeyboardLayout.threeSet390ID] {
+    for id in KoreanKeyboardLayout.supportedIDs {
         guard let layout=OnsetKeyboardLayout.load(sourceID:id),let system=KoreanKeyboardLayout.load(sourceID:id) else{testCheck(false,"installed layout missing: \(id)");exit(1)}
-        let vowel:UInt16=id==onsetKoreanID ? 40:3
+        let vowel:UInt16=system.kind == .threeSet ? 3:(id==onsetKoreanID ? 40:0)
         for shift in [false,true] {
             for code in (shift ? layout.shifted:layout.normal).keys.sorted() {
                 let variants=layout.variants(code:code,shift:shift)

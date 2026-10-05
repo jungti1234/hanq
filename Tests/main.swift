@@ -244,7 +244,7 @@ check(recoverySource(nil) == nil, "unreadable source resolves to missing ID for 
 check(recoverySource(abc, abc.id) == nil, "non-Korean remembered ID rejected")
 check(recoverySource(three, two.id) == three.id, "unknown current Korean is not replaced with two-set")
 check(KoreanKeyboardLayout.load(sourceID: three.id) == nil, "unsupported third-party source rejected")
-check(KoreanKeyboardLayout.load(sourceID: "com.apple.inputmethod.Korean.HNCRomaja") == nil, "unsupported romanization source rejected")
+check(KoreanKeyboardLayout.load(sourceID: KoreanKeyboardLayout.hncID) != nil, "Hancom romanization source supported")
 check(KoreanKeyboardLayout.load(sourceID: nil) == nil, "missing layout rejected")
 check(JamoComposer.selectedRomanReplacement(in: "dkssud", selection: NSRange(location: 0, length: 6), layout: KoreanKeyboardLayout.resolve(sourceID: nil)) == "안녕",
       "ASCII selection uses two-set without a supported layout")
@@ -311,7 +311,7 @@ print("PASS: \(checks) total assertions including layout-aware recovery and inst
 let fallbackIDs: [String?] = [
     recoverySource(nil), recoverySource(abc, nil), recoverySource(abc, "removed"),
     recoverySource(abc, nativeThree.id, [two, abc]), recoverySource(three),
-    "com.apple.inputmethod.Korean.HNCRomaja"
+    "third.party.unknown"
 ]
 for id in fallbackIDs {
     let layout = KoreanKeyboardLayout.resolve(sourceID: id)
@@ -331,3 +331,23 @@ for id in [nativeThree.id, native390.id] {
 check(roman("한글 abc", KoreanKeyboardLayout.resolve(sourceID: nil)) == nil, "fallback preserves non-ASCII safety condition")
 check(roman("123 !?", KoreanKeyboardLayout.resolve(sourceID: nil)) == nil, "fallback still requires a letter")
 print("PASS: \(checks) total assertions including two-set fallback policy")
+
+// Independent, previously observed Apple IME output exercises the public selection path.
+let nativeRows = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath:
+    "Tests/MismatchRecovery/NativeLayoutExpectations.json"))) as! [[String:String]]
+var nativeRomanCaseCount = 0
+for row in nativeRows where [KoreanKeyboardLayout.gongjinID, KoreanKeyboardLayout.hncID].contains(row["source"]!) {
+    let input = row["keys"]!, expected = row["text"]!
+    let layout = KoreanKeyboardLayout.load(sourceID: row["source"]!)!
+    check(roman(input, layout) == (expected == input ? nil : expected), "Romanized native reference: \(row)")
+    nativeRomanCaseCount += 1
+}
+for id in [KoreanKeyboardLayout.gongjinID, KoreanKeyboardLayout.hncID] {
+    let layout = KoreanKeyboardLayout.load(sourceID:id)!
+    check(roman("gan\tgan\r\ngan! 123", layout) == "간\t간\r\n간! 123", "Romanized whitespace boundaries")
+    for input in ["한글 gan", "123 !?", "🙂gan"] { check(roman(input,layout) == nil, "Romanized selection eligibility") }
+    let text = "🙂gan뒤"
+    check(JamoComposer.selectedRomanReplacement(in:text, selection:NSRange(location:2,length:3), layout:layout) == "간", "Romanized UTF-16 selection")
+    check(roman("rks",KoreanKeyboardLayout.resolve(sourceID:id,loader:{_ in nil})) == "간", "unreadable Romanized resource fallback")
+}
+print("PASS: \(nativeRomanCaseCount) native Romanized selection references; \(checks) total assertions")
