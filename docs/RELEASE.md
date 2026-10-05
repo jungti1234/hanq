@@ -120,6 +120,8 @@ python3 scripts/release.py draft dist/0.1.0-beta.1-build74
 
 ## 설치와 업데이트 검증
 
+0.3.0 베타의 물리 키 실사용 확인은 배포 후 사용자 피드백으로 보완한다. 운영 방식은 [베타 검증 운영](DEVELOPMENT.md#베타-검증-운영)을 따른다. 이는 아래 배포 파일의 설치·업데이트 검사와 별개이며, 실제 배포는 유지관리자의 요청 시 진행한다.
+
 ### 소개 사이트 관리
 
 소개 페이지 원본은 `updates/site/index.html`, `styles.css`, `header.css`, `site.js`, `assets/`에서 관리한다. 이용 조건 페이지는 열 때마다 `terms.js`가 공개 저장소 `main`의 `LICENSE`를 가져와 표시한다. LICENSE를 main에 푸시하면 사이트 재배포 없이 다음 페이지 로드부터 반영되며, GitHub 원문 제공 측의 캐시로 반영이 지연될 수 있다. 조회 실패 시 예전 사본 대신 재시도·원문 링크를 안내한다. 사이트 게시 시 `terms.html`, `terms.css`, `terms.js`도 함께 반영한다. 로컬 미리보기는 `python3 -m http.server 8765 --bind 127.0.0.1 --directory updates/site`로 실행한다. 게시할 때는 이 페이지 파일과 자산을 `gh-pages` 브랜치 루트에 함께 반영한다. 소개 페이지만 변경할 때는 `appcast.xml`과 `policy.json`을 수정하지 않는다. 사이트 문구·디자인 변경만으로 앱 버전이나 빌드 번호를 올리지 않는다.
