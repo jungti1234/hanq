@@ -22,3 +22,7 @@ for group in detector gate delete; do
     swiftc -module-cache-path .build/hanq/module-cache "${sources[@]}" "$fixture" -o "$stage/$group"
     "$stage/$group"
 done
+
+# Initial AX failure, grace period, safe resumption and old-event isolation.
+swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/EarlyReadFailure/main.swift -o "$stage/early-read-failure"
+"$stage/early-read-failure"

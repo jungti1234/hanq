@@ -133,7 +133,10 @@ final class OnsetRecoveryEngine:NSObject {
             guard currentSource()==reservation.sourceID,let layout=currentLayout() else{emergencyStop("early_source_changed");return}
             repairSourceID=reservation.sourceID
             guard let snap=observed else{
-                if !transientReadFailure || now-reservation.time>=0.15{emergencyStop("early_field_unavailable")}
+                if !transientReadFailure || now-reservation.time>=0.15 {
+                    if transientReadFailure { pauseForContext("early_field_unavailable") }
+                    else { emergencyStop("early_field_unavailable") }
+                }
                 return
             }
             guard snap.selection.length==0 else{emergencyStop("early_selection_changed");return}
