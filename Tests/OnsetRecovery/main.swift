@@ -131,7 +131,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
             testCheck(g.reservation()?.shift==true,"Shift before consonant must preserve the outside hint")
             let shiftUp=key(shiftCode,false,[]);shiftUp.type = .flagsChanged
             let follow=[key(code,false,.maskShift),shiftUp,key(40,true,[]),key(40,false,[])]
-            for e in follow{testCheck(g.receive(e.type,e)==nil)}
+            for (index,e) in follow.enumerated(){testCheck((g.receive(e.type,e) != nil)==(index==0),"only already delivered first key release passes")}
             let field=AXUIElementCreateApplication(12345);var text=jamo;var range=NSRange(location:1,length:0)
             var sent:[CGEvent]=[]
             p.testSource={onsetKoreanID};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
@@ -149,7 +149,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
             p.sample();let deadline=Date().addingTimeInterval(0.5)
             while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
             testCheck(text==syllable && !p.recovering && p.pending.isEmpty,"code=\(code) text=\(text) sent=\(sent.count) pending=\(p.pending.count) enabled=\(p.enabled) recovering=\(p.recovering) waiting=\(p.waitingForContext)")
-            testCheck(sent.count==6 && sent[3].type == .flagsChanged && !sent[3].flags.contains(.maskShift),"Shift release stays ordered before vowel")
+            testCheck(sent.count==5 && sent[2].type == .flagsChanged && !sent[2].flags.contains(.maskShift),"Shift release stays ordered before vowel")
             p.closeSession()
         }
     }
@@ -170,7 +170,8 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true}
         let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
         testCheck(g.receive(.keyDown,key(15)) != nil)
-        for (k,d):(CGKeyCode,Bool) in [(15,false),(40,true),(40,false),(1,true),(1,false)]{testCheck(g.receive(d ? .keyDown:.keyUp,key(k,d))==nil)}
+        testCheck(g.receive(.keyUp,key(15,false)) != nil,"release of original first down passes")
+        for (k,d):(CGKeyCode,Bool) in [(40,true),(40,false),(1,true),(1,false)]{testCheck(g.receive(d ? .keyDown:.keyUp,key(k,d))==nil)}
         if alreadyCollected{p.collectHeld()}
         let field=AXUIElementCreateApplication(12345);var text="ㄱ";var range=NSRange(location:1,length:0);var codes:[Int64]=[]
         p.testSource={onsetKoreanID};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}

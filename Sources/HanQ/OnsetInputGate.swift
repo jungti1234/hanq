@@ -8,13 +8,28 @@ final class OnsetInputGate {
     }
     struct Reservation { let code:UInt16;let shift:Bool;let time:Double;let sourceID:String }
     var early:Reservation?
+    // Expiration must be acknowledged on the main thread before another hint.
+    // An empty gate does not imply an empty engine-side pending queue.
+    var expiredEarly=false
+    var earlyReleasePending=false
+    var observationNeeded:(()->Void)?
+    func takeEarlyExpiration()->Bool {
+        lock.lock();defer{lock.unlock()}
+        let expired=expiredEarly;expiredEarly=false;return expired
+    }
+    // Called only under lock. No editing/replay has begun while early is present.
+    func expireOrFail(_ reason:String){
+        guard early != nil,held.isEmpty else{fail(reason);return}
+        early=nil;earlyReleasePending=false;holdUntil=0;hintUntil=0;expiredEarly=true
+        DispatchQueue.main.async{self.observationNeeded?()}
+    }
     var hintUntil=0.0
     var hintSourceID="com.apple.inputmethod.Korean.2SetKorean"
     var hintNormal:Set<UInt16>=[0,1,2,3,5,6,7,8,9,12,13,14,15,17]
     var hintShifted:Set<UInt16>=[0,1,2,3,5,6,7,8,9,12,13,14,15,17]
     func configureEarly(_ allowed:Bool,sourceID:String="com.apple.inputmethod.Korean.2SetKorean",normal:Set<UInt16>=[0,1,2,3,5,6,7,8,9,12,13,14,15,17],shifted:Set<UInt16>=[0,1,2,3,5,6,7,8,9,12,13,14,15,17]){
         lock.lock();defer{lock.unlock()}
-        hintUntil=allowed ? ProcessInfo.processInfo.systemUptime+0.15:0
+        hintUntil=allowed && !expiredEarly && !stopped ? ProcessInfo.processInfo.systemUptime+0.15:0
         hintSourceID=sourceID;hintNormal=normal;hintShifted=shifted
     }
     func reservation()->Reservation?{lock.lock();defer{lock.unlock()};return early}
@@ -48,8 +63,8 @@ final class OnsetInputGate {
         lock.lock();defer{lock.unlock()}
         guard !stopped else{return}
         let now=ProcessInfo.processInfo.systemUptime
-        if holdUntil>0 && now-heartbeat>=0.25{fail("observation_stale")}
-        else if holdUntil>0 && now>=holdUntil{fail("hold_deadline")}
+        if holdUntil>0 && now-heartbeat>=0.25{expireOrFail("observation_stale")}
+        else if holdUntil>0 && now>=holdUntil{expireOrFail("hold_deadline")}
     }
     func stop(){lock.lock();stopped=true;holdUntil=0;early=nil;hintUntil=0;lock.unlock()}
     func healthy()->Bool{lock.lock();defer{lock.unlock()};return !stopped}
@@ -73,11 +88,18 @@ final class OnsetInputGate {
         guard !stopped else{return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{fail("tap_disabled");return Unmanaged.passUnretained(event)}
         let now=ProcessInfo.processInfo.systemUptime
-        guard holdUntil==0 || now-heartbeat<0.25 else{fail("observation_stale");return Unmanaged.passUnretained(event)}
+        if holdUntil>0 && now-heartbeat>=0.25{expireOrFail("observation_stale");return Unmanaged.passUnretained(event)}
         if holdUntil>0 {
-            guard now<holdUntil else{fail("hold_deadline");return Unmanaged.passUnretained(event)}
+            guard now<holdUntil else{expireOrFail("hold_deadline");return Unmanaged.passUnretained(event)}
             guard type == .keyDown || type == .keyUp || type == .flagsChanged else{fail("pointer_during_repair");return Unmanaged.passUnretained(event)}
             guard event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{fail("shortcut_during_repair");return Unmanaged.passUnretained(event)}
+            // The original first down already went to the editor. Its release
+            // can follow it before a repair is claimed; never bypass queued input.
+            if let first=early,earlyReleasePending,type == .keyUp,
+               UInt16(event.getIntegerValueField(.keyboardEventKeycode))==first.code {
+                earlyReleasePending=false;return Unmanaged.passUnretained(event)
+            }
+            earlyReleasePending=false
             guard held.count<128,let copy=event.copy() else{fail("buffer_limit");return Unmanaged.passUnretained(event)}
             held.append(copy);return nil
         }
@@ -92,7 +114,7 @@ final class OnsetInputGate {
            (event.flags.contains(.maskShift) ? hintShifted:hintNormal).contains(code) {
             // Start holding subsequent events before returning this first key to the OS.
             early=Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:hintSourceID)
-            hintUntil=0;holdUntil=now+0.35
+            earlyReleasePending=true;hintUntil=0;holdUntil=now+0.35
         }
         if let copy=event.copy(){
             DispatchQueue.main.async{self.deliver?(copy)}

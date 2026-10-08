@@ -52,4 +52,34 @@ let synthetic=OnsetInputGate(marker:99);synthetic.beat();_ = synthetic.begin();l
 check(synthetic.receive(.keyDown,own) != nil && synthetic.take().isEmpty,"own replay not captured")
 check(synthetic.seenCount()==1,"synthetic crossing counted before release")
 check(synthetic.receive(.keyUp,own) != nil && synthetic.seenCount()==2,"each synthetic crossing acknowledged")
+// Expiration of an untouched first key must not tear down future observation.
+func reserved()->OnsetInputGate {
+    let gate=OnsetInputGate(marker:99);gate.beat();gate.configureEarly(true)
+    let key=event(15);key.flags=[]
+    check(gate.receive(.keyDown,key) != nil,"initial down passes")
+    check(gate.reservation() != nil,"initial reservation exists")
+    return gate
+}
+for polling in [false,true] {
+    let gate=reserved();let up=event(15,false);up.flags=[]
+    check(gate.receive(.keyUp,up) != nil && gate.take().isEmpty,"first release passes exactly once")
+    gate.heartbeat=0
+    if polling{gate.poll()}else{check(gate.receive(.keyDown,event(40)) != nil,"expiry event passes")}
+    check(gate.healthy() && gate.reservation()==nil,"empty expiry preserves tap")
+    gate.configureEarly(true)
+    check(gate.receive(.keyDown,event(15)) != nil && gate.reservation()==nil,"cannot rearm before main acknowledgment")
+    check(gate.takeEarlyExpiration() && !gate.takeEarlyExpiration(),"expiry consumed once")
+    gate.beat();gate.configureEarly(true);_ = gate.receive(.keyDown,event(15))
+    check(gate.reservation() != nil,"next input can reserve immediately")
+}
+let deadline=reserved();deadline.holdUntil=1;deadline.poll()
+check(deadline.healthy() && deadline.takeEarlyExpiration(),"empty reservation deadline preserves observation")
+let queued=reserved();_ = queued.receive(.keyDown,event(40));queued.heartbeat=0;queued.poll()
+check(!queued.healthy() && queued.take().count==1 && !queued.takeEarlyExpiration(),"queued originals keep terminal safety")
+let claimed=reserved();check(claimed.claimEarly(),"repair claim succeeds");claimed.heartbeat=0;claimed.poll()
+check(!claimed.healthy() && !claimed.takeEarlyExpiration(),"claimed repair keeps terminal safety even empty")
+let repeated=reserved();_ = repeated.receive(.keyDown,event(15));_ = repeated.take()
+check(repeated.receive(.keyUp,event(15,false))==nil,"release cannot overtake engine-side repeated down")
+let ordered=reserved();_ = ordered.receive(.keyDown,event(40))
+check(ordered.receive(.keyUp,event(15,false))==nil,"first release cannot overtake queued input")
 print("PASS \(checks) input gate checks; no event tap installed, no keys posted")

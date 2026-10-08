@@ -54,4 +54,30 @@ let grace=Context();let reserved=grace.e.gate!.reservation()!.time;grace.e.unava
 grace.e.sampleEarly(nil,now:reserved+0.10);check(grace.e.enabled && !grace.e.waitingForContext && grace.e.gate!.reservation() != nil,"existing 100ms grace retained")
 grace.e.sampleEarly(nil,now:reserved+0.149);check(!grace.e.waitingForContext,"no pause before 150ms")
 grace.e.sampleEarly(nil,now:reserved+0.151);check(grace.e.enabled && grace.e.waitingForContext && grace.e.gate!.reservation()==nil,"pause after grace")
-grace.e.closeSession();print("PASS total \(checks) initial read failure assertions; no OS key posting")
+grace.e.closeSession()
+// An expired untouched attempt needs no 100ms field stabilization or session restart.
+for expired in [false,true] {
+ let e=OnsetRecoveryEngine();let g=OnsetInputGate(marker:e.marker);e.gate=g;e.enabled=true
+ e.testSource={onsetKoreanID};var posts=0;e.testPost={_ in posts+=1}
+ let field=AXUIElementCreateApplication(1234)
+ g.beat();g.configureEarly(true)
+ let down=CGEvent(keyboardEventSource:nil,virtualKey:15,keyDown:true)!;down.flags=[]
+ _ = g.receive(.keyDown,down)
+ let start=g.reservation()!.time
+ if expired{g.heartbeat=0;g.poll()}
+ e.unavailableReason="text_unreadable";e.sampleEarly(nil,now:start+0.151)
+ check(e.enabled && !e.waitingForContext && g.healthy(),"untouched attempt keeps observation available")
+ check(g.reservation()==nil && e.pending.isEmpty && posts==0,"no stale edit or replay")
+ let snap=OnsetSnapshot(element:field,text:"ㄱㅏㄴ ",selection:NSRange(location:4,length:0))
+ e.sampleEarly(snap);e.unavailableReason="not_supported_text_field";e.sampleEarly(nil)
+ g.beat();_ = g.receive(.keyDown,down)
+ check(g.reservation() != nil && e.earlyBaseline?.text==snap.text,"next outside onset keeps fresh baseline without stabilization")
+ e.closeSession()
+}
+// A gate-side empty queue may already have moved into the engine.
+let moved=Context();moved.e.collectHeld();moved.e.gate!.heartbeat=0;moved.e.gate!.poll()
+check(moved.e.gate!.healthy(),"gate cannot decide whether engine holds input")
+moved.e.unavailableReason="text_unreadable";moved.e.sampleEarly(nil)
+check(moved.e.waitingForContext && moved.e.retainedInput.count==1 && moved.posts==0,"engine pending input retains old safety path")
+moved.e.closeSession()
+print("PASS total \(checks) initial read failure assertions; no OS key posting")

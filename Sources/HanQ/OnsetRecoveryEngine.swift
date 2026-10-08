@@ -71,7 +71,7 @@ final class OnsetRecoveryEngine:NSObject {
     var retainedInput:[CGEvent]=[]
     var recoveryEpoch=0
     var transientReadFailure:Bool {
-        ["not_supported_text_field","focused_element_unreadable","text_unreadable","selection_unreadable","selection_invalid"].contains(unavailableReason)
+        ["not_supported_text_field","role_unreadable","focused_element_unreadable","text_unreadable","selection_unreadable","selection_invalid"].contains(unavailableReason)
     }
     func scheduleRecovery(_ delay:Double=0,_ action:@escaping ()->Void){
         let epoch=recoveryEpoch
@@ -123,8 +123,24 @@ final class OnsetRecoveryEngine:NSObject {
     var earlyObservedField:AXUIElement?
     var earlyWaiting=false
     var bufferedBase:Int64=0
+    // Only an untouched, fully delivered attempt can return directly to observation.
+    // cancelHold atomically collects keys arriving while AX was blocked.
+    @discardableResult func abandonUneditedReservation()->Bool {
+        collectHeld();pending.append(contentsOf:gate?.cancelHold() ?? [])
+        guard gate?.healthy() ?? true,!recovering,!replayStarted,pending.isEmpty,prefixRemainder.isEmpty,
+              retainedInput.isEmpty,gate.map({$0.seenCount()>=postedToGate}) ?? true else {
+            pauseForContext("early_field_unavailable");return false
+        }
+        onset.cancel();currentPlan=nil;planElement=nil
+        earlyObservationTime=nil;earlyObservedField=nil;earlyWaiting=false;earlyBaseline=nil
+        log("early_observation_resumed")
+        return true
+    }
     func sampleEarly(_ observed:OnsetSnapshot?,now:Double=ProcessInfo.processInfo.systemUptime){
         guard let gate else{return}
+        if gate.takeEarlyExpiration() {
+            guard abandonUneditedReservation() else{return}
+        }
         guard canBeginRepair() else{gate.configureEarly(false);if gate.reservation() != nil{emergencyStop("manual_edit_busy")};return}
         if let reservation=gate.reservation() {
             if earlyObservationTime != reservation.time {
@@ -134,7 +150,7 @@ final class OnsetRecoveryEngine:NSObject {
             repairSourceID=reservation.sourceID
             guard let snap=observed else{
                 if !transientReadFailure || now-reservation.time>=0.15 {
-                    if transientReadFailure { pauseForContext("early_field_unavailable") }
+                    if transientReadFailure { abandonUneditedReservation() }
                     else { emergencyStop("early_field_unavailable") }
                 }
                 return
@@ -265,7 +281,8 @@ final class OnsetRecoveryEngine:NSObject {
         guard let target,!target.isTerminated,focusAccess.currentPID()==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}
         guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{unavailableReason="focused_element_unreadable";return nil}
         guard attr(element,kAXSubroleAttribute) as? String != "AXSecureTextField" else{unavailableReason="secure_field";return nil}
-        guard ["AXTextArea","AXTextField"].contains(attr(element,kAXRoleAttribute) as? String ?? "") else{unavailableReason="not_supported_text_field";return nil}
+        guard let role=attr(element,kAXRoleAttribute) as? String else{unavailableReason="role_unreadable";return nil}
+        guard ["AXTextArea","AXTextField"].contains(role) else{unavailableReason="not_supported_text_field";return nil}
         // Respect an editor's explicit active composition; unsupported attributes
         // remain unknown, as in the original compatibility probe.
         var markedValue: CFTypeRef?
@@ -313,6 +330,10 @@ final class OnsetRecoveryEngine:NSObject {
         let gate=OnsetInputGate(marker:marker);self.gate=gate;postedToGate=0
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}
+        gate.observationNeeded={[weak self,weak gate] in
+            guard let self,let gate,self.gate === gate,self.enabled else{return}
+            self.requestImmediateObservation()
+        }
         gate.beat();gateThread=OnsetGateThread(gate)
         enabled=true;recovering=false;lastEditable=nil;pending=[];locked=nil;lastText=nil;lastSource=InputSourceAccess.currentID()
         log("session_start",["toolVersion":"0.1.19","build":20,"mode":"first_consonant","targetPID":target.processIdentifier,"source":lastSource])
@@ -402,7 +423,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard let selected=snapshot() else{
             // AX can briefly expose an intermediate role or inconsistent value/range.
             // Retry only within the original selection deadline; never use a cached field to edit.
-            let transient=["not_supported_text_field","focused_element_unreadable","text_unreadable","selection_unreadable","selection_invalid"].contains(unavailableReason)
+            let transient=["not_supported_text_field","role_unreadable","focused_element_unreadable","text_unreadable","selection_unreadable","selection_invalid"].contains(unavailableReason)
             if transient,remaining>0,ProcessInfo.processInfo.systemUptime-selectionRequestAt<0.12 {
                 log("selection_read_retry",["reason":unavailableReason,"remaining":remaining])
                 scheduleRecovery(0.002){[weak self] in self?.awaitSelection(candidate,before,range,remaining:remaining-1)}
@@ -528,7 +549,7 @@ final class OnsetRecoveryEngine:NSObject {
                 self.scheduleRecovery(0.002){[weak self] in self?.drain([],rollback:rollback)};return
             }
             if self.gate?.finishIfEmpty()==false{self.drain([],rollback:rollback);return}
-            self.recovering=false;self.rollingBack=false;self.currentPlan=nil;self.lastSource=self.currentSource()
+            self.recovering=false;self.rollingBack=false;self.replayStarted=false;self.currentPlan=nil;self.lastSource=self.currentSource()
             self.log(rollback ? "rollback_finished" : "recovery_finished",["bufferedEvents":self.nextBufferedID-self.bufferedBase,"postedEvents":self.postedBuffered,"pendingEvents":0,"postingIsNotAppAcknowledgment":true,"recoveryMs":(ProcessInfo.processInfo.systemUptime-self.recoveryBegan)*1000])
             if let snap=self.snapshot(){self.log("after_replay_snapshot",["text":snap.text,"source":self.lastSource,"selection":[snap.selection.location,snap.selection.length]])}
             if rollback{
