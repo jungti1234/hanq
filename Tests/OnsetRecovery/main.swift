@@ -8,6 +8,17 @@ func testCheck(_ condition:@autoclosure ()->Bool,_ message:@autoclosure ()->Stri
 }
 
 if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
+    do {
+        let p=OnsetRecoveryEngine();p.enabled=true
+        var source="com.apple.keylayout.ABC",reads=0
+        let field=AXUIElementCreateApplication(12345)
+        p.testSource={source};p.testSnapshot={reads+=1;return .init(element:field,text:"",selection:NSRange(location:0,length:0))}
+        p.lastEditable=p.testSnapshot!();reads=0;p.sample()
+        testCheck(reads==0 && p.lastEditable==nil,"English observation skips AX and discards old Korean baseline")
+        source=onsetKoreanID;p.sample()
+        testCheck(reads==1,"Korean observation resumes after source change")
+    }
+
     func key(_ code:UInt16,_ down:Bool=true,_ shift:Bool=false)->CGEvent{let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;e.flags=shift ? .maskShift:[];return e}
     var cases=0
     for id in KoreanKeyboardLayout.supportedIDs {
@@ -321,7 +332,11 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     let ignoreFirst=ProcessInfo.processInfo.arguments.contains("--test-selection-retry")
     probe.testSetRange={_,range in
         selectionRequests+=1
-        if !ignoreFirst || selectionRequests>1{DispatchQueue.main.asyncAfter(deadline:.now()+0.01){selection=range}}
+        // This fixture tests replacement/drain and one ignored request. Keep
+        // its successful mutation synchronous, like the injected AX contract;
+        // delayed acknowledgment is exercised by the dedicated timing cases.
+        // Wall-clock callbacks here could apply an old selection after replay.
+        if !ignoreFirst || selectionRequests>1{selection=range}
         return .success
     }
     probe.testPost={event in
@@ -334,10 +349,8 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         selection=NSRange(location:text.utf16.count,length:0)
     }
     probe.enabled=true;probe.recovering=true;probe.currentPlan=candidate;probe.planElement=element
+    for code:CGKeyCode in [40,1]{for down in [true,false]{let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;probe.nextBufferedID+=1;event.setIntegerValueField(.eventSourceUserData,value:probe.nextBufferedID);probe.pending.append(event)}}
     probe.replaceAndReplay(candidate,OnsetSnapshot(element:element,text:text,selection:selection))
-    DispatchQueue.main.asyncAfter(deadline:.now()+0.005){
-        for code:CGKeyCode in [40,1]{for down in [true,false]{let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;probe.nextBufferedID+=1;event.setIntegerValueField(.eventSourceUserData,value:probe.nextBufferedID);probe.pending.append(event)}}
-    }
     let deadline=Date().addingTimeInterval(2)
     while probe.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
     guard !probe.recovering && codes==[13,40,1] && probe.pending.isEmpty && text=="잔" else { print("FAIL recovery codes=\(codes) pending=\(probe.pending.count) enabled=\(probe.enabled) recovering=\(probe.recovering) waiting=\(probe.waitingForContext) requests=\(selectionRequests)"); exit(1) }

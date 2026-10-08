@@ -1,7 +1,7 @@
 import AppKit
 import Carbon
 
-/// Starts only alongside HanQ's input lifecycle, and follows the frontmost process without an app allowlist.
+/// Starts only alongside HanQ's input lifecycle, and follows keyboard focus without an app allowlist.
 final class OnsetRecoveryController: NSObject {
     var canRun: () -> Bool = { false }
     var canBeginRepair: () -> Bool = { true }
@@ -36,6 +36,7 @@ final class OnsetRecoveryController: NSObject {
     }
     var probeRunning = false
     var active=false
+    let focusAccess=InputFocusAccess()
     var boundPID:pid_t?
     var testConditions:(()->(allowed:Bool,ready:Bool,probe:Bool,pid:pid_t?))?
     static func supports(pid: pid_t?, ownPID: pid_t = ProcessInfo.processInfo.processIdentifier) -> Bool {
@@ -78,7 +79,7 @@ final class OnsetRecoveryController: NSObject {
             if let engine, engine.enabled { engine.emergencyStop("hanq_input_unavailable") }
             return
         }
-        let frontPID = conditions == nil ? NSWorkspace.shared.frontmostApplication?.processIdentifier:conditions?.pid
+        let frontPID = conditions == nil ? focusAccess.currentPID():conditions?.pid
         let target = Self.supports(pid: frontPID)
         if !target || Self.needsRebind(currentPID: boundPID, frontPID: frontPID) {
             if let engine, engine.enabled {

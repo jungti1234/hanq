@@ -4,9 +4,22 @@ import Carbon
 // Use the user's enabled previous-input-source shortcut. Never change preferences.
 final class MismatchSourceSwitch {
     var busy=false
-    let conservative=ProcessInfo.processInfo.arguments.contains("--switch-conservative")
     private var generation=0
     private var release:(()->Void)?
+    // All down/up events in the shortcut must share one retained private
+    // state table. Creating a source for each event splits press and release
+    // across unrelated Quartz keyboard states.
+    private lazy var eventSource=CGEventSource(stateID:.privateState)
+    func shortcutEvents(marker:Int64)->[CGEvent]? {
+        guard let eventSource else{return nil}
+        func event(_ key:CGKeyCode,_ down:Bool,_ type:CGEventType,_ flags:CGEventFlags)->CGEvent? {
+            guard let e=CGEvent(keyboardEventSource:eventSource,virtualKey:key,keyDown:down) else{return nil}
+            e.type=type;e.flags=flags;e.setIntegerValueField(.eventSourceUserData,value:marker);return e
+        }
+        guard let controlDown=event(59,true,.flagsChanged,.maskControl),let controlUp=event(59,false,.flagsChanged,[]),
+              let down=event(49,true,.keyDown,.maskControl),let up=event(49,false,.keyUp,.maskControl) else{return nil}
+        return [controlDown,down,up,controlUp]
+    }
     deinit{cancel()}
     func cancel(){generation+=1;release?();release=nil;busy=false}
     func request(marker:Int64,valid:@escaping ()->Bool,posted:@escaping (CGEvent)->Void={_ in})->OSStatus {
@@ -18,29 +31,27 @@ final class MismatchSourceSwitch {
         let code=CGKeyCode(params[1].uint16Value),flags=CGEventFlags(rawValue:params[2].uint64Value)
         // Tested configuration. Unsupported shortcuts fail visibly rather than use a different path.
         guard code==49,flags == .maskControl else{return -50}
-        func event(_ key:CGKeyCode,_ down:Bool,_ type:CGEventType,_ flags:CGEventFlags)->CGEvent? {
-            guard let e=CGEvent(keyboardEventSource:CGEventSource(stateID:.privateState),virtualKey:key,keyDown:down) else{return nil}
-            e.type=type;e.flags=flags;e.setIntegerValueField(.eventSourceUserData,value:marker);return e
-        }
-        guard let controlDown=event(59,true,.flagsChanged,.maskControl),let controlUp=event(59,false,.flagsChanged,[]),
-              let down=event(code,true,.keyDown,.maskControl),let up=event(code,false,.keyUp,.maskControl) else{return -50}
+        guard let events=shortcutEvents(marker:marker) else{return -50}
+        let controlDown=events[0],down=events[1],up=events[2],controlUp=events[3]
         func send(_ event:CGEvent){posted(event);event.post(tap:.cghidEventTap)}
         busy=true;generation+=1;let token=generation
         var spaceDown=false
         release={if spaceDown{send(up)};send(controlUp)}
+        // Allow each modifier phase to reach the input manager before the next
+        // source cycle. A TIS ID change can precede actual IME activation.
         send(controlDown)
-        DispatchQueue.main.asyncAfter(deadline:.now()+(conservative ? 0.05:0.01)){[weak self] in
+        DispatchQueue.main.asyncAfter(deadline:.now()+0.05){[weak self] in
             guard let self,self.generation==token else{return}
             guard valid() else{self.cancel();return}
             spaceDown=true;send(down)
-            DispatchQueue.main.asyncAfter(deadline:.now()+(self.conservative ? 0.03:0.005)){[weak self] in
+            DispatchQueue.main.asyncAfter(deadline:.now()+0.03){[weak self] in
                 guard let self,self.generation==token else{return}
                 send(up);spaceDown=false
-                DispatchQueue.main.asyncAfter(deadline:.now()+(self.conservative ? 0.03:0.01)){[weak self] in
+                DispatchQueue.main.asyncAfter(deadline:.now()+0.03){[weak self] in
                     guard let self,self.generation==token else{return}
                     send(controlUp);self.release=nil
                 }
-                DispatchQueue.main.asyncAfter(deadline:.now()+(self.conservative ? 0.08:0.02)){[weak self] in
+                DispatchQueue.main.asyncAfter(deadline:.now()+0.08){[weak self] in
                     guard let self,self.generation==token else{return};self.busy=false
                 }
             }

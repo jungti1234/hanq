@@ -9,8 +9,9 @@ final class MismatchSwitchGate {
     var runSource:CFRunLoopSource?
     var accepts:()->Bool
     var failed:()->Void = {}
-    var switched:()->Void
-    init(accepts:@escaping ()->Bool,switched:@escaping ()->Void){self.accepts=accepts;self.switched=switched}
+    var switched:(CGEventTimestamp)->Void
+    var forwarded:(CGEventType,CGEvent)->Void = {_,_ in}
+    init(accepts:@escaping ()->Bool,switched:@escaping (CGEventTimestamp)->Void){self.accepts=accepts;self.switched=switched}
     func receive(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             DispatchQueue.main.async{[weak self] in self?.stop();self?.failed()}
@@ -19,7 +20,8 @@ final class MismatchSwitchGate {
         guard event.getIntegerValueField(.eventSourceUserData)==0 else{return Unmanaged.passUnretained(event)}
         let result=filter.process(type:type,key:event.getIntegerValueField(.keyboardEventKeycode),flags:event.flags,acceptNewPress:accepts())
         event.flags=result.flags
-        if result.edge=="right-down"{switched()}
+        if result.edge=="right-down"{switched(event.timestamp)}
+        if !result.consume {forwarded(type,event)}
         return result.consume ? nil:Unmanaged.passUnretained(event)
     }
     func start()->Bool {

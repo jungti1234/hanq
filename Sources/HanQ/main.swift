@@ -29,7 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else{return false}
             return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
         }
-        controller.engine.canToggleRightCommand = { [weak self] in self?.koreanEnabled == true }
+        controller.engine.canToggleRightCommand = { [weak self] in
+            guard let self else{return false}
+            return self.koreanEnabled && !self.sourceSwitchBarrier.busy
+        }
         controller.engine.canObserve = { [weak self] in
             guard let self else{return false}
             return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing &&
@@ -39,7 +42,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else{return false}
             return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && self.onsetRecovery.prepareManualEdit()
         }
-        controller.engine.willBeginRepair = { [weak self] in self?.jamoRepair.inputDidChange() }
+        controller.engine.willBeginRepair = { [weak self] in
+            self?.sourceSwitchBarrier.noteExternalEdit()
+            self?.jamoRepair.inputDidChange()
+        }
+        controller.engine.didVerifyReplay = { [weak self] ledger,snap in
+            self?.sourceSwitchBarrier.adoptVerifiedReplay(ledger,snapshot:snap)
+        }
+        controller.engine.didProcessEvent = { [weak self] type,event,passed in
+            self?.sourceSwitchBarrier.confirmDelivery(type,event,passed:passed)
+        }
+        controller.engine.willForwardEvent = { [weak self] type,event in
+            self?.sourceSwitchBarrier.beginRepairBoundary(type,event)
+        }
         controller.engine.didRetainInput = { [weak self] in
             DispatchQueue.main.async{self?.refreshStatus()}
         }
@@ -57,6 +72,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }()
     let hud = HUDController()
     let inputSource = InputSourceObserver()
+    let selectionSourceSwitch: SelectionPreservingSourceSwitch = {
+        let controller = SelectionPreservingSourceSwitch()
+        controller.trace = { stage in InputDiagnostics.shared.record("switch.selection.stage=\(stage.rawValue)") }
+        return controller
+    }()
+    lazy var sourceSwitchBarrier: SourceSwitchBarrier = {
+        let barrier=SourceSwitchBarrier()
+        barrier.read = { [weak self] in
+            guard let self,self.permissionGranted,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
+            self.mismatchRecovery.engine.followFrontmost()
+            guard let snap=self.mismatchRecovery.engine.snapshot() else{return nil}
+            return SourceSwitchBarrier.Snapshot(field:snap.element,text:snap.text,selection:snap.selection)
+        }
+        barrier.ready = { [weak self] in
+            guard let self else{return false}
+            return !self.mismatchRecovery.busy && self.onsetRecovery.engine?.recovering != true && self.onsetRecovery.engine?.gate?.reservation() == nil
+        }
+        barrier.readFocus = { [weak self] in
+            guard let self,self.permissionGranted,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
+            let access=self.mismatchRecovery.engine.focusAccess
+            return access.read(access.system)
+        }
+        barrier.select = { [weak self] target in self?.selectionSourceSwitch.select(target) ?? -50 }
+        barrier.didSelect = { [weak self] timestamp in
+            self?.mismatchRecovery.engine.noteUserSourceSwitch(at:timestamp)
+        }
+        barrier.commitSelection = { [weak self] snap in
+            self?.selectionSourceSwitch.commitSelection(field:snap.field,text:snap.text,range:snap.selection) ?? -50
+        }
+        barrier.retained = { [weak self] events in
+            guard let self else{return}
+            self.mismatchRecovery.engine.retained.append(contentsOf:events)
+            self.refreshStatus()
+        }
+        barrier.trace = { stage in InputDiagnostics.shared.record("switch.barrier."+stage) }
+        return barrier
+    }()
     var sourceObservations = 0
     var diagnosticEventCount = 0
     var window: NSWindow!
@@ -330,6 +382,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshStatus()
     }
 
+    func switchInputSource(to target: String, at timestamp: CGEventTimestamp = 0) -> OSStatus {
+        // The HID gate normally owns these presses. If another event source
+        // bypasses that gate, the primary tap must still use the user's intended
+        // boundary, not toggle from recovery's temporary English source.
+        if mismatchRecovery.busy {
+            mismatchRecovery.engine.userToggleDuringRecovery(at: timestamp)
+            return noErr
+        }
+        // Requesting a boundary does not change the source yet. Keep the
+        // preceding candidate alive until the barrier verifies its repair.
+        if sourceSwitchBarrier.request(target,at:timestamp) { return noErr }
+        mismatchRecovery.engine.noteUserSourceSwitch(at: timestamp)
+        return selectionSourceSwitch.select(target)
+    }
+
     @objc func startMapping() {
         guard !updateRestricted else { return }
         guard !filter.consuming && !optionFilter.consuming && !externalKeyboards.consuming else { status.stringValue = "누른 한영키와 한자키를 놓은 뒤 다시 시작하세요."; return }
@@ -372,7 +439,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     DispatchQueue.main.async { owner.stopMapping() }
                     return Unmanaged.passUnretained(event)
                 }
-                if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) { return Unmanaged.passUnretained(event) }
+                if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) {
+                    return Unmanaged.passUnretained(event)
+                }
+                if owner.sourceSwitchBarrier.receive(type,event) { return nil }
                 if [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
                     owner.jamoRepair.inputDidChange(type: type, key: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
                 }
@@ -384,10 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let external = owner.externalKeyboards.process(type: type, event: event, active: active,
                     koreanAllowed: externalTarget != nil, hanjaAllowed: owner.hanjaEnabled)
                 if external.korean, let externalTarget {
-                    let selection: OSStatus
-                    if owner.mismatchRecovery.busy {
-                        owner.mismatchRecovery.engine.userToggleDuringRecovery();selection=0
-                    } else {selection = InputSourceAccess.select(externalTarget)}
+                    let selection = owner.switchInputSource(to: externalTarget, at: event.timestamp)
                     DispatchQueue.main.async {
                         owner.inputSource.refresh()
                         if selection != 0 { NSLog("입력 소스 전환 실패: %d", selection) }
@@ -409,7 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let edge = result.edge {
                     if edge == "right-down" {
                         if let target {
-                            let result = InputSourceAccess.select(target)
+                            let result = owner.switchInputSource(to: target, at: event.timestamp)
                             DispatchQueue.main.async {
                                 owner.inputSource.refresh()
                                 if result != 0 { NSLog("입력 소스 전환 실패: %d", result) }
@@ -427,6 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 if result.consume || option.consume { return nil }
                 event.flags = option.flags
+                owner.sourceSwitchBarrier.observe(type,event)
                 return Unmanaged.passUnretained(event)
             }
             inputSafety.arm()
@@ -455,6 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Fail open: remove the system hook, not just the feature flags.
     /// Called outside the tap callback. The watchdog stays armed until cleanup ends.
     func stopMapping() {
+        sourceSwitchBarrier.fail("input_stopped")
         InputDiagnostics.shared.record("tap.stop.begin present=\(tap != nil)")
         mismatchRecovery.stop()
         onsetRecovery.stop()

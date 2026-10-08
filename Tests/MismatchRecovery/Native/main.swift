@@ -7,7 +7,8 @@ final class Fixture:NSObject,NSApplicationDelegate {
     var window:NSWindow!
     var original:TISInputSource?
     var added:[TISInputSource]=[]
-    var cases=[KoreanKeyboardLayout.twoSetID,KoreanKeyboardLayout.threeSetID,KoreanKeyboardLayout.threeSet390ID,MismatchKeyboardLayout.gongjinID,MismatchKeyboardLayout.hncID]
+    struct Case { let id:String; let mixed:Bool; var word=false }
+    var cases=KoreanKeyboardLayout.supportedIDs.flatMap { [Case(id:$0,mixed:false),Case(id:$0,mixed:true)] } + [Case(id:KoreanKeyboardLayout.twoSetID,mixed:true,word:true)]
     var owner:MismatchRecoveryEngine?
     var timer:Timer?
     var began=0.0
@@ -31,22 +32,26 @@ final class Fixture:NSObject,NSApplicationDelegate {
         view.inputContext?.discardMarkedText()
         view=NSTextView(frame:NSRect(x:0,y:0,width:640,height:220));view.isRichText=false
         window.contentView=view;window.makeFirstResponder(view)
-        let id=cases.removeFirst()
+        let item=cases.removeFirst();let id=item.id
         let query=[kTISPropertyInputSourceID as String:id] as CFDictionary
         guard let sources=TISCreateInputSourceList(query,true)?.takeRetainedValue() as? [TISInputSource],let source=sources.first else{finish(false,"source missing: \(id)");return}
         if let raw=TISGetInputSourceProperty(source,kTISPropertyInputSourceIsEnabled),!CFBooleanGetValue(Unmanaged<CFBoolean>.fromOpaque(raw).takeUnretainedValue()){
             guard TISEnableInputSource(source)==noErr else{finish(false,"enable failed");return};added.append(source)
         }
         guard TISSelectInputSource(source)==noErr else{finish(false,"select failed");return}
-        DispatchQueue.main.asyncAfter(deadline:.now()+0.2){self.repair(id)}
+        DispatchQueue.main.asyncAfter(deadline:.now()+0.2){self.repair(item)}
     }
-    func repair(_ id:String){
-        let keys:[UInt16]
+    func repair(_ item:Case){
+        let id=item.id
+        var keys:[UInt16]
         switch id {
         case KoreanKeyboardLayout.twoSetID:keys=[15,40,1] // rks -> 간
         case KoreanKeyboardLayout.threeSetID,KoreanKeyboardLayout.threeSet390ID:keys=[40,3,1] // kfs -> 간
         default:keys=[5,0,45] // gan -> 간
         }
+        if item.word{keys=[2,40,3,7,46,7,31,12]}
+        let expected=item.word ? "알트탭":"간"
+        let initialCount=item.word ? keys.count:(item.mixed ? 2:1)
         let p=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(getpid())
         owner=p;p.enabled=true;p.target=NSRunningApplication.current;p.planElement=field
         p.testSnapshot={ [weak self] in
@@ -64,9 +69,17 @@ final class Fixture:NSObject,NSApplicationDelegate {
         }
         var candidate=MismatchRecoveryPlan(before:"앞🙂뒤",caret:3,sourceID:id)
         _ = candidate.append(code:keys[0],shift:false)
-        view.unmarkText();view.string=candidate.expected!;view.setSelectedRange(NSRange(location:4,length:0))
+        if item.mixed {
+            for code in keys[1..<initialCount]{_ = candidate.append(code:code,shift:false)}
+            let mixed=MismatchRecoveryPlan.character(keys[0],false)! + MismatchKeyboardLayout.render(keys:keys[1..<initialCount].map{($0,false)},sourceID:id)!
+            let observed="앞🙂"+mixed+"뒤",range=NSRange(location:3+mixed.utf16.count,length:0)
+            candidate=candidate.mixedPlan(text:observed,selection:range)!
+            view.unmarkText();view.string=observed;view.setSelectedRange(range)
+        } else {
+            view.unmarkText();view.string=candidate.expected!;view.setSelectedRange(NSRange(location:4,length:0))
+        }
         p.beginRecovery(candidate,p.testSnapshot!()!)
-        for code in keys.dropFirst(){
+        for code in keys.dropFirst(initialCount){
             for down in [true,false]{
                 let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;event.flags=[]
                 guard p.event(down ? .keyDown:.keyUp,event)==nil else{finish(false,"queued key escaped: \(id), recovering=\(p.recovering), suspended=\(p.suspended), pending=\(p.pending.count) retained=\(p.retained.count), text=\(self.view.string), active=\(NSApp.isActive)");return}
@@ -77,8 +90,8 @@ final class Fixture:NSObject,NSApplicationDelegate {
             guard let self else{return}
             if !p.recovering {
                 self.timer?.invalidate()
-                guard self.view.string=="앞🙂간뒤",self.view.selectedRange()==NSRange(location:4,length:0),p.retained.isEmpty,p.pending.isEmpty,self.posts==6,InputSourceAccess.currentID()==id else{self.finish(false,"\(id): text=\(self.view.string), posts=\(self.posts), retained=\(p.retained.count)");return}
-                print("PASS:",id,"간; 3 down/up pairs, source preserved");fflush(stdout)
+                guard self.view.string=="앞🙂"+expected+"뒤",self.view.selectedRange()==NSRange(location:3+expected.utf16.count,length:0),p.retained.isEmpty,p.pending.isEmpty,self.posts==keys.count*2,InputSourceAccess.currentID()==id else{self.finish(false,"\(id): text=\(self.view.string), posts=\(self.posts), retained=\(p.retained.count)");return}
+                print("PASS:",id,item.mixed ? "mixed prefix":"ASCII prefix","expected=\(expected); \(keys.count) down/up pairs, source preserved");fflush(stdout)
                 p.closeSession();DispatchQueue.main.asyncAfter(deadline:.now()+0.1){self.next()}
             } else if ProcessInfo.processInfo.systemUptime-self.began>8{self.finish(false,"timeout: \(id)")}
         }

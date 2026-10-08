@@ -3,6 +3,22 @@ import AppKit
 // AXValue and editable offsets can describe different strings. Never remove
 // newlines to manufacture a mapping. Ask the editor for text in its own ranges.
 enum MismatchTextReader {
+    static func resolveValue(_ value:String?,error:AXError,characterCount:()->Int?)->String? {
+        if error == .success{return value}
+        // Notes uses AXNoValue for a genuinely empty document. A timeout or
+        // unsupported attribute must never be interpreted as an empty string.
+        return error == .noValue && characterCount()==0 ? "":nil
+    }
+    static func value(_ element:AXUIElement,batchValue:AnyObject?=nil)->String? {
+        if let value=batchValue as? String{return value}
+        var raw:CFTypeRef?
+        let status=AXUIElementCopyAttributeValue(element,kAXValueAttribute as CFString,&raw)
+        return resolveValue(raw as? String,error:status){
+            var count:CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element,kAXNumberOfCharactersAttribute as CFString,&count) == .success else{return nil}
+            return (count as? NSNumber)?.intValue
+        }
+    }
     static func isBoundaryResponse(_ error:AXError)->Bool { error == .illegalArgument || error == .noValue }
     struct Content { let text:String;let selectedText:String? }
     static func resolve(value:String,selection:NSRange,read:(NSRange)->String?)->String? {
@@ -56,9 +72,8 @@ enum MismatchTextReader {
         }
         // Reads are asynchronous IPC. Reject a changing value or caret, not a
         // mixed snapshot assembled from two edits.
-        var valueAfter:CFTypeRef?,rangeAfter:CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element,kAXValueAttribute as CFString,&valueAfter) == .success,
-              valueAfter as? String == value,
+        var rangeAfter:CFTypeRef?
+        guard Self.value(element) == value,
               AXUIElementCopyAttributeValue(element,kAXSelectedTextRangeAttribute as CFString,&rangeAfter) == .success,
               let rangeAfter,CFGetTypeID(rangeAfter)==AXValueGetTypeID() else{return nil}
         var r=CFRange();guard AXValueGetValue(rangeAfter as! AXValue,.cfRange,&r),r.location==selection.location,r.length==selection.length else{return nil}

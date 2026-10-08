@@ -198,23 +198,15 @@ final class OnsetRecoveryEngine:NSObject {
     var lastAXFailure=""
     var accessibilityRequested=false
     var lastFocusRoute=""
-    let systemAX=AXUIElementCreateSystemWide()
+    let focusAccess=InputFocusAccess()
+    var systemAX:AXUIElement { focusAccess.system }
     func focusedElement(_ app:AXUIElement, pid:pid_t)->AXUIElement? {
-        for (route,root) in [("application",app),("system",systemAX)] {
-            guard let value=attr(root,kAXFocusedUIElementAttribute),CFGetTypeID(value)==AXUIElementGetTypeID() else{continue}
-            let element=value as! AXUIElement
-            var owner:pid_t=0
-            guard AXUIElementGetPid(element,&owner) == .success,owner==pid else{continue}
-            AXUIElementSetMessagingTimeout(element,0.05)
-            if lastFocusRoute != route{lastFocusRoute=route;log("focus_route",["route":route,"ownerPID":owner])}
-            return element
-        }
-        if !accessibilityRequested {
+        if let element=focusAccess.focusedElement(application:app,pid:pid){return element}
+        if !accessibilityRequested,focusAccess.currentPID()==pid {
             accessibilityRequested=true
             for name in ["AXManualAccessibility","AXEnhancedUserInterface"] {
-                guard AXIsProcessTrusted(),NSWorkspace.shared.frontmostApplication?.processIdentifier==pid else{break}
-                let result=AXUIElementSetAttributeValue(app,name as CFString,kCFBooleanTrue)
-                log("accessibility_prepare",["attribute":name,"result":result.rawValue])
+                guard AXIsProcessTrusted(),focusAccess.currentPID()==pid else{break}
+                _ = AXUIElementSetAttributeValue(app,name as CFString,kCFBooleanTrue)
             }
         }
         return nil
@@ -270,7 +262,7 @@ final class OnsetRecoveryEngine:NSObject {
         unavailableReason=""
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
         guard !IsSecureEventInputEnabled() else{unavailableReason="secure_input";return nil}
-        guard let target,!target.isTerminated,NSWorkspace.shared.frontmostApplication?.processIdentifier==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}
+        guard let target,!target.isTerminated,focusAccess.currentPID()==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}
         guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{unavailableReason="focused_element_unreadable";return nil}
         guard attr(element,kAXSubroleAttribute) as? String != "AXSecureTextField" else{unavailableReason="secure_field";return nil}
         guard ["AXTextArea","AXTextField"].contains(attr(element,kAXRoleAttribute) as? String ?? "") else{unavailableReason="not_supported_text_field";return nil}
@@ -287,6 +279,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard let text=attr(element,kAXValueAttribute) as? String else{unavailableReason="text_unreadable";return nil}
         guard let raw=attr(element,kAXSelectedTextRangeAttribute),CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
         var range=CFRange();guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.location>=0,range.length>=0,range.location+range.length<=text.utf16.count else{unavailableReason="selection_invalid";return nil}
+        guard let after=focusedElement(ax,pid:target.processIdentifier),CFEqual(element,after) else{unavailableReason="focus_changed_during_snapshot";return nil}
         if target.bundleIdentifier=="com.openai.codex",text == "\n무엇이든 요청하세요",range.length==0,range.location<=1{return OnsetSnapshot(element:element,text:"",selection:NSRange(location:0,length:0))}
         return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length))
     }
@@ -313,7 +306,7 @@ final class OnsetRecoveryEngine:NSObject {
     @objc func start(){
         guard !enabled else{return}
         guard AXIsProcessTrusted(),!IsSecureEventInputEnabled() else{return}
-        target=NSWorkspace.shared.frontmostApplication
+        target=focusAccess.currentApplication()
         guard let target,OnsetRecoveryController.supports(pid:target.processIdentifier) else{return}
         ax=AXUIElementCreateApplication(target.processIdentifier);AXUIElementSetMessagingTimeout(ax!,0.05)
         AXUIElementSetMessagingTimeout(systemAX,0.05);accessibilityRequested=false;lastFocusRoute="";lastAXFailure=""
@@ -346,6 +339,11 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func sample(){
         guard enabled,!recovering else{return}
+        if currentLayout() == nil,gate?.reservation() == nil {
+            gate?.configureEarly(false);onset.cancel();planElement=nil
+            lastEditable=nil;earlyBaseline=nil;lastText=nil
+            return
+        }
         let observed=snapshot();observeAvailability(observed)
         sampleEarly(observed)
     }

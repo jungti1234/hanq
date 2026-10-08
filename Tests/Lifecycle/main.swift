@@ -64,3 +64,51 @@ onset.recovering=false
 precondition(combined.mismatchRecovery.engine.canObserve())
 precondition(combined.mismatchRecovery.engine.canBeginRepair())
 print("PASS: product onset/mismatch exclusion and right Command preference")
+
+// A tagged/session-level right Command may bypass the HID boundary gate.
+// The primary mapping must still queue a user boundary instead of switching
+// relative to recovery's temporary ABC input source.
+let transition=AppDelegate()
+let recovery=transition.mismatchRecovery.engine
+recovery.recovering=true;recovery.recoverySourceID=mismatchKoreanID
+recovery.intendedSource=mismatchKoreanID
+recovery.testSource={"com.apple.keylayout.ABC"}
+var directSwitches=0
+transition.selectionSourceSwitch.selectSource={_ in directSwitches+=1;return noErr}
+precondition(transition.switchInputSource(to:mismatchKoreanID)==noErr)
+precondition(recovery.intendedSource==recovery.englishID && directSwitches==0)
+precondition(transition.switchInputSource(to:mismatchKoreanID)==noErr)
+precondition(recovery.intendedSource==mismatchKoreanID && directSwitches==0)
+recovery.recovering=false
+transition.selectionSourceSwitch.currentSource={"com.apple.keylayout.ABC"}
+precondition(transition.switchInputSource(to:mismatchKoreanID)==noErr && directSwitches==1)
+print("PASS: primary source switch honors recovery intent, queues each boundary once and preserves normal switching")
+
+// A queued switch has not changed the editor's source. Its preceding Korean
+// candidate must remain available while the barrier waits for that repair.
+let waiting=AppDelegate(), waitingField=AXUIElementCreateApplication(12345)
+let detector=waiting.mismatchRecovery.engine
+var waitingText="",waitingRange=NSRange(location:0,length:0),waitingSource=mismatchKoreanID
+let boundary=waiting.sourceSwitchBarrier
+boundary.read={.init(field:waitingField,text:waitingText,selection:waitingRange)}
+boundary.source={waitingSource};boundary.ready={true}
+boundary.select={waitingSource=$0;return noErr}
+func observedKey(_ code:CGKeyCode)->CGEvent {
+    let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!
+    event.flags=[];return event
+}
+boundary.observe(.keyDown,observedKey(2));boundary.observe(.keyDown,observedKey(40))
+var preceding=MismatchRecoveryPlan(before:"",caret:0)
+_ = preceding.append(code:2,shift:false);_ = preceding.append(code:40,shift:false)
+detector.plan=preceding;detector.planElement=waitingField
+waitingText="ㅇㅏ";waitingRange=NSRange(location:2,length:0)
+precondition(waiting.switchInputSource(to:"com.apple.keylayout.ABC",at:1000)==noErr)
+precondition(detector.plan?.replayRoman=="dk" && detector.lastUserSourceSwitchTimestamp==0,
+             "queued switch must preserve preceding repair detection until editor acknowledgment")
+boundary.step()
+precondition(waitingSource==mismatchKoreanID && detector.plan != nil)
+waitingText="아";waitingRange=NSRange(location:1,length:0)
+boundary.step()
+precondition(waitingSource=="com.apple.keylayout.ABC" && detector.plan==nil && detector.lastUserSourceSwitchTimestamp==1000)
+boundary.fail("test_end")
+print("PASS: queued user switch preserves preceding Korean candidate and advances timestamp only at verified source change")

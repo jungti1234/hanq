@@ -6,9 +6,12 @@ struct MismatchRecoveryPlan {
     let caret: Int
     var sourceID = KoreanKeyboardLayout.twoSetID
     var roman = ""
-    // Only recovery's exact, observed mixed Hangul/Roman range may set this.
-    // Normal mismatch detection remains ASCII-only.
+    // Only an exact rendering of the observed keys may set a mixed replacement.
     var verifiedReplacement:String?
+    // An unchanged autocomplete selection may remain visible while newer
+    // physical keys are already queued. Preserve those keys without treating
+    // a new or changed selection as the same completion transaction.
+    var pendingCompletion:(text:String,selection:NSRange)?
     var codes: [(UInt16, Bool)] = []
     static let punctuation: [UInt16:(String,String)] = [18:("1","!"),19:("2","@"),20:("3","#"),21:("4","$"),23:("5","%"),22:("6","^"),26:("7","&"),28:("8","*"),25:("9","("),29:("0",")"),27:("-","_"),24:("=","+"),33:("[","{"),30:("]","}"),42:("\\","|"),41:(";",":"),39:("'","\""),43:(",","<"),47:(".",">"),44:("/","?"),50:("`","~"),49:(" "," ")]
     static func character(_ code:UInt16,_ shift:Bool)->String? {
@@ -51,16 +54,38 @@ struct MismatchRecoveryPlan {
         guard selection.length==0,length>=0,length<=roman.utf16.count,
               caret>=0,selection.location<=ns.length else{return false}
         let range=NSRange(location:caret,length:length)
-        return sameObservedSurroundings(ns.replacingCharacters(in:range,with:"")) &&
-            ns.substring(with:range).lowercased()==String(roman.prefix(length)).lowercased()
+        if sameObservedSurroundings(ns.replacingCharacters(in:range,with:"")) &&
+            ns.substring(with:range).lowercased()==String(roman.prefix(length)).lowercased() { return true }
+        if observedTwoSetPrefix(text:text,selection:selection){return true}
+        return mixedInsertion(text:text,selection:selection,allowPendingKeys:true) != nil
     }
     static func next(previous:MismatchRecoveryPlan?,text:String,selection:NSRange,code:UInt16,shift:Bool,sourceID:String=KoreanKeyboardLayout.twoSetID)->MismatchRecoveryPlan? {
-        guard selection.length==0 else{return nil}
-        var candidate=MismatchRecoveryPlan(before:text,caret:selection.location,sourceID:sourceID)
-        if let previous,previous.sourceID==sourceID,previous.observedPrefix(text:text,selection:selection){
-            candidate=previous
-            let inserted=NSRange(location:previous.caret,length:selection.location-previous.caret)
-            candidate.before=(text as NSString).replacingCharacters(in:inserted,with:"")
+        let ns=text as NSString
+        guard selection.location>=0,selection.length>=0,selection.location<=ns.length,
+              selection.length<=ns.length-selection.location else{return nil}
+        // The first key replaces a selection. Its baseline excludes exactly
+        // that range so the first wrong-language character remains observable.
+        let replacingSelection=ns.replacingCharacters(in:selection,with:"")
+        var candidate=MismatchRecoveryPlan(before:replacingSelection,caret:selection.location,sourceID:sourceID)
+        if let previous,previous.sourceID==sourceID {
+            // An address field can append and select an autocomplete suffix.
+            // Keep the typed prefix only when removing that selection leaves
+            // every observed ASCII key and all original surroundings intact.
+            // Full/partial user selections and existing suffix text fail this
+            // exact proof; suggested characters never become replay keys.
+            let sameCompletion=selection.length>0 && previous.pendingCompletion.map{
+                $0.text==text && $0.selection==selection
+            } == true
+            let continues=selection.length==0
+                ? previous.observedPrefix(text:text,selection:selection)
+                : previous.verifiedReplacement==nil && (sameCompletion || previous.matches(text:replacingSelection,
+                    selection:NSRange(location:selection.location,length:0)))
+            if continues {
+                candidate=previous
+                let inserted=NSRange(location:previous.caret,length:selection.location-previous.caret)
+                candidate.before=(replacingSelection as NSString).replacingCharacters(in:inserted,with:"")
+                candidate.pendingCompletion=selection.length>0 ? (text,selection):nil
+            }
         }
         guard candidate.append(code:code,shift:shift) else{return nil}
         return candidate
@@ -73,6 +98,19 @@ struct MismatchRecoveryPlan {
         let observed=text as NSString
         roman=observed.substring(with:range)
         before=observed.replacingCharacters(in:range,with:"")
+    }
+    // An editor may capitalize the selected ASCII run after our AX selection
+    // request. Accept only case changes in this exact run, with unchanged
+    // surrounding UTF-16 text; physical replay keys remain unchanged.
+    func recapturingASCIICase(text:String)->MismatchRecoveryPlan? {
+        let ns=text as NSString,range=NSRange(location:caret,length:roman.utf16.count)
+        guard verifiedReplacement==nil,caret>=0,NSMaxRange(range)<=ns.length,
+              ns.replacingCharacters(in:range,with:"")==before else{return nil}
+        let inserted=ns.substring(with:range)
+        guard roman.utf8.allSatisfy({(32...126).contains($0)}),
+              inserted.utf8.allSatisfy({(32...126).contains($0)}),
+              inserted.lowercased()==roman.lowercased() else{return nil}
+        var result=self;result.captureObserved(text:text);return result
     }
     var expected:String? {
         let ns=before as NSString
@@ -149,5 +187,79 @@ extension MismatchRecoveryPlan {
             }
         }
         return false
+    }
+}
+
+// A source transition can be processed between two keys already observed by
+// the tap. Prove the entire ASCII-prefix + Korean-suffix insertion from those
+// keys; normal Korean, legitimate layout ASCII, or changed surroundings fail.
+extension MismatchRecoveryPlan {
+    func mixedInsertion(text:String,selection:NSRange,allowPendingKeys:Bool=false)->String? {
+        let ns=text as NSString,length=selection.location-caret
+        guard verifiedReplacement==nil,selection.length==0,caret>=0,length>0,
+              caret<=ns.length,length<=ns.length-caret,codes.count>1,codes.count<=64,
+              MismatchKeyboardLayout.supports(sourceID) else{return nil}
+        let range=NSRange(location:caret,length:length)
+        guard sameObservedSurroundings(ns.replacingCharacters(in:range,with:"")) else{return nil}
+        let inserted=ns.substring(with:range),units=Array(inserted.utf16)
+        let asciiCount=units.prefix(while:{(32...126).contains($0)}).count
+        guard asciiCount>0,asciiCount<units.count else{return nil}
+        let romanKeys=codes.map{Self.character($0.0,$0.1)!}
+        let counts=allowPendingKeys ? Array(2...codes.count):[codes.count]
+        for count in counts {
+            for split in 1...min(asciiCount,count-1) {
+                let prefixKeys=Array(codes.prefix(split))
+                guard prefixKeys.contains(where:{MismatchKeyboardLayout.expectsHangul(code:$0.0,shift:$0.1,sourceID:sourceID)}) else{continue}
+                let prefix=romanKeys.prefix(split).joined()
+                guard inserted.hasPrefix(prefix),
+                      let suffix=MismatchKeyboardLayout.render(keys:Array(codes[split..<count]),sourceID:sourceID),
+                      prefix+suffix==inserted else{continue}
+                return inserted
+            }
+        }
+        return nil
+    }
+    func mixedPlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
+        guard let inserted=mixedInsertion(text:text,selection:selection) else{return nil}
+        var result=self;result.roman=inserted;result.verifiedReplacement=inserted
+        return result
+    }
+}
+
+// A two-set IME can remain selected while committing every physical jamo
+// separately. Preserve normal Korean prefixes long enough to prove that exact
+// failure; never normalize arbitrary document jamo or unobserved input.
+extension MismatchRecoveryPlan {
+    private func twoSetInsertion(text:String,selection:NSRange)->String? {
+        let ns=text as NSString,length=selection.location-caret
+        guard sourceID==KoreanKeyboardLayout.twoSetID,verifiedReplacement==nil,
+              !codes.isEmpty,codes.count<=64,selection.length==0,caret>=0,length>0,
+              selection.location<=ns.length else{return nil}
+        let range=NSRange(location:caret,length:length)
+        guard ns.replacingCharacters(in:range,with:"")==before else{return nil}
+        return ns.substring(with:range)
+    }
+    private func detachedTwoSet(_ keys:[(UInt16,Bool)])->String? {
+        var result=""
+        for key in keys {
+            guard let value=MismatchKeyboardLayout.output(code:key.0,shift:key.1,sourceID:sourceID) else{return nil}
+            result.append(value)
+        }
+        return result
+    }
+    func observedTwoSetPrefix(text:String,selection:NSRange)->Bool {
+        guard let insertion=twoSetInsertion(text:text,selection:selection) else{return false}
+        for count in (1...codes.count).reversed() {
+            let prefix=Array(codes.prefix(count))
+            if MismatchKeyboardLayout.render(keys:prefix,sourceID:sourceID)==insertion || detachedTwoSet(prefix)==insertion{return true}
+        }
+        return false
+    }
+    func decomposedPlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
+        guard hasLetters,let insertion=twoSetInsertion(text:text,selection:selection),
+              let detached=detachedTwoSet(codes),detached==insertion,
+              let composed=MismatchKeyboardLayout.render(keys:codes,sourceID:sourceID),
+              composed != insertion else{return nil}
+        var result=self;result.roman=insertion;result.verifiedReplacement=insertion;return result
     }
 }

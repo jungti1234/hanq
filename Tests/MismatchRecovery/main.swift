@@ -10,6 +10,16 @@ func probeTestCheck(_ condition:@autoclosure ()->Bool,_ message:@autoclosure ()-
 let app=NSApplication.shared;let owner=MismatchRecoveryEngine(detectionOnly: ProcessInfo.processInfo.arguments.contains("--detect-only"));app.setActivationPolicy(.regular)
 if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     runLayoutTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-mixed-transition") {
+    runMixedTransitionTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-delivered-key-release") {
+    runDeliveredKeyReleaseTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-shortcut-source-state") {
+    runShortcutSourceStateTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-select-all-boundary") {
+    runSelectAllBoundaryTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-source-timestamps") {
+    runSourceTimestampTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-product") {
     var evaluated=false
     func privateFields()->[String:Any]{evaluated=true;return ["text":"PRIVATE_MISMATCH_PAYLOAD"]}
@@ -107,7 +117,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     print("PASS: bind app, stable app unchanged, app departure retains queued key without posting, new app binds, retained input stays suspended")
 } else if ProcessInfo.processInfo.arguments.contains("--test-boundary-gate") {
     var active=false;var switches=0
-    let gate=MismatchSwitchGate(accepts:{active},switched:{switches+=1})
+    let gate=MismatchSwitchGate(accepts:{active},switched:{_ in switches+=1})
     func command(_ down:Bool)->CGEvent {
         let event=CGEvent(keyboardEventSource:nil,virtualKey:54,keyDown:down)!
         event.type = .flagsChanged;event.flags=CGEventFlags(rawValue:down ? 0x100010:0)
@@ -228,6 +238,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
 } else if ProcessInfo.processInfo.arguments.contains("--test-focus-routing") {
     let application=AXUIElementCreateApplication(12345)
     let other=AXUIElementCreateApplication(12346)
+    owner.focusAccess.frontmostPID={12345}
     owner.testFocusedRead={CFEqual($0,application) ? application:nil}
     probeTestCheck(owner.focusedElement(application,pid:12345).map{CFEqual($0,application)} == true)
     owner.testFocusedRead={CFEqual($0,owner.systemAX) ? application:nil}
@@ -379,6 +390,65 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     }
     print("PASS: 400ms AX outage resumes original queue exactly once; changed field, persistent outage and secure input never receive keys")
 } else if ProcessInfo.processInfo.arguments.contains("--test-source-interruption") {
+    for stage in ["pre_edit","selection","selection_ignored"] {
+        let p=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(12345)
+        var text=stage=="pre_edit" ? "D":"d",range=NSRange(location:1,length:0),downs=0,selections=0
+        var candidate=MismatchRecoveryPlan(before:"",caret:0);_=candidate.append(code:2,shift:false)
+        p.enabled=true;p.recovering=true;p.planElement=field;p.currentPlan=candidate
+        p.testSource={mismatchKoreanID};p.testSelectSource={_ in noErr}
+        p.testSnapshot={.init(element:field,text:text,selection:range,selectedText:range.length>0 ? text:nil)}
+        p.testSetRange={_,r in selections+=1;if stage != "selection_ignored" || selections>1{range=r};text="D";return .success}
+        p.testPost={e in if e.type == .keyDown {downs+=1;probeTestCheck(p.currentPlan?.roman=="D","actual capitalized run bound before editing");text="ㅇ";range=NSRange(location:1,length:0)}}
+        p.replaceAndReplay(candidate,p.testSnapshot!()!)
+        let end=Date().addingTimeInterval(0.5)
+        while p.recovering && Date()<end{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
+        probeTestCheck(downs==1 && text=="ㅇ" && !p.recovering && p.retained.isEmpty,"capitalization at \(stage) replays original physical key once")
+    }
+    do {
+        var p=MismatchRecoveryPlan(before:"x ",caret:2);_=p.append(code:2,shift:false)
+        probeTestCheck(p.recapturingASCIICase(text:"x D")?.codes.first?.0==2,"case recapture preserves physical key")
+        probeTestCheck(p.recapturingASCIICase(text:"X D")==nil,"surrounding capitalization remains a context change")
+        probeTestCheck(p.recapturingASCIICase(text:"x f")==nil && p.recapturingASCIICase(text:"x dd")==nil,"other letters and length changes remain rejected")
+        p.verifiedReplacement="d";probeTestCheck(p.recapturingASCIICase(text:"x D")==nil,"literal mixed recovery is not widened")
+    }
+
+    do {
+        let p=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(12345)
+        var source=p.englishID,reads=0
+        p.enabled=true;p.testSource={source}
+        p.testSnapshot={reads+=1;return .init(element:field,text:"",selection:NSRange(location:0,length:0))}
+        let key=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:true)!;key.flags=[]
+        _=p.event(.keyDown,key);p.sample()
+        probeTestCheck(reads==0 && p.plan==nil,"ordinary English input does not query Korean correction snapshots")
+        probeTestCheck(p.heldKeys.contains(0),"Roman AX fast path retains delivered press state across sampling")
+        let release=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:false)!;release.flags=[]
+        _=p.event(.keyUp,release)
+        probeTestCheck(p.heldKeys.isEmpty && reads==0,"Roman release clears held state without AX")
+        let marked=CGEvent(keyboardEventSource:nil,virtualKey:2,keyDown:true)!;marked.setIntegerValueField(.eventSourceUserData,value:p.marker)
+        _=p.event(.keyDown,marked)
+        probeTestCheck(p.heldKeys.isEmpty,"repair-marked keys never contaminate physical held state")
+        p.recovering=true
+        probeTestCheck(!p.skipRomanObservation(),"temporary English during a repair retains verification")
+        p.recovering=false;source=mismatchKoreanID
+        _=p.event(.keyDown,key)
+        probeTestCheck(reads>0 && p.plan != nil,"Korean switch resumes exact key observation")
+    }
+
+    do {
+        let p=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(12345)
+        var source=p.englishID,text="d",selection=NSRange(location:1,length:0),switches=0,downs=0
+        var candidate=MismatchRecoveryPlan(before:"",caret:0);_=candidate.append(code:2,shift:false)
+        p.enabled=true;p.recovering=true;p.planElement=field;p.currentPlan=candidate
+        p.testSource={source};p.testSelectSource={source=$0;switches+=1;return noErr}
+        p.testSnapshot={MismatchSnapshot(element:field,text:text,selection:selection)}
+        p.testSetRange={_,range in selection=range;return .success}
+        p.testPost={e in if e.type == .keyDown {downs+=1;text="ㅇ";selection=NSRange(location:1,length:0)}}
+        p.replaceAndReplay(candidate,p.testSnapshot!()!)
+        let end=Date().addingTimeInterval(0.5)
+        while p.recovering && Date()<end {RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
+        probeTestCheck(switches==1 && downs==1 && text=="ㅇ" && !p.recovering && p.retained.isEmpty,"source interruption before selection restores and replays once")
+        print("PASS: delayed source interruption before editing restores exact target and revalidates before one replay")
+    }
     let probe=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(12345)
     var source=probe.englishID,text="",selection=NSRange(location:0,length:0)
     var selections=0;var posts:[Int64]=[]
@@ -410,6 +480,14 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     RunLoop.current.run(until:Date().addingTimeInterval(0.04))
     probeTestCheck(completed && requests==1 && stalledSource==stalled.englishID)
     print("PASS: stalled shortcut selects exact target once before timeout")
+    let delivery=MismatchRecoveryEngine();var deliverySource=delivery.englishID,deliveryRequests=0
+    delivery.recovering=true;delivery.planElement=field;delivery.intendedSource=mismatchKoreanID
+    delivery.testSource={deliverySource};delivery.testSelectSource={deliverySource=$0;deliveryRequests+=1;return noErr}
+    delivery.testSnapshot={MismatchSnapshot(element:field,text:"",selection:NSRange(location:0,length:0))}
+    delivery.testPost={_ in probeTestCheck(false,"empty delivery must not post keys")}
+    delivery.drain(sourceAttempts:30)
+    RunLoop.current.run(until:Date().addingTimeInterval(0.1))
+    probeTestCheck(!delivery.recovering && deliveryRequests==1 && deliverySource==mismatchKoreanID,"delivery stage also restores an unacknowledged shortcut target")
     for valid in [true,false] {
         let splitProbe=MismatchRecoveryEngine();var cycles=0
         let before=MismatchSnapshot(element:field,text:"앞ㄴ뒤",selection:NSRange(location:2,length:0))

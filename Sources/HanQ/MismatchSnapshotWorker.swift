@@ -23,8 +23,9 @@ final class MismatchSnapshotWorker {
     }
     static func read(pid:pid_t)->MismatchSnapshotResult {
         let began=ProcessInfo.processInfo.systemUptime
-        let roots=[AXUIElementCreateApplication(pid),AXUIElementCreateSystemWide()]
-        for root in roots{AXUIElementSetMessagingTimeout(root,0.05)}
+        let focusAccess=InputFocusAccess()
+        let application=AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(application,0.05)
         var focusMs=0.0,attributesMs=0.0
         func result(_ snapshot:MismatchSnapshot?=nil,_ reason:String="")->MismatchSnapshotResult {
             MismatchSnapshotResult(snapshot:snapshot,reason:reason,durationMs:(ProcessInfo.processInfo.systemUptime-began)*1000,focusMs:focusMs,attributesMs:attributesMs)
@@ -32,17 +33,7 @@ final class MismatchSnapshotWorker {
         func focused()->AXUIElement? {
             let start=ProcessInfo.processInfo.systemUptime
             defer{focusMs+=(ProcessInfo.processInfo.systemUptime-start)*1000}
-            for root in roots {
-                var value:CFTypeRef?
-                guard AXUIElementCopyAttributeValue(root,kAXFocusedUIElementAttribute as CFString,&value) == .success,
-                      let value,CFGetTypeID(value)==AXUIElementGetTypeID() else{continue}
-                let element=value as! AXUIElement
-                var owner:pid_t=0
-                guard AXUIElementGetPid(element,&owner) == .success,owner==pid else{continue}
-                AXUIElementSetMessagingTimeout(element,0.05)
-                return element
-            }
-            return nil
+            return focusAccess.focusedElement(application:application,pid:pid)
         }
         guard let element=focused() else{return result(nil,"focused_element_unreadable")}
         let start=ProcessInfo.processInfo.systemUptime
@@ -53,7 +44,7 @@ final class MismatchSnapshotWorker {
         guard error == .success,let list=values as? [AnyObject],list.count==4 else{return result(nil,"attribute_batch_unreadable")}
         guard let role=list[0] as? String,["AXTextArea","AXTextField"].contains(role) else{return result(nil,"not_supported_text_field")}
         guard list[1] as? String != "AXSecureTextField" else{return result(nil,"secure_text_field")}
-        guard let text=list[2] as? String else{return result(nil,"text_unreadable")}
+        guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{return result(nil,"text_unreadable")}
         let raw=list[3]
         guard CFGetTypeID(raw)==AXValueGetTypeID() else{return result(nil,"selection_unreadable")}
         var range=CFRange()

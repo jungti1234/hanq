@@ -102,6 +102,12 @@ func runWebSpaceTests(){
 }
 
 func runEditorCoordinateTests(){
+    probeTestCheck(MismatchTextReader.resolveValue(nil,error:.noValue,characterCount:{0}) == "")
+    probeTestCheck(MismatchTextReader.resolveValue(nil,error:.noValue,characterCount:{1}) == nil)
+    probeTestCheck(MismatchTextReader.resolveValue(nil,error:.noValue,characterCount:{nil}) == nil)
+    probeTestCheck(MismatchTextReader.resolveValue(nil,error:.cannotComplete,characterCount:{0}) == nil)
+    probeTestCheck(MismatchTextReader.resolveValue(nil,error:.attributeUnsupported,characterCount:{0}) == nil)
+    probeTestCheck(MismatchTextReader.resolveValue("text",error:.success,characterCount:{nil}) == "text")
     // Replay the two live v42 failures: terminal paragraph representation and
     // a transient sample between first key receipt and text confirmation.
     var first=MismatchRecoveryPlan(before:"앞🙂\u{00a0}\n",caret:4)
