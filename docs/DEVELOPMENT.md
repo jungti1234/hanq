@@ -61,7 +61,9 @@ open build/HanQ.app --args --test-hanja-panel
 | [InputDiagnostics.swift](../Sources/HanQ/InputDiagnostics.swift) | 입력 진단 |
 | [Tests/](../Tests/), [scripts/](../scripts/) | 자동 검사와 빌드·진단 도구 |
 
-InputSourceAccess는 현재 입력 소스 ID 조회와 지정 ID 선택만 담당한다. 전환 대상·배열 대체 정책은 각 호출부에 유지한다. PhysicalLetterKeys는 첫 자음·불일치 복구에서 사용하는 영문 물리 키 표를 공유한다.
+InputFocusAccess는 첫 자음·입력 불일치 보정에서 실제 키보드 포커스 소유 프로세스와 입력칸을 선택한다. `bash scripts/test-input-focus.sh`로 비활성 패널·뒤쪽 앱의 오래된 포커스·일시 조회 실패·소유 프로세스 변경을 검사한다.
+
+InputSourceAccess는 현재 입력 소스 ID 조회와 지정 ID 선택만 담당한다. 한Q 한영키는 SelectionPreservingSourceSwitch를 통해 실제 커서 이동으로 조합을 확정하고 전환 전후 명시적 선택을 보존한다. AX 범위 변경만으로 조합이 해제됐다고 가정하지 않는다. `bash scripts/test-selection-source-switch.sh`는 전체·부분 UTF-16 범위, 포커스·본문·선택·소스 변경, 권한·AX 실패·기한 초과 시 처리와 중복 전환 요청 방지를 검사한다. 전환 대상·배열 대체 정책은 각 호출부에 유지한다. PhysicalLetterKeys는 첫 자음·불일치 복구에서 사용하는 영문 물리 키 표를 공유한다.
 
 [Resources/](../Resources/)에는 앱 아이콘 원본(`HanQ.icon`)과 번들 아이콘(`HanQ.icns`), 메뉴바 템플릿 이미지(`HanQ-MenuBar-Template.pdf`), 로고 원본(`HanQ-Logo.svg`)과 앱에서 사용하는 이미지(`HanQ-Logo.png`)가 있다.
 
@@ -111,11 +113,30 @@ Caps Lock 전환 설정의 비공개 HIToolbox API 호출은 `RomanSwitchControl
 
 `MismatchRecoveryController.swift`는 제품 수명·설정, `MismatchRecoveryEngine.swift`는 감지·선택 덮어쓰기·결과 확인, `MismatchTextReader.swift`와 `MismatchSnapshotWorker.swift`는 본문 좌표와 비동기 조회를 담당한다. 앱별 예외 목록은 두지 않는다. `MismatchSourceSwitch.swift`와 `MismatchSwitchGate.swift`가 소스 재지정·복구 중 한영 경계를 처리한다. 시험 도구의 원문 로그·장치 감시는 제품에 포함하지 않는다.
 
-`bash scripts/test-mismatch-recovery.sh`는 제품 소스로 19개 회귀 모드와 제품 수명·진단 비밀값 제외 검사를 실행한다. 실제 키 전송은 테스트 대역을 사용한다. 통합 빌드는 이 검사와 기존 첫 자음·앱 수명 검사를 함께 수행한다. 이전에 설치한 독립 AutoRecoveryProbe가 있다면 실제 앱 시험 전에 종료한다. 제품 진단은 복구 상태만 기록하므로 실제 문자 대조에는 별도 시험 driver의 기대값·결과를 사용한다. `--disable-mismatch-recovery`로 해당 실행에서만 복구를 끄고 비교할 수 있다. 일반 실행에서는 저장된 켜기/끄기 설정을 사용하지 않으며, 이전 `mismatchRecoveryEnabled` 값은 시작 시 제거한다. 독립 자동 복구 실험 앱 실행 중에는 제품 감시를 시작하지 않는다.
+`bash scripts/test-mismatch-recovery.sh`는 제품 소스로 24개 회귀 모드와 제품 수명·진단 비밀값 제외 검사를 실행한다. 실제 키 전송은 테스트 대역을 사용한다. 통합 빌드는 이 검사와 기존 첫 자음·앱 수명 검사를 함께 수행한다. 이전에 설치한 독립 AutoRecoveryProbe가 있다면 실제 앱 시험 전에 종료한다. 제품 진단은 복구 상태만 기록하므로 실제 문자 대조에는 별도 시험 driver의 기대값·결과를 사용한다. `--disable-mismatch-recovery`로 해당 실행에서만 복구를 끄고 비교할 수 있다. 일반 실행에서는 저장된 켜기/끄기 설정을 사용하지 않으며, 이전 `mismatchRecoveryEnabled` 값은 시작 시 제거한다. 독립 자동 복구 실험 앱 실행 중에는 제품 감시를 시작하지 않는다.
 
 `MismatchKeyboardLayout.swift`는 Apple 한국어 다섯 배열의 물리 키 대응과 복구 결과 조합을 담당한다. `Tests/MismatchRecovery/NativeLayoutExpectations.json`에는 실제 IME에서 관측한 결과 중 중복을 제외한 349개 사례를 보존한다. 모든 키 조합을 검증한 자료는 아니다. 배열 검사에서는 이 결과와 소스 ID 유지·숫자 자모·정상 영문 제외를 확인한다. 공유 조합기의 기존 기본 동작은 유지한다.
 
-`bash scripts/test-mismatch-native-layouts.sh`는 별도 AppKit 입력창에서 실제 다섯 IME와 제품 복구 엔진을 연결한다. 원래 키와 대기 중인 모음·종성의 최종 문자·커서·전송 횟수·잔여 키·소스 ID를 확인한다. 이 검사는 본문 조회와 선택 변경에 테스트 대역을 사용하고 소스를 직접 선택하므로, 설치본의 전역 접근성 조회·전환 단축키·물리 키 검증은 별도로 수행한다. 시험마다 새 입력창을 사용해 이전 IME 조합이 다음 사례로 넘어가지 않게 한다.
+`bash scripts/test-mismatch-native-layouts.sh`는 별도 AppKit 입력창에서 실제 다섯 IME와 제품 복구 엔진을 연결한다. 각 배열의 영문·혼합 접두부와 두벌식 전체 혼합 단어 복구를 포함한 11개 사례를 검사한다. 원래 키와 대기 중인 모음·종성의 최종 문자·커서·전송 횟수·잔여 키·소스 ID를 확인한다. 이 검사는 본문 조회와 선택 변경에 테스트 대역을 사용하고 소스를 직접 선택하므로, 설치본의 전역 접근성 조회·전환 단축키·물리 키 검증은 별도로 수행한다. 시험마다 새 입력창을 사용해 이전 IME 조합이 다음 사례로 넘어가지 않게 한다.
+
+불일치 복구 중 이미 편집기에 전달한 키의 놓음은 즉시 통과시키고, 새로 보관한 키의 누름·놓음은 함께 전달한다. Control-Space 합성 이벤트는 하나의 유지되는 private Quartz 상태를 공유한다. 주 입력 처리도 복구 중 전환 의도를 처리하여 보조 전환 감시가 우회된 경우 임시 영어 소스를 기준으로 반대로 전환하지 않는다. 관련 회귀 검사는 키 놓음 10건, 실제 Quartz 상태 ID 6건 및 앱 수명 검사의 주 전환 경로를 포함한다.
+
+복구 중 Command-A는 보정이 본문·커서를 검증할 때까지 후속 입력과 함께 보관한다. 보정 완료 후 검증한 입력칸과 이력을 SourceSwitchBarrier에 넘기고 전체 선택·삭제·한영 전환·대체 입력을 도착 순서대로 처리한다. 실제 본문과 선택을 확인하기 전에는 후속 편집 키를 전달하지 않는다. 검증되지 않은 본문이나 바뀐 입력칸에는 선택·재전송하지 않는다.
+
+### 전환 대기와 선택 보존
+
+SourceSwitchBarrier는 주 입력 경로에서 앞선 문자·선택의 예상 상태를 추적하고, 한Q 전환 요청 뒤 후속 키를 보관한다. 같은 입력칸의 실제 상태와 보정 완료를 확인한 뒤 소스를 전환하고 키를 하나씩 전달한다. 조회 실패와 다른 입력칸의 확인을 구분한다. `bash scripts/test-source-switch-barrier.sh`는 키 전송 대역으로 이전 입력 반영 지연, 새 소스 입력, 부분·전체 선택, 연속 전환, 키 놓음, 다른 보정의 진행, 일시 조회 실패, 포커스 변경과 시간 초과를 검사한다. 실제 Spotlight 시험과 구분하며, 자판표를 읽는 실행 환경이 필요하다.
+
+### 검증 수준과 최근 설치본 확인
+
+| 검증 | 방법 | 확인 범위 |
+| --- | --- | --- |
+| 자동 회귀 검사 | `test-input-focus.sh`, `test-selection-source-switch.sh`, `test-source-switch-barrier.sh`, `test-mismatch-recovery.sh` 및 전체 빌드 | 테스트 대역으로 포커스·선택·전환·지연·실패 시 보존 검사. 사람의 물리 키 검증과 구분 |
+| 실제 IME 검사 | `test-onset-native-layouts.sh`, `test-mismatch-native-layouts.sh` | 별도 입력창과 실제 IME 사용. 설치 앱의 전역 입력 경로와 구분 |
+| 설치본 합성 입력 | 독립 진단 엔진을 종료하고 실제 한Q 앱에 합성 키 전달 | 최종 문구·UTF-16 커서·보정 완료·잔여 입력 확인 |
+| 물리 키 확인 | 사용자가 실제 키보드로 입력 | 기기별 키 동작과 체감 확인. 합성 시험 통과로 대체하지 않음 |
+
+후보 130의 설치본 합성 시험은 TextEdit 12회, 메모 12회, Edge 본문 12회, Edge 주소창 36회, Spotlight 36회로 총 108회 통과했다. 오른쪽 Command 전환, 전체 선택 후 대체, 긴 단어와 띄어쓰기를 포함했다. 키 누름·놓음 각각의 간격은 5ms 또는 10ms다. 92회는 기대 문구와 정확히 일치했고, TextEdit·메모의 16회는 편집기의 첫 ASCII 자동 대문자화를 허용했다. 커서 위치도 함께 확인했다. Safari와 사람의 물리 키 확인은 이 결과에 포함하지 않으며, 모든 환경의 입력을 보장하는 결과로 해석하지 않는다.
 
 ## 검증과 진단
 
