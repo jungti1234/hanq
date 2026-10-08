@@ -70,6 +70,7 @@ swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sourc
 "$stage/filter-tests"
 bash scripts/test-external-keyboards.sh
 bash scripts/test-input-focus.sh
+bash scripts/test-input-delivery-origin.sh
 bash scripts/test-selection-source-switch.sh
 bash scripts/test-source-switch-barrier.sh
 bash scripts/test-onset-recovery.sh

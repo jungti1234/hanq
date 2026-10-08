@@ -17,7 +17,8 @@ final class MismatchSwitchGate {
             DispatchQueue.main.async{[weak self] in self?.stop();self?.failed()}
             return Unmanaged.passUnretained(event)
         }
-        guard event.getIntegerValueField(.eventSourceUserData)==0 else{return Unmanaged.passUnretained(event)}
+        let tag=event.getIntegerValueField(.eventSourceUserData)
+        guard tag==0 || InputDeliveryOrigin.isMarker(tag) else{return Unmanaged.passUnretained(event)}
         let result=filter.process(type:type,key:event.getIntegerValueField(.keyboardEventKeycode),flags:event.flags,acceptNewPress:accepts())
         event.flags=result.flags
         if result.edge=="right-down"{switched(event.timestamp)}

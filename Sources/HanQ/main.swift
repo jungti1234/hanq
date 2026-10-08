@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else{return false}
             return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
         }
+        controller.engine.didStart = { [weak self] in self?.refreshInputDeliveryOrigin() }
         controller.engine.canToggleRightCommand = { [weak self] in
             guard let self else{return false}
             return self.koreanEnabled && !self.sourceSwitchBarrier.busy
@@ -126,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pendingActivation = true
     let status = NSTextField(wrappingLabelWithString: "한영키·한자키 꺼짐")
     var tap: CFMachPort?
+    var inputDeliveryOrigin: InputDeliveryOrigin?
     var tapSource: CFRunLoopSource?
     var optionFilter = CommandFilter(keyCode: 61, left: 0x20, right: 0x40, aggregate: .maskAlternate)
     var filter = CommandFilter()
@@ -442,6 +444,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) {
                     return Unmanaged.passUnretained(event)
                 }
+                let originalRecipient=owner.inputDeliveryOrigin?.take(type,event)
+                func forwardOriginalIfMoved()->Bool {
+                    guard let routing=owner.inputDeliveryOrigin else{return false}
+                    let token=event.getIntegerValueField(.eventSourceUserData)
+                    guard routing.forwardIfMoved(event,origin:originalRecipient) else{return false}
+                    owner.mismatchRecovery.engine.discardEventOrigin(token)
+                    if owner.sourceSwitchBarrier.busy {owner.sourceSwitchBarrier.fail("recipient_changed")}
+                    else {owner.sourceSwitchBarrier.resetObservation()}
+                    if !owner.mismatchRecovery.busy {owner.mismatchRecovery.engine.cancelDetection()}
+                    InputDiagnostics.shared.record("input.original_recipient_preserved")
+                    return true
+                }
+                if forwardOriginalIfMoved(){return nil}
                 if owner.sourceSwitchBarrier.receive(type,event) { return nil }
                 if [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
                     owner.jamoRepair.inputDidChange(type: type, key: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
@@ -495,6 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if result.consume || option.consume { return nil }
                 event.flags = option.flags
                 owner.sourceSwitchBarrier.observe(type,event)
+                if forwardOriginalIfMoved(){return nil}
                 return Unmanaged.passUnretained(event)
             }
             inputSafety.arm()
@@ -516,13 +532,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         externalKeyboards.start()
         onsetRecovery.start()
         mismatchRecovery.start()
+        if inputDeliveryOrigin == nil {refreshInputDeliveryOrigin()}
 
         refreshStatus()
+    }
+
+    func refreshInputDeliveryOrigin() {
+        guard enabled,permissionGranted,!updateRestricted,tap != nil else{return}
+        // A restarted mismatch gate inserts a HID head tap. Install provenance
+        // after it so capture remains ahead of all main-run-loop input work.
+        inputDeliveryOrigin?.stop()
+        let routing=InputDeliveryOrigin();inputDeliveryOrigin=routing;routing.start()
     }
 
     /// Fail open: remove the system hook, not just the feature flags.
     /// Called outside the tap callback. The watchdog stays armed until cleanup ends.
     func stopMapping() {
+        inputDeliveryOrigin?.stop();inputDeliveryOrigin=nil
         sourceSwitchBarrier.fail("input_stopped")
         InputDiagnostics.shared.record("tap.stop.begin present=\(tap != nil)")
         mismatchRecovery.stop()

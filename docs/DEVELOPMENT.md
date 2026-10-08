@@ -103,6 +103,10 @@ InputSourceAccess는 현재 입력 소스 ID 조회와 지정 ID 선택만 담�
 
 Caps Lock 전환 설정의 비공개 HIToolbox API 호출은 `RomanSwitchController.swift`에 격리한다. [Roman Switch 명세](SPEC.md#roman-switch-직접-제어--현재-구현-계약)를 기준으로 새 macOS에서 ABI·심볼 로딩 실패·설정 후 실제 상태를 확인한다. 최초 실행에 사용자의 시스템 설정을 덮어쓰지 않는다.
 
+## 원래 입력 대상 보존
+
+InputDeliveryOrigin은 별도 HID 탭에서 원래 활성 앱 대상을 기록하고 주 입력 처리 전후에 앱 전환을 확인한다. 불일치 보정의 HID 언어 의도와 같은 식별자를 유지하며, 직접 전달된 원래 키의 이력은 한 번 소비한다. 불일치 게이트 재시작 뒤에는 원래 대상 관측을 앞단에 다시 설치한다. `bash scripts/test-input-delivery-origin.sh`는 실제 키 전송 없이 이벤트 시각 변경·대상 변경·중복 소비·패널·합성 표식·만료·수명 해제를 검사한다. 대상 PID 지정 필드만 바꾸는 것으로 실제 전달 대상을 고정했다고 가정하지 않는다. 실제 지연·앱 전환·기본 IME와 누름·놓음 수신 검사는 별도로 수행한다.
+
 ## 첫 자음 조합 보정 개발
 
 `OnsetRecoveryController.swift`가 대상 앱과 한Q 입력 수명을 연결하고, `OnsetRecoveryEngine.swift`와 `OnsetInputGate.swift`가 보정·입력 대기를 담당한다. 실험 도구의 입력 로그와 UI는 제품에 포함하지 않는다. `bash scripts/test-onset-recovery.sh`는 실제 키 전송 없이 제품 엔진의 선택 대체·선택 해제 지연·선택 재시도·입력 순서·실패 복원을 검사한다. AppKit 검사는 제한된 실행 샌드박스 밖에서 수행한다. 실제 검증 시 독립 OnsetRecoveryProbe를 먼저 종료하여 두 보정기가 겹치지 않게 한다.

@@ -55,15 +55,18 @@ final class MismatchRecoveryEngine:NSObject {
     private var nextOrigin:Int64=0
     var willForwardEvent:(CGEventType,CGEvent)->Void = {_,_ in}
     @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent)->Int64? {
-        guard type == .keyDown || type == .keyUp,event.getIntegerValueField(.eventSourceUserData)==0 else{return nil}
+        let incoming=event.getIntegerValueField(.eventSourceUserData)
+        guard type == .keyDown || type == .keyUp,
+              incoming==0 || InputDeliveryOrigin.isMarker(incoming) else{return nil}
         willForwardEvent(type,event)
         nextOrigin+=1
-        let token=0x4851455600000000 | nextOrigin
+        let token=InputDeliveryOrigin.isMarker(incoming) ? incoming:(0x4851455600000000 | nextOrigin)
         eventOrigins[token]=EventOrigin(timestamp:event.timestamp,source:recovering ? intendedSource:nil,code:event.getIntegerValueField(.keyboardEventKeycode),type:type)
-        if eventOrigins.count>1024 {eventOrigins=eventOrigins.filter{$0.key>token-512}}
+        if eventOrigins.count>1024 {eventOrigins=Dictionary(uniqueKeysWithValues:eventOrigins.sorted{$0.value.timestamp>$1.value.timestamp}.prefix(512).map{($0.key,$0.value)})}
         event.setIntegerValueField(.eventSourceUserData,value:token)
         return token
     }
+    func discardEventOrigin(_ token:Int64){eventOrigins.removeValue(forKey:token)}
     private func origin(_ type:CGEventType,_ event:CGEvent)->EventOrigin? {
         guard let value=eventOrigins[event.getIntegerValueField(.eventSourceUserData)],value.code==event.getIntegerValueField(.keyboardEventKeycode),value.type==type else{return nil}
         return value
@@ -324,6 +327,7 @@ final class MismatchRecoveryEngine:NSObject {
         if previous.hasPrefix("com.apple.keylayout."){englishID=previous}
 
     }
+    var didStart:()->Void = {}
     var didProcessEvent:(CGEventType,CGEvent,Bool)->Void = {_,_,_ in}
     func event(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
         let token=event.getIntegerValueField(.eventSourceUserData),tracked=origin(type,event) != nil
@@ -971,7 +975,7 @@ final class MismatchRecoveryEngine:NSObject {
         switchGate?.failed = { [weak self] in self?.suspended=true;self?.suspend("switch_gate_disabled") }
         guard switchGate!.start() else{closeSession();log("start_failed");return}
         timer=Timer.scheduledTimer(withTimeInterval:0.02,repeats:true){[weak self] _ in self?.sample()}
-        followFrontmost()
+        followFrontmost();didStart()
     }
     func suspend(_ reason:String){
         if recovering || !pending.isEmpty{park(reason)}

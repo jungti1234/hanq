@@ -36,5 +36,20 @@ func runSourceTimestampTests() {
     probeTestCheck(p.pendingSources[p.bufferedID(p.pending.last!)]==p.englishID,"HID capture also preserves post-switch English intent")
     _=p.event(.keyDown,delivered(35,3700,identity))
     probeTestCheck(p.pendingSources[p.bufferedID(p.pending.last!)]==p.englishID,"consumed origin identity cannot reuse stale Korean intent")
+    // The independent provenance gate stamps before this engine's HID tap.
+    // Keep that identity while retaining the existing language-boundary intent.
+    let routedToken:Int64=0x4852000100000042
+    let routed=delivered(15,3800,routedToken)
+    let sharedIdentity=p.captureEventOrigin(.keyDown,routed)
+    probeTestCheck(sharedIdentity==routedToken,"provenance identity survives source capture")
+    p.userToggleDuringRecovery(at:3900)
+    _=p.event(.keyDown,delivered(15,4000,routedToken))
+    probeTestCheck(p.pendingSources[p.bufferedID(p.pending.last!)]==p.englishID,"provenance-tagged key retains its pre-toggle source")
+    let discardedToken:Int64=0x4852000100000043
+    _=p.captureEventOrigin(.keyDown,delivered(1,4100,discardedToken))
+    p.discardEventOrigin(discardedToken)
+    p.userToggleDuringRecovery(at:4200)
+    _=p.event(.keyDown,delivered(1,4300,discardedToken))
+    probeTestCheck(p.pendingSources[p.bufferedID(p.pending.last!)]==p.englishID,"direct dispatch consumes engine source history")
     print("PASS: source timestamps exclude older English from repair and preserve queued source intervals")
 }
