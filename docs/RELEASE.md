@@ -2,6 +2,8 @@
 
 이 문서는 배포 구성과 준비 절차를 설명한다. 업데이트 메뉴·필수 업데이트 정책·DMG와 Draft Release 준비 도구를 구현했다. 브라우저 다운로드 설치와 실제 앱의 업데이트 교체·재실행·설정 보존을 확인했다. [베타 0.2.0-beta.1](https://github.com/jungti1234/hanq/releases/tag/v0.2.0-beta.1)을 공개했으며 GitHub Releases에서 다운로드할 수 있다.
 
+현재 공개 다운로드와 운영 업데이트 피드는 0.2.0-beta.1(빌드 82) 기준이다. 0.3.0-beta.1은 구현·로컬 검증 중인 미배포 버전이며, 소스의 문서·릴리스 노트 초안을 갱신해도 공개 릴리스나 운영 피드가 바뀌지는 않는다. 기존 공개본의 설치·업데이트 검증을 새 0.3.0 배포 파일의 검증으로 대신하지 않는다.
+
 현재 ad-hoc 서명에서는 업데이트 전후 코드 식별값이 달라 손쉬운 사용 권한을 재허용해야 할 수 있다. 검증 환경에서 저장된 이전 빌드의 권한 조건을 새 빌드가 충족하지 못함을 확인했다. Developer ID 서명 도입 후 동일 서명 정체성을 유지하는 두 버전으로 다시 검증한다. 공증과 코드 서명에 따른 권한 식별은 별개다.
 
 ## 작업 범위와 담당
@@ -97,10 +99,12 @@ bash scripts/build-app.sh --candidate
 python3 -m pip install --target .build/dmg-design-tools -r packaging/dmg/requirements.txt
 python3 scripts/release.py prepare
 # 변경 검토·커밋·푸시 후, 검증한 산출물로 비공개 초안 생성
-python3 scripts/release.py draft dist/0.1.0-beta.1-build74
+python3 scripts/release.py draft dist/0.3.0-beta.1-build146
 ```
 
-`prepare`는 해당 버전의 릴리스 노트가 있고 제목의 버전이 일치하는지 먼저 확인한다. CHANGELOG에서 본문을 자동 생성하지 않는다. 업데이트 창용 `updates/site/release-notes/<버전>.html`도 준비해야 하며 appcast의 `sparkle:releaseNotesLink`로 연결한다. 피드 게시 시 해당 HTML을 함께 게시하고 실제 HTTPS 응답을 확인한다. 후보 앱과 현재 빌드 입력 해시가 일치하는지 확인하고, 개발 빌드는 거부한다. 승인된 로고·설치 안내·버전 표시 디자인의 HFS+·ULFO DMG를 생성해 읽기 전용 마운트·앱 서명·실행 파일 일치·Applications 링크를 확인한 뒤 Sparkle 서명과 체크섬을 검증한다. `dist/<버전>-build<번호>/`에 DMG·SHA256SUMS·release-metadata.json·release-notes.md·appcast-candidate.xml을 남긴다. 기존 산출물 디렉터리는 덮어쓰지 않는다.
+위 `draft` 경로는 현재 버전의 예시다. 실제 실행에는 이번 `prepare`가 출력한 산출물 경로를 사용하고, `version.env`의 버전·빌드 번호와 일치하는지 확인한다.
+
+`prepare`는 해당 버전의 릴리스 노트가 있고 제목의 버전이 일치하는지 먼저 확인한다. CHANGELOG에서 본문을 자동 생성하지 않는다. 업데이트 창용 `updates/site/release-notes/<버전>.html`도 준비해야 하며 appcast의 `sparkle:releaseNotesLink`로 연결한다. 미배포 노트에는 Markdown과 HTML 모두 초안 상태를 표시하고, 실제 공개 직전에 두 본문의 초안 표시를 함께 제거하고 내용을 대조한다. 피드 게시 시 해당 HTML을 함께 게시하고 실제 HTTPS 응답을 확인한다. 후보 앱과 현재 빌드 입력 해시가 일치하는지 확인하고, 개발 빌드는 거부한다. 승인된 로고·설치 안내·버전 표시 디자인의 HFS+·ULFO DMG를 생성해 읽기 전용 마운트·앱 서명·실행 파일 일치·Applications 링크를 확인한 뒤 Sparkle 서명과 체크섬을 검증한다. `dist/<버전>-build<번호>/`에 DMG·SHA256SUMS·release-metadata.json·release-notes.md·appcast-candidate.xml을 남긴다. 기존 산출물 디렉터리는 덮어쓰지 않는다.
 
 노트를 수정한 경우 검토한 원본을 산출물의 `release-notes.md`에도 반영한다. `draft`는 두 파일이 다르면 중단한다. 기존 Draft의 본문 수정은 `gh release edit <태그> --notes-file docs/releases/<버전>.md`로 수행하며 공개 상태는 변경하지 않는다.
 
@@ -112,7 +116,7 @@ python3 scripts/release.py draft dist/0.1.0-beta.1-build74
 4. 최종 DMG를 완성한 후 SHA-256·Sparkle 서명·appcast 후보를 생성한다. 파일을 수정하면 다시 계산·서명한다.
 5. 정확한 커밋의 태그에 Draft Release를 만들고 DMG·체크섬·릴리스 노트를 첨부한다.
 6. 버전·커밋·지원 환경·서명/공증 상태·검사 결과·산출물을 확인한 후 공개한다. 승인 후 다시 빌드하지 않고 검증한 파일을 공개한다.
-   공개 시 README의 Draft·공개 다운로드 미제공 문구를 실제 Release 링크와 설치 안내로 바꾸고, CHANGELOG에 공개일과 배포 상태를 반영한다. 공개되기 전에는 다운로드 가능한 것으로 표시하지 않는다.
+   공개 시 README·소개 사이트의 다운로드 링크와 버전 표시를 새 Release에 맞추고, README의 해당 기능에 붙은 다음 업데이트 예정 표시와 릴리스 노트의 초안 표시를 정리한다. CHANGELOG에 실제 공개일·빌드 번호·배포 상태를 반영한다. 공개되기 전에는 기존 공개본의 다운로드 링크를 유지하며 새 기능을 다운로드 가능한 것으로 표시하지 않는다.
 7. 비로그인 환경에서 실제 다운로드 주소·파일 크기·체크섬을 검증한다.
 8. 검증에 성공한 뒤 운영 appcast를 발행한다. Draft의 비공개 첨부 파일 주소를 운영 피드에 먼저 게시하지 않는다.
 
