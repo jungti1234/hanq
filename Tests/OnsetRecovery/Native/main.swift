@@ -76,14 +76,14 @@ final class Fixture:NSObject,NSApplicationDelegate {
         p.unavailableReason="not_supported_text_field";p.sampleEarly(nil)
         let first=CGEvent(keyboardEventSource:nil,virtualKey:keys[0],keyDown:true)!;first.flags=item.shift ? .maskShift:[]
         guard gate.receive(.keyDown,first) != nil else{finish(false,"first key blocked");return}
+        view.unmarkText();view.string=item.shift ? "앞🙂ㄲ뒤":"앞🙂ㄱ뒤";view.setSelectedRange(NSRange(location:4,length:0))
+        p.sample()
         for code in keys.dropFirst(){
             for down in [true,false]{
                 let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;event.flags=[]
                 guard gate.receive(down ? .keyDown:.keyUp,event)==nil else{finish(false,"queued key escaped");return}
             }
         }
-        view.unmarkText();view.string=item.shift ? "앞🙂ㄲ뒤":"앞🙂ㄱ뒤";view.setSelectedRange(NSRange(location:4,length:0))
-        p.sample()
         began=ProcessInfo.processInfo.systemUptime
         timer=Timer.scheduledTimer(withTimeInterval:0.02,repeats:true){[weak self] _ in
             guard let self else{return}

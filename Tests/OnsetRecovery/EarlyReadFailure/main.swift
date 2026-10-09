@@ -11,7 +11,10 @@ final class Context {
  init(){
   e.enabled=true;e.testSource={self.source};e.canBeginRepair={!self.busy};e.testPost={_ in self.posts+=1};e.testSnapshot={self.snap}
   let g=OnsetInputGate(marker:e.marker);e.gate=g;g.beat();g.configureEarly(true)
-  for code:UInt16 in [15,40]{let v=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!;v.flags=[];_ = g.receive(.keyDown,v)}
+  let v=CGEvent(keyboardEventSource:nil,virtualKey:15,keyDown:true)!;v.flags=[];_ = g.receive(.keyDown,v)
+  // Inject an already captured key to exercise the legacy retention safety path.
+  // Unclaimed production reservations no longer capture this key.
+  let held=CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:true)!;held.flags=[];g.held=[held]
  }
  func pause(){e.unavailableReason="text_unreadable";e.sampleEarly(nil,now:e.gate!.reservation()!.time+0.151);check(e.enabled && e.waitingForContext,"early pause entered");check(e.retainedInput.count==1,"held event isolated")}
  func view(_ f:AXUIElement?=nil,_ selection:NSRange=NSRange(location:1,length:0)){snap=OnsetSnapshot(element:f ?? field,text:"ㄱ",selection:selection)}

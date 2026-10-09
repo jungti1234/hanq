@@ -17,6 +17,8 @@ final class InputDiagnostics {
         } else { descriptor = -1 }
     }
 
+    var isEnabled:Bool {descriptor >= 0}
+
     func record(_ message: @autoclosure () -> String) {
         guard descriptor >= 0 else { return }
         let line = "\(Date().timeIntervalSince1970) mono=\(DispatchTime.now().uptimeNanoseconds) pid=\(getpid()) \(message())\n"

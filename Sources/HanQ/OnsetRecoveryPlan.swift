@@ -8,6 +8,9 @@ struct OnsetRecoveryPlan {
     var roman = ""
     var codes: [(UInt16, Bool)] = []
     var onsetVariants:[String] = []
+    var replayedText:String?
+    var supportsReplay:Bool {codes.count==1}
+    var isCommittedLate:Bool {replayedText != nil && (2...16).contains(codes.count) && codes.last?.0==49 && codes.last?.1==false}
     var expected:String? {
         let ns=before as NSString
         guard caret>=0,caret<=ns.length else{return nil}

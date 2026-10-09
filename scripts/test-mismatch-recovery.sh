@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 mkdir -p .build/hanq
 stage=$(mktemp -d "$PWD/.build/hanq/mismatch.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/MismatchRecovery/*.swift -o "$stage/tests"
+swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/MismatchRecovery/*.swift -o "$stage/tests"
 for mode in layouts source-timestamps select-all-boundary shortcut-source-state delivered-key-release mixed-transition delivery-progress editor-coordinates web-spaces async-snapshot fast-overwrite source-interruption snapshot-retry early-retry replay-verification release-sources app-following boundary-gate detection-only retry-exhaustion modifier-loop focus-routing field-tracking rollback; do
     "$stage/tests" "--test-$mode"
 done

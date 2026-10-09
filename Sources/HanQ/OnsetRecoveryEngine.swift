@@ -48,15 +48,38 @@ final class OnsetRecoveryEngine:NSObject {
     var lastAvailability=""
     var postedToGate=0
     var acknowledgmentWaitBegan:Double?
+    // Each real transmission retains its own deadline. New transmissions must
+    // not prolong an older event's deadline or inherit a completed event's wait.
+    var unacknowledgedPosts:[(sequence:Int,time:Double)]=[]
+    func recordPostedEvent(){
+        postedToGate+=1
+        unacknowledgedPosts.append((postedToGate,acknowledgmentClock()))
+    }
     var acknowledgmentClock:()->Double = { ProcessInfo.processInfo.systemUptime }
     // Bound a missing acknowledgment independently of AX availability and the
     // input hold watchdog (pauseForContext releases that hold).
+    func traceSafety(_ stage:OnsetSafetyDiagnostics.Stage,reason:String="none") {
+        InputDiagnostics.shared.record("onset.safety stage=\(stage.rawValue) reason=\(OnsetSafetyDiagnostics.reason(reason)) pending=\(pending.count) retained=\(retainedInput.count) prefix=\(prefixRemainder.count) posted=\(postedToGate) waitMs=\(acknowledgmentWaitBegan.map{Int(max(0,acknowledgmentClock()-$0)*1000)} ?? 0) recovering=\(recovering) waiting=\(waitingForContext) \(gate?.diagnosticState() ?? "gate=none")")
+    }
+    // Values describe the already evaluated decision; diagnostics perform no AX read.
+    func traceDeliveryContext(hasSnapshot:Bool,hasPlanField:Bool,sameField:Bool,sameSource:Bool?) {
+        InputDiagnostics.shared.record("onset.deliveryContext snapshot=\(hasSnapshot) planField=\(hasPlanField) sameField=\(sameField) sameSource=\(sameSource.map{String($0)} ?? "unchecked") readFailure=\(OnsetSafetyDiagnostics.readFailure(unavailableReason)) replayStarted=\(replayStarted) rollingBack=\(rollingBack) pending=\(pending.count)")
+    }
     func gateAcknowledged(now:Double?=nil)->Bool {
         guard let gate else{acknowledgmentWaitBegan=nil;return true}
         guard gate.healthy() else{emergencyStop("acknowledgment_gate_unavailable");return false}
-        if gate.seenCount()>=postedToGate{acknowledgmentWaitBegan=nil;return true}
+        let seen=gate.seenCount()
+        unacknowledgedPosts.removeAll{$0.sequence<=seen}
+        if seen>=postedToGate{if acknowledgmentWaitBegan != nil{traceSafety(.ackReady)};acknowledgmentWaitBegan=nil;return true}
         let time=now ?? acknowledgmentClock()
-        guard let began=acknowledgmentWaitBegan else{acknowledgmentWaitBegan=time;return false}
+        if let oldest=unacknowledgedPosts.first {
+            if acknowledgmentWaitBegan != oldest.time {
+                acknowledgmentWaitBegan=oldest.time;traceSafety(.ackWait)
+            }
+        }
+        // Explicit counter-only test doubles and restored legacy state retain
+        // the original bounded wait; real posts always have an issue time.
+        guard let began=acknowledgmentWaitBegan else{acknowledgmentWaitBegan=time;traceSafety(.ackWait);return false}
         if time-began>=0.25{emergencyStop("replay_acknowledgment_timeout")}
         return false
     }
@@ -80,6 +103,7 @@ final class OnsetRecoveryEngine:NSObject {
         }
     }
     func pauseForContext(_ reason:String){
+        traceSafety(.pause,reason:reason)
         guard !stopAfterRollback,gate?.healthy() ?? true else{parkTerminal(reason);return}
         recoveryEpoch+=1
         retainPrefixRemainder();collectHeld()
@@ -93,6 +117,8 @@ final class OnsetRecoveryEngine:NSObject {
     func resumeIfReady(now:Double=ProcessInfo.processInfo.systemUptime){
         guard enabled,waitingForContext else{return}
         guard gateAcknowledged(now:now) else{resumeObservedAt=nil;resumeField=nil;return}
+        observePassedIdentity()
+        refreshAcknowledgedPassedBaseline()
         guard currentLayout() != nil,let snap=snapshot(),snap.selection.length==0 else{
             resumeObservedAt=nil;resumeField=nil;return
         }
@@ -102,7 +128,13 @@ final class OnsetRecoveryEngine:NSObject {
         guard now-since>=0.1 else{return}
         waitingForContext=false;resumeObservedAt=nil;resumeField=nil
         onset.cancel();currentPlan=nil;planElement=nil
-        lastEditable=snap
+        // All posted events are acknowledged above. Only an empty delivery
+        // state may stop carrying the previous replay into a new observation.
+        if pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty {
+            replayStarted=false
+        }
+        lastEditable=snap;publishPassedBaseline(snap)
+        traceSafety(.resume)
         log("repair_resumed",["retainedEvents":retainedInput.count])
     }
     func retainPrefixRemainder(){
@@ -123,10 +155,111 @@ final class OnsetRecoveryEngine:NSObject {
     var earlyObservedField:AXUIElement?
     var earlyWaiting=false
     var bufferedBase:Int64=0
+    var deferredTime:Double?
+    var deferredBaseline:OnsetSnapshot?
+    var deferredField:AXUIElement?
+    var passedTime:Double?
+    var passedBaseline:OnsetSnapshot?
+    var passedField:AXUIElement?
+    func cancelDeferredObservation(){gate?.discardDeferred();deferredTime=nil;deferredBaseline=nil;deferredField=nil;passedTime=nil;passedBaseline=nil;passedField=nil}
+    var publishedPassedBaselines:[(revision:Int,snapshot:OnsetSnapshot)]=[]
+    var publishedPassedRevision=0
+    func publishPassedBaseline(_ snap:OnsetSnapshot?){
+        guard enabled,!recovering,pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,
+              currentSource()==onsetKoreanID,let snap,snap.selection.length==0 else{gate?.configurePassedBaseline(nil);return}
+        if let last=publishedPassedBaselines.last,CFEqual(last.snapshot.element,snap.element),last.snapshot.text==snap.text,last.snapshot.selection==snap.selection {
+            gate?.configurePassedBaseline(last.revision,sourceID:onsetKoreanID);return
+        }
+        publishedPassedRevision+=1
+        publishedPassedBaselines.append((publishedPassedRevision,snap))
+        // The current and previous publication cover a gate/main-thread race.
+        // Once observed, an active sequence has its own anchored snapshot below.
+        if publishedPassedBaselines.count>2{publishedPassedBaselines.removeFirst()}
+        gate?.configurePassedBaseline(publishedPassedRevision,sourceID:onsetKoreanID)
+    }
+    // A focus pause may hide the original field from snapshot(). Refresh only
+    // its read-only baseline after every issued event has crossed the gate.
+    func refreshAcknowledgedPassedBaseline(){
+        guard enabled,!recovering,!rollingBack,pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,
+              gate?.healthy() ?? true,gate.map({$0.seenCount()>=postedToGate}) ?? true,
+              currentSource()==repairSourceID,let field=planElement,let snap=originalSnapshot(field),snap.selection.length==0 else{return}
+        lastEditable=snap;publishPassedBaseline(snap)
+    }
+    func observePassedIdentity(){
+        guard let p=gate?.passedObservation(),passedTime != p.first.time else{return}
+        passedTime=p.first.time
+        if let revision=p.baselineRevision {
+            guard let baseline=publishedPassedBaselines.first(where:{$0.revision==revision})?.snapshot else{
+                gate?.discardPassed(reason:.baseline_missing);passedBaseline=nil;passedField=nil;return
+            }
+            passedBaseline=baseline;passedField=baseline.element
+        }else{passedBaseline=earlyBaseline;passedField=earlyObservedField}
+    }
+    func samplePassed(_ snap:OnsetSnapshot?)->Bool {
+        guard let gate,let p=gate.passedObservation(),p.keys.count>=2 else{return false}
+        guard canBeginRepair(),currentSource()==p.first.sourceID,p.first.sourceID==onsetKoreanID,
+              pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
+              gate.seenCount()>=postedToGate else{traceReentryObservation("history_guard_failed",hasSnapshot:snap != nil);gate.discardPassed(reason:.guard_failed);return false}
+        guard let snap else{if !transientReadFailure{gate.discardPassed()};return true}
+        if let field=passedField,!CFEqual(field,snap.element){traceReentryObservation("history_field_changed",hasSnapshot:true);gate.discardPassed(reason:.field_changed);return false}
+        passedField=snap.element
+        let baseline=passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
+        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection) {
+        case .waiting:traceReentryObservation("history_wait",hasSnapshot:true);return true
+        case .complete:traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
+        case .rejected:traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
+        case .candidate(let candidate):
+            traceReentryObservation("history_candidate",hasSnapshot:true)
+            guard p.pressed.isEmpty else{return true}
+            planElement=snap.element;repairSourceID=p.first.sourceID
+            beginRecovery(candidate,snap,passed:p);return true
+        }
+    }
+    // Called before an ordinary event leaves the main tap. The tail gate's
+    // atomic claim rejects any event that already passed during the AX read.
+    func observeDeferredBeforeInput(_ type:CGEventType,_ event:CGEvent){
+        guard enabled,!recovering,!waitingForContext,(gate?.reservation() != nil || gate?.deferredReservation() != nil || gate?.passedObservation() != nil) else{return}
+        guard (type == .keyDown || type == .keyUp),
+              event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{cancelDeferredObservation();return}
+        if gate?.reservation()==nil,gate?.deferredReservation()==nil,gate?.passedObservation()?.baselineRevision != nil {
+            requestImmediateObservation();return
+        }
+        sample()
+    }
+    func sampleDeferred(_ snap:OnsetSnapshot?)->Bool {
+        guard let gate,let first=gate.deferredReservation() else{return false}
+        guard canBeginRepair(),currentSource()==first.sourceID,let layout=currentLayout(),
+              pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
+              gate.seenCount()>=postedToGate else{cancelDeferredObservation();return false}
+        guard let snap else{
+            if !transientReadFailure{cancelDeferredObservation()}
+            return true
+        }
+        if let field=deferredField,!CFEqual(field,snap.element){cancelDeferredObservation();return false}
+        let baseline=deferredBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0.text:nil}
+        // The late path relaxes only publication time, never the exact text,
+        // caret, physical key, input source or no-following-input requirements.
+        var detector=OnsetRecoveryDetector(layout:layout)
+        let time=ProcessInfo.processInfo.systemUptime
+        detector.outsideKey(code:first.code,shift:first.shift,time:time,korean:true,plain:true)
+        detector.entered(time:time)
+        guard let candidate=detector.firstConsonant(time:time,text:snap.text,selection:snap.selection,previousText:baseline) else {
+            if detector.awaitingFirstConsonant(text:snap.text,selection:snap.selection,previousText:baseline,
+                previousCaret:deferredBaseline?.selection.location,code:first.code,shift:first.shift) {
+                deferredField=snap.element;return true
+            }
+            cancelDeferredObservation();return false
+        }
+        planElement=snap.element;repairSourceID=first.sourceID
+        beginRecovery(candidate,snap,deferred:first)
+        return true
+    }
     // Only an untouched, fully delivered attempt can return directly to observation.
     // cancelHold atomically collects keys arriving while AX was blocked.
     @discardableResult func abandonUneditedReservation()->Bool {
-        collectHeld();pending.append(contentsOf:gate?.cancelHold() ?? [])
+        let first=gate?.reservation() ?? gate?.deferredReservation()
+        if deferredTime != first?.time {deferredTime=first?.time;deferredBaseline=earlyBaseline;deferredField=earlyObservedField}
+        collectHeld();pending.append(contentsOf:gate?.cancelHold(preserveUnclaimed:true) ?? [])
         guard gate?.healthy() ?? true,!recovering,!replayStarted,pending.isEmpty,prefixRemainder.isEmpty,
               retainedInput.isEmpty,gate.map({$0.seenCount()>=postedToGate}) ?? true else {
             pauseForContext("early_field_unavailable");return false
@@ -138,6 +271,7 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func sampleEarly(_ observed:OnsetSnapshot?,now:Double=ProcessInfo.processInfo.systemUptime){
         guard let gate else{return}
+        observePassedIdentity()
         if gate.takeEarlyExpiration() {
             guard abandonUneditedReservation() else{return}
         }
@@ -165,6 +299,7 @@ final class OnsetRecoveryEngine:NSObject {
             let candidate=detector.firstConsonant(time:now,text:snap.text,selection:snap.selection,previousText:baseline)
             planElement=snap.element
             if let candidate {
+                traceReentryObservation("early_candidate",hasSnapshot:true)
                 log("early_candidate",["code":reservation.code,"heldMs":(now-reservation.time)*1000])
                 beginRecovery(candidate,snap)
             }else{
@@ -173,19 +308,21 @@ final class OnsetRecoveryEngine:NSObject {
                 // Leave 50ms inside the existing 350ms gate reservation to claim
                 // and release on the next 20ms observation. Never renew its deadline.
                 if awaiting,now-reservation.time<0.30 {
-                    if !earlyWaiting{log("early_waiting_for_text")}
+                    if !earlyWaiting{traceReentryObservation("early_wait",hasSnapshot:true);log("early_waiting_for_text")}
                     earlyWaiting=true;return
                 }
                 if earlyWaiting && !awaiting{emergencyStop("early_context_changed");return}
                 // Nothing can be safely selected. Keep the app's current text and only
                 // forward the original follow-up events in the same field.
-                guard gate.claimEarly() else{emergencyStop("early_claim_failed");return}
-                recoveryEpoch+=1;recovering=true;rollingBack=false;currentPlan=nil;replayStarted=false
-                recoveryBegan=now;postedBuffered=0;bufferedBase=nextBufferedID-Int64(pending.count)
-                log("early_skip",["reason":"candidate_not_exact"]);drain([])
+                traceReentryObservation("early_skip",hasSnapshot:true);log("early_skip",["reason":"candidate_not_exact"])
+                guard abandonUneditedReservation() else{return}
+                lastEditable=snap;publishPassedBaseline(snap)
+                _ = samplePassed(snap)
             }
             return
         }
+        if sampleDeferred(observed){return}
+        if samplePassed(observed){return}
         earlyObservationTime=nil;earlyObservedField=nil;earlyWaiting=false
         let layout=currentLayout()
         let eligible=observed==nil && unavailableReason=="not_supported_text_field" && layout != nil
@@ -195,6 +332,7 @@ final class OnsetRecoveryEngine:NSObject {
             if lastText != snap.text{lastText=snap.text;log("text",["text":snap.text,"selection":[snap.selection.location,snap.selection.length],"source":currentSource()])}
             lastEditable=snap
         }
+        publishPassedBaseline(lastEditable)
     }
     var replayStarted=false
     var nextBufferedID:Int64=0
@@ -202,6 +340,9 @@ final class OnsetRecoveryEngine:NSObject {
     // Deterministic failure tests inject only the OS-facing operations.
     var testSnapshot:(()->OnsetSnapshot?)?
     var testCanSelect:(()->Bool)?
+    var testCanReplaceText:(()->Bool)?
+    var testReplaceText:((AXUIElement,String)->AXError)?
+    var testOriginalSnapshot:((AXUIElement)->OnsetSnapshot?)?
     var testSetRange:((AXUIElement,NSRange)->AXError)?
     var testSource:(()->String)?
     var testPost:((CGEvent)->Void)?
@@ -210,7 +351,7 @@ final class OnsetRecoveryEngine:NSObject {
         if gate?.healthy()==false{return false}
         if testPost == nil && (!AXIsProcessTrusted() || IsSecureEventInputEnabled()){return false}
         if event.getIntegerValueField(.keyboardEventKeycode)==51 && !OnsetDeletionKey.hasDeletePayload(event){emergencyStop("unsafe_delete_payload_blocked");return false}
-        if let testPost { testPost(event) } else { postedToGate+=1;event.post(tap:.cghidEventTap) };return true }
+        if let testPost { testPost(event) } else { recordPostedEvent();event.post(tap:.cghidEventTap) };return true }
     var lastAXFailure=""
     var accessibilityRequested=false
     var lastFocusRoute=""
@@ -238,6 +379,7 @@ final class OnsetRecoveryEngine:NSObject {
         return value
     }
     func emergencyStop(_ reason:String){
+        traceSafety(.stop,reason:reason)
         guard enabled || recovering || waitingForContext else{return}
         recoveryEpoch+=1;waitingForContext=false
         retainPrefixRemainder()
@@ -254,12 +396,38 @@ final class OnsetRecoveryEngine:NSObject {
             log("key_buffered",["id":nextBufferedID,"eventType":event.type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode)])
         }
     }
+    // A temporary content read failure is not a transaction boundary. Keep the
+    // existing hold and queue; never extend its deadline or post without a new
+    // complete snapshot of the original field and source.
+    func canAwaitReplaySnapshot()->Bool {
+        guard recovering,replayStarted,!rollingBack,planElement != nil,currentPlan != nil,
+              ["text_unreadable","selection_unreadable","selection_invalid"].contains(unavailableReason),
+              let gate,currentSource()==repairSourceID else{return false}
+        gate.poll()
+        return gate.hasActiveReplayHold()
+    }
+    func flushReentryTrace(){
+        guard InputDiagnostics.shared.isEnabled,let gate else{return}
+        let (frames,dropped)=gate.takeReentryTrace()
+        for frame in frames{InputDiagnostics.shared.record(frame.line)}
+        if dropped>0{InputDiagnostics.shared.record("onset.reentry_dropped count=\(dropped)")}
+    }
+    var lastReentryObservation=""
+    func traceReentryObservation(_ reason:String,hasSnapshot:Bool){
+        guard InputDiagnostics.shared.isEnabled else{return}
+        let state="reason=\(OnsetReentryDiagnostics.engineReason(reason)) snapshot=\(hasSnapshot) baseline=\(earlyBaseline != nil) passedBaseline=\(passedBaseline != nil) replayStarted=\(replayStarted) recovering=\(recovering) waiting=\(waitingForContext) pending=\(pending.count) retained=\(retainedInput.count)"
+        guard state != lastReentryObservation else{return};lastReentryObservation=state
+        InputDiagnostics.shared.record("onset.reentry_engine decisionMonoNs=\(DispatchTime.now().uptimeNanoseconds) \(state)")
+    }
     func automaticTick(){
+        defer{flushReentryTrace()}
         guard enabled else{return}
         guard AXIsProcessTrusted() else{emergencyStop("permission_revoked");return}
         gate?.beat();collectHeld()
         if waitingForContext{resumeIfReady();return}
         if recovering {
+            if committedReplacementAwaiting {verifyCommittedReplacement();return}
+            if finishQuietConfirmedDelivery(){return}
             _ = gateAcknowledged()
             guard enabled,recovering else{return}
             let observed=snapshot()
@@ -267,6 +435,7 @@ final class OnsetRecoveryEngine:NSObject {
             let source=currentSource()
             guard observed != nil,sameField,source==repairSourceID else{
                 log("repair_context_details",["snapshotFailure":unavailableReason,"hasSnapshot":observed != nil,"sameField":sameField,"source":source,"frontmostPID":NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1])
+                if observed==nil,canAwaitReplaySnapshot(){return}
                 if observed==nil,transientReadFailure{pauseForContext("repair_context_lost")}else{emergencyStop("repair_context_lost")};return
             }
             gate?.beat();return
@@ -327,7 +496,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard let target,OnsetRecoveryController.supports(pid:target.processIdentifier) else{return}
         ax=AXUIElementCreateApplication(target.processIdentifier);AXUIElementSetMessagingTimeout(ax!,0.05)
         AXUIElementSetMessagingTimeout(systemAX,0.05);accessibilityRequested=false;lastFocusRoute="";lastAXFailure=""
-        let gate=OnsetInputGate(marker:marker);self.gate=gate;postedToGate=0
+        let gate=OnsetInputGate(marker:marker);if InputDiagnostics.shared.isEnabled{gate.enableReentryTrace()};self.gate=gate;postedToGate=0;unacknowledgedPosts=[];acknowledgmentWaitBegan=nil
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}
         gate.observationNeeded={[weak self,weak gate] in
@@ -361,30 +530,39 @@ final class OnsetRecoveryEngine:NSObject {
     func sample(){
         guard enabled,!recovering else{return}
         if currentLayout() == nil,gate?.reservation() == nil {
+            cancelDeferredObservation()
+            gate?.configurePassedBaseline(nil)
             gate?.configureEarly(false);onset.cancel();planElement=nil
             lastEditable=nil;earlyBaseline=nil;lastText=nil
             return
         }
-        let observed=snapshot();observeAvailability(observed)
+        let observed=snapshot();traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
         sampleEarly(observed)
     }
 
-    func beginRecovery(_ candidate:OnsetRecoveryPlan,_ snap:OnsetSnapshot){
+    func beginRecovery(_ candidate:OnsetRecoveryPlan,_ snap:OnsetSnapshot,deferred:OnsetInputGate.Reservation?=nil,passed:OnsetInputGate.PassedInput?=nil){
         guard canBeginRepair() else{onset.cancel();emergencyStop("manual_edit_busy");return}
+        if candidate.replayedText != nil {
+            guard candidate.isCommittedLate,canReplaceCommittedText(snap.element) else{gate?.discardPassed();log("committed_replacement_unsupported");return}
+        }
         var writable:DarwinBoolean=false
         let canSelect=testCanSelect?() ?? (AXUIElementIsAttributeSettable(snap.element,kAXSelectedTextRangeAttribute as CFString,&writable) == .success && writable.boolValue)
         guard canSelect else{log("recovery_unsupported",["reason":"selection_not_writable"]);emergencyStop("early_selection_not_writable");return}
-        guard gate?.claimEarly() ?? true else{return}
+        let claimed=passed.map{gate?.claimPassed($0) ?? false} ?? deferred.map{gate?.claimDeferred($0) ?? false} ?? (gate?.claimEarly() ?? true)
+        guard claimed else{return}
+        if deferred != nil{log("deferred_candidate")}
+        if passed != nil{log("passed_sequence_candidate")}
         willBeginRepair()
         recoveryBegan=ProcessInfo.processInfo.systemUptime
         recoveryEpoch+=1
-        recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;postedBuffered=0
+        recovering=true;rollingBack=false;replayStarted=false;deliveryPrefixConfirmed=false;committedReplacementAwaiting=false;currentPlan=candidate;postedBuffered=0
         bufferedBase=nextBufferedID-Int64(pending.count)
+        traceSafety(.started)
         log("repair_started",["pair":candidate.roman,"text":snap.text])
         replaceAndReplay(candidate,snap)
     }
     func replaceAndReplay(_ candidate:OnsetRecoveryPlan,_ before:OnsetSnapshot){
-        guard candidate.codes.count==1 else{abort("unsupported_repair_plan");return}
+        guard candidate.supportsReplay || candidate.isCommittedLate else{abort("unsupported_repair_plan");return}
         guard recovering,!rollingBack,gate?.healthy() ?? true else{return}
         guard currentSource()==repairSourceID,let current=snapshot(),CFEqual(current.element,before.element) else{abort("pre_edit_context_changed");return}
         if !candidate.matches(text:current.text,selection:current.selection) {
@@ -417,7 +595,7 @@ final class OnsetRecoveryEngine:NSObject {
         return true
     }
     func awaitSelection(_ candidate:OnsetRecoveryPlan,_ before:OnsetSnapshot,_ range:NSRange,remaining:Int){
-        guard candidate.codes.count==1 else{abort("unsupported_repair_plan");return}
+        guard candidate.supportsReplay || candidate.isCommittedLate else{abort("unsupported_repair_plan");return}
         guard recovering,!rollingBack,gate?.healthy() ?? true else{return}
         guard currentSource()==repairSourceID else{abort("selection_source_changed");return}
         guard let selected=snapshot() else{
@@ -452,15 +630,20 @@ final class OnsetRecoveryEngine:NSObject {
             return
         }
         log("selected_replacement_started")
+        if candidate.isCommittedLate {replaceCommitted(candidate,selected);return}
         replayPair(candidate)
     }
 
+    var deliveryPrefixConfirmed=false
+    var committedReplacementAwaiting=false
+    var committedReplacementDeadline=0.0
     var recoveryBegan=0.0
     var selectionRequestAt=0.0
     var selectionRetried=false
 
     func replayPair(_ candidate:OnsetRecoveryPlan){
-        replayStarted=true;prefixRemainder=[];lastPrefixObservation=""
+        guard candidate.supportsReplay else{abort("unsupported_repair_plan");return}
+        replayStarted=true;deliveryPrefixConfirmed=false;prefixRemainder=[];lastPrefixObservation=""
         var events:[CGEvent]=[]
         for (code,shift) in candidate.codes{
             for down in [true,false]{if let event=CGEvent(keyboardEventSource:CGEventSource(stateID:.hidSystemState),virtualKey:code,keyDown:down){event.flags=shift ? .maskShift:[];events.append(event)}}
@@ -497,13 +680,13 @@ final class OnsetRecoveryEngine:NSObject {
             lastPrefixObservation=observation
             log("prefix_observed",["actual":snap.text,"expected":expected,"selection":[snap.selection.location,snap.selection.length],"gateSeen":gate?.seenCount() ?? -1,"postedToGate":postedToGate])
         }
-        let caret=NSRange(location:candidate.caret+(expected.utf16.count-candidate.before.utf16.count),length:0)
+        let caret=NSRange(location:candidate.caret+(candidate.replayedText ?? candidate.roman).utf16.count,length:0)
         let replacementReady=snap.selection==caret && (gate.map{$0.seenCount()>=postedToGate} ?? true)
-        let acceptable=([candidate.roman]+candidate.onsetVariants).map{
+        let acceptable=(candidate.replayedText.map{[$0]} ?? ([candidate.roman]+candidate.onsetVariants)).map{
             (candidate.before as NSString).replacingCharacters(in:NSRange(location:candidate.caret,length:0),with:$0)
         }
         if acceptable.contains(snap.text) && replacementReady {
-            log("prefix_visible",["text":snap.text])
+            log("prefix_visible",["text":snap.text]);deliveryPrefixConfirmed=true
             drain([],rollback:rollback)
             return
         }
@@ -513,7 +696,17 @@ final class OnsetRecoveryEngine:NSObject {
     func drain(_ prefix:[CGEvent],rollback:Bool=false){
         guard recovering,rollingBack==rollback,gate?.healthy() ?? true else{return}
         collectHeld()
-        guard let snap=snapshot(),let field=planElement,CFEqual(snap.element,field),currentSource()==repairSourceID else{
+        if prefix.isEmpty,!rollback,finishQuietConfirmedDelivery(){return}
+        let deliverySnapshot=snapshot()
+        let deliveryField=planElement
+        let sameField=deliverySnapshot.flatMap{snap in deliveryField.map{CFEqual(snap.element,$0)}} ?? false
+        // Preserve the original short circuit: source is read only for the same field.
+        let sameSource:Bool?=sameField ? currentSource()==repairSourceID : nil
+        guard deliverySnapshot != nil,deliveryField != nil,sameField,sameSource == true else{
+            traceDeliveryContext(hasSnapshot:deliverySnapshot != nil,hasPlanField:deliveryField != nil,sameField:sameField,sameSource:sameSource)
+            if deliverySnapshot==nil,!rollback,canAwaitReplaySnapshot(){
+                scheduleRecovery(0.002){[weak self] in self?.drain(prefix,rollback:false)};return
+            }
             if rollback{park("rollback_delivery_context_changed")}else{abort("replay_target_changed")};return
         }
         // Replace the selection with the consonant first; observe it before the vowel.
@@ -536,30 +729,43 @@ final class OnsetRecoveryEngine:NSObject {
             guard post(event) else{park("buffer_post_rejected");return}
             pending.removeFirst()
             postedBuffered+=1
+            traceSafety(.posted)
             log("buffer_event_posted",["id":saved.getIntegerValueField(.eventSourceUserData),"code":saved.getIntegerValueField(.keyboardEventKeycode),"eventType":saved.type.rawValue,"rollback":rollback])
             scheduleRecovery(0.001){[weak self] in self?.drain([],rollback:rollback)}
             return
         }
-        scheduleRecovery{[weak self] in
-            guard let self,self.recovering,self.rollingBack==rollback else{return}
-            self.collectHeld()
-            if !self.pending.isEmpty{self.drain([],rollback:rollback);return}
-            if !self.gateAcknowledged() {
-                guard self.enabled,self.recovering else{return}
-                self.scheduleRecovery(0.002){[weak self] in self?.drain([],rollback:rollback)};return
-            }
-            if self.gate?.finishIfEmpty()==false{self.drain([],rollback:rollback);return}
-            self.recovering=false;self.rollingBack=false;self.replayStarted=false;self.currentPlan=nil;self.lastSource=self.currentSource()
-            self.log(rollback ? "rollback_finished" : "recovery_finished",["bufferedEvents":self.nextBufferedID-self.bufferedBase,"postedEvents":self.postedBuffered,"pendingEvents":0,"postingIsNotAppAcknowledgment":true,"recoveryMs":(ProcessInfo.processInfo.systemUptime-self.recoveryBegan)*1000])
-            if let snap=self.snapshot(){self.log("after_replay_snapshot",["text":snap.text,"source":self.lastSource,"selection":[snap.selection.location,snap.selection.length]])}
-            if rollback{
-                self.gate?.stop();self.enabled=false;self.didStop?()
-            }
-            if self.stopAfterRollback{self.stopAfterRollback=false;self.closeSession()}
+        scheduleRecovery{[weak self] in self?.completeReplayDelivery(rollback:rollback)}
+    }
+    // Prefix visibility has already been proved. With no keys left to issue,
+    // waiting for/closing delivery needs no current-focus check or AX read.
+    func finishQuietConfirmedDelivery()->Bool {
+        guard recovering,!rollingBack,deliveryPrefixConfirmed,prefixRemainder.isEmpty,gate?.healthy() ?? true else{return false}
+        collectHeld()
+        guard pending.isEmpty else{return false}
+        scheduleRecovery{[weak self] in self?.completeReplayDelivery(rollback:false)}
+        return true
+    }
+    func completeReplayDelivery(rollback:Bool){
+        guard recovering,rollingBack==rollback else{return}
+        collectHeld()
+        if !pending.isEmpty{drain([],rollback:rollback);return}
+        if !gateAcknowledged() {
+            guard enabled,recovering else{return}
+            scheduleRecovery(0.002){[weak self] in self?.completeReplayDelivery(rollback:rollback)};return
         }
+        if gate?.finishIfEmpty()==false{drain([],rollback:rollback);return}
+        recovering=false;rollingBack=false;replayStarted=false;currentPlan=nil;lastSource=currentSource()
+        log(rollback ? "rollback_finished" : "recovery_finished",["bufferedEvents":nextBufferedID-bufferedBase,"postedEvents":postedBuffered,"pendingEvents":0,"postingIsNotAppAcknowledgment":true,"recoveryMs":(ProcessInfo.processInfo.systemUptime-recoveryBegan)*1000])
+        if let snap=snapshot(){lastEditable=snap;publishPassedBaseline(snap);log("after_replay_snapshot",["text":snap.text,"source":lastSource,"selection":[snap.selection.location,snap.selection.length]])}
+        else{refreshAcknowledgedPassedBaseline()}
+        if rollback{
+            gate?.stop();enabled=false;didStop?()
+        }
+        if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
     func abort(_ reason:String){
         guard recovering else{return}
+        if let candidate=currentPlan,candidate.isCommittedLate,!replayStarted {cancelCommittedSelection(candidate);return}
         if rollingBack{return}
         rollingBack=true;rollbackReason=reason
         log("rollback_started",["reason":reason,"originalRoman":currentPlan?.roman ?? "","pendingEvents":pending.count])
@@ -591,6 +797,7 @@ final class OnsetRecoveryEngine:NSObject {
         parkTerminal(reason)
     }
     func parkTerminal(_ reason:String){
+        traceSafety(.parked,reason:reason)
         retainPrefixRemainder()
         gate?.stop();collectHeld()
         // Keep uncertain input in memory; never inject it into a different field.
@@ -605,12 +812,13 @@ final class OnsetRecoveryEngine:NSObject {
         closeSession()
     }
     func closeSession(){
+        traceSafety(.sessionEnd)
         recoveryEpoch+=1;waitingForContext=false
         if let axObserver {
             CFRunLoopRemoveSource(CFRunLoopGetMain(),AXObserverGetRunLoopSource(axObserver),.commonModes)
         }
         axObserver=nil;observedField=nil;updateQueued=false
-        gate?.stop();collectHeld()
+        gate?.stop();collectHeld();flushReentryTrace()
         enabled=false;timer?.invalidate();timer=nil
         log("session_end",["undeliveredEvents":pending.count+retainedInput.count])
     }

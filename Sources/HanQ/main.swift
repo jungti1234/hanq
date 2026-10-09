@@ -449,6 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     guard let routing=owner.inputDeliveryOrigin else{return false}
                     let token=event.getIntegerValueField(.eventSourceUserData)
                     guard routing.forwardIfMoved(event,origin:originalRecipient) else{return false}
+                    owner.onsetRecovery.engine?.cancelDeferredObservation()
                     owner.mismatchRecovery.engine.discardEventOrigin(token)
                     if owner.sourceSwitchBarrier.busy {owner.sourceSwitchBarrier.fail("recipient_changed")}
                     else {owner.sourceSwitchBarrier.resetObservation()}
@@ -457,6 +458,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     return true
                 }
                 if forwardOriginalIfMoved(){return nil}
+                if !owner.sourceSwitchBarrier.busy {
+                    owner.onsetRecovery.engine?.observeDeferredBeforeInput(type,event)
+                }else{owner.onsetRecovery.engine?.cancelDeferredObservation()}
                 if owner.sourceSwitchBarrier.receive(type,event) { return nil }
                 if [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
                     owner.jamoRepair.inputDidChange(type: type, key: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)

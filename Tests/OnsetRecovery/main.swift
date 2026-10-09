@@ -32,7 +32,6 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
                     let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g
                     p.unavailableReason="not_supported_text_field";p.sampleEarly(nil)
                     testCheck(g.receive(.keyDown,key(code,true,shift)) != nil && g.reservation()?.sourceID==id,"reserve actual layout initial")
-                    testCheck(g.receive(.keyDown,key(vowel))==nil,"vowel held")
                     let field=AXUIElementCreateApplication(12345);var text=original;var range=NSRange(location:1,length:0);var sent:[UInt16]=[]
                     p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
                     p.testSetRange={_,r in range=r;return .success}
@@ -43,7 +42,9 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
                         if sent.count==1{testCheck(k==code && e.flags.contains(.maskShift)==shift && range==NSRange(location:0,length:1));text=variants.last!;range=NSRange(location:1,length:0)}
                         else{testCheck(k==vowel && range.length==0);text="composed";range=NSRange(location:8,length:0)}
                     }
-                    p.sample();let deadline=Date().addingTimeInterval(0.5)
+                    p.sample()
+                    testCheck(g.receive(.keyDown,key(vowel))==nil,"vowel held after verified claim")
+                    let deadline=Date().addingTimeInterval(0.5)
                     while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
                     testCheck(!p.recovering && p.enabled && sent==[code,vowel] && p.pending.isEmpty,"correct layout key and following vowel: \(id), \(code), \(shift)")
                     p.closeSession();cases+=1
@@ -61,7 +62,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true};let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g
         var source=KoreanKeyboardLayout.threeSetID;var sent=0
         p.testSource={source};p.unavailableReason="not_supported_text_field";p.sampleEarly(nil)
-        _=g.receive(.keyDown,key(40));_=g.receive(.keyDown,key(3))
+        _=g.receive(.keyDown,key(40));g.held=[key(3)] // Inject an in-flight buffered vowel to verify source-change fencing.
         let field=AXUIElementCreateApplication(12345);var range=NSRange(location:1,length:0)
         p.testSnapshot={OnsetSnapshot(element:field,text:"ㄱ",selection:range)}
         p.testSetRange={_,r in range=r;if phase==1{source=onsetKoreanID};return .success}
@@ -131,7 +132,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
             testCheck(g.reservation()?.shift==true,"Shift before consonant must preserve the outside hint")
             let shiftUp=key(shiftCode,false,[]);shiftUp.type = .flagsChanged
             let follow=[key(code,false,.maskShift),shiftUp,key(40,true,[]),key(40,false,[])]
-            for (index,e) in follow.enumerated(){testCheck((g.receive(e.type,e) != nil)==(index==0),"only already delivered first key release passes")}
+            testCheck(g.receive(follow[0].type,follow[0]) != nil,"original release passes before claim")
             let field=AXUIElementCreateApplication(12345);var text=jamo;var range=NSRange(location:1,length:0)
             var sent:[CGEvent]=[]
             p.testSource={onsetKoreanID};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
@@ -146,7 +147,9 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
                     testCheck(!e.flags.contains(.maskShift) && range.length==0);text=syllable
                 }
             }
-            p.sample();let deadline=Date().addingTimeInterval(0.5)
+            p.sample()
+            for e in follow.dropFirst(){testCheck(g.receive(e.type,e)==nil,"verified repair holds subsequent events")}
+            let deadline=Date().addingTimeInterval(0.5)
             while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
             testCheck(text==syllable && !p.recovering && p.pending.isEmpty,"code=\(code) text=\(text) sent=\(sent.count) pending=\(p.pending.count) enabled=\(p.enabled) recovering=\(p.recovering) waiting=\(p.waitingForContext)")
             testCheck(sent.count==5 && sent[2].type == .flagsChanged && !sent[2].flags.contains(.maskShift),"Shift release stays ordered before vowel")
@@ -171,8 +174,6 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
         testCheck(g.receive(.keyDown,key(15)) != nil)
         testCheck(g.receive(.keyUp,key(15,false)) != nil,"release of original first down passes")
-        for (k,d):(CGKeyCode,Bool) in [(40,true),(40,false),(1,true),(1,false)]{testCheck(g.receive(d ? .keyDown:.keyUp,key(k,d))==nil)}
-        if alreadyCollected{p.collectHeld()}
         let field=AXUIElementCreateApplication(12345);var text="ㄱ";var range=NSRange(location:1,length:0);var codes:[Int64]=[]
         p.testSource={onsetKoreanID};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
         p.testSetRange={_,r in range=r;return .success}
@@ -185,6 +186,8 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
             if k==1{testCheck(text=="가");text="간"}
         }
         p.sample()
+        for (k,d):(CGKeyCode,Bool) in [(40,true),(40,false),(1,true),(1,false)]{testCheck(g.receive(d ? .keyDown:.keyUp,key(k,d))==nil)}
+        if alreadyCollected{p.collectHeld()}
         let deadline=Date().addingTimeInterval(0.5)
         while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
         testCheck(text=="간" && codes==[15,40,1] && p.pending.isEmpty && p.enabled && !p.recovering)
@@ -213,7 +216,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     for scenario in ["text", "caret", "existing", "timeout", "field", "changed", "source", "selection"] {
         let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true}
         let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
-        _=g.receive(.keyDown,key(15));_ = g.receive(.keyDown,key(40));_ = g.receive(.keyDown,key(1))
+        _=g.receive(.keyDown,key(15))
         let began=g.reservation()!.time
         let originalField=AXUIElementCreateApplication(12345);var field=originalField
         let base=scenario=="existing" ? "앞뒤":"";let offset=scenario=="existing" ? 1:0
@@ -243,13 +246,16 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
             text=(base as NSString).replacingCharacters(in:NSRange(location:offset,length:0),with:"ㄱ");range=NSRange(location:offset+1,length:0)
             p.sampleEarly(p.testSnapshot!(),now:began+0.12)
         }
+        if !["timeout","field","changed","source","selection"].contains(scenario) {
+            testCheck(g.receive(.keyDown,key(40))==nil && g.receive(.keyDown,key(1))==nil,"verified published onset starts capture")
+        }
         let end=Date().addingTimeInterval(0.3)
         while p.recovering && Date()<end{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
         if ["field","changed","source","selection"].contains(scenario){
-            testCheck(sent.isEmpty && !p.enabled && p.pending.count+p.retainedInput.count==2,"changed context retains both keys without replay")
+            testCheck(sent.isEmpty && !p.enabled && p.pending.isEmpty && p.retainedInput.isEmpty,"changed context has captured no input")
         }else if scenario=="timeout"{
-            testCheck(sent==[40,1] && g.reservation()==nil && g.holdUntil==0 && p.pending.isEmpty && !p.recovering,"timeout releases originals exactly once without editing onset")
-            p.sampleEarly(p.testSnapshot!());testCheck(sent==[40,1],"no duplicate timeout replay")
+            testCheck(sent.isEmpty && g.reservation()==nil && g.holdUntil==0 && p.pending.isEmpty && !p.recovering,"timeout without captured keys does not replay")
+            p.sampleEarly(p.testSnapshot!());testCheck(sent.isEmpty,"no timeout replay")
         }else{
             testCheck(sent==[15,40,1] && text==(base as NSString).replacingCharacters(in:NSRange(location:offset,length:0),with:"간") && !p.recovering,"delayed onset/caret composes in order")
         }
