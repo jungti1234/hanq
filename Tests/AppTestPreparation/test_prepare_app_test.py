@@ -7,6 +7,7 @@ import io
 import json
 import pathlib
 import plistlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -281,6 +282,73 @@ class PreparationTests(unittest.TestCase):
                 processes = operations.processes()
         self.assertEqual([item['pid'] for item in processes], [100])
         self.assertTrue(processes[0]['helper'])
+
+    def reuse_fixture(self):
+        self.prepare()
+        self.check()
+        archived = self.root / 'previous/HanQ.app'
+        shutil.copytree(self.app, archived)
+        self.binary.write_bytes(b'new candidate')
+        self.ops.calls.clear()
+        signature = {'certificateSHA1': 'A' * 40,
+                     'designatedRequirement': 'identifier "taek.in.hanq" and certificate root = H"' + 'a' * 40 + '"'}
+        self.signatures = self.contexts.enter_context(mock.patch.object(
+            preflight, 'code_signature', return_value=signature))
+        return archived
+
+    def reuse(self, archived):
+        return preflight.reuse_permissions(self.app, self.output / 'record.json', archived,
+                                          self.root / 'reuse', operations=self.ops)
+
+    def test_certificate_reuse_probes_before_launch_without_reset(self):
+        archived = self.reuse_fixture()
+        self.assertEqual(self.reuse(archived), 0)
+        self.assertEqual(self.ops.calls, ['stop', 'probe', 'launch', 'probe'])
+        record = json.loads((self.root / 'reuse/record.json').read_text())
+        self.assertEqual(record['status'], 'permissions_ready')
+        self.assertEqual(record['steps']['accessibility_reset'], 'not_performed_certificate_continuity')
+
+    def test_reuse_rejects_changed_certificate_before_stopping(self):
+        archived = self.reuse_fixture()
+        self.signatures.side_effect = [dict(self.signatures.return_value),
+                                      dict(self.signatures.return_value, certificateSHA1='B' * 40)]
+        with self.assertRaises(preflight.PreflightError): self.reuse(archived)
+        self.assertEqual(self.ops.calls, [])
+
+    def test_reuse_rejects_adhoc_before_stopping(self):
+        archived = self.reuse_fixture()
+        self.signatures.return_value = {'certificateSHA1': None, 'designatedRequirement': 'cdhash H"abcd"'}
+        with self.assertRaises(preflight.PreflightError): self.reuse(archived)
+        self.assertEqual(self.ops.calls, [])
+
+    def test_reuse_rejects_modified_previous_app(self):
+        archived = self.reuse_fixture()
+        (archived / 'Contents/MacOS/HanQ').write_bytes(b'not approved')
+        with self.assertRaises(preflight.PreflightError): self.reuse(archived)
+        self.assertEqual(self.ops.calls, [])
+
+    def test_reuse_denied_permission_never_launches_or_resets(self):
+        archived = self.reuse_fixture()
+        self.ops.result.update(ax=False, post=False)
+        with self.assertRaises(preflight.PreflightError): self.reuse(archived)
+        self.assertEqual(self.ops.calls, ['stop', 'probe'])
+        record = json.loads((self.root / 'reuse/record.json').read_text())
+        self.assertEqual(record['status'], 'failed')
+        self.assertEqual(record['steps']['new_app_launched'], 'not_run')
+
+    def test_reuse_rejects_unapproved_baseline(self):
+        archived = self.reuse_fixture()
+        record = self.record(); record['status'] = 'awaiting_approval'
+        (self.output / 'record.json').write_text(json.dumps(record))
+        with self.assertRaises(preflight.PreflightError): self.reuse(archived)
+        self.assertEqual(self.ops.calls, [])
+
+    def test_reuse_rejects_new_path(self):
+        archived = self.reuse_fixture()
+        with self.assertRaises(preflight.PreflightError):
+            preflight.reuse_permissions(archived, self.output / 'record.json', archived,
+                                        self.root / 'reuse', operations=self.ops)
+        self.assertEqual(self.ops.calls, [])
 
 
 if __name__ == '__main__':

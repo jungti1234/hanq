@@ -17,13 +17,19 @@ fi
 compiler=(swiftc)
 output=build/HanQ.app
 development=false
+signing_identity="${HANQ_SIGNING_IDENTITY:--}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --development) development=true; shift ;;
     --candidate) output=build/candidate/HanQ.app; shift ;;
-    *) echo '사용법: bash scripts/build-app.sh [--print-version | --development | --candidate]' >&2; exit 1 ;;
+    --signing-identity) signing_identity="${2:?인증서 SHA-1 지문이 필요합니다.}"; shift 2 ;;
+    *) echo '사용법: bash scripts/build-app.sh [--print-version | --development | --candidate] [--signing-identity SHA1]' >&2; exit 1 ;;
   esac
 done
+if [[ "$signing_identity" != - && ! "$signing_identity" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo '서명 인증서는 40자리 SHA-1 지문을 지정하세요.' >&2
+  exit 1
+fi
 if $development; then compiler+=(-D HANQ_DEVELOPMENT); fi
 macos_minimum=13.0
 build_arch=arm64
@@ -110,7 +116,7 @@ EOF
 python3 scripts/configure-updates.py "$app/Contents/Info.plist"
 python3 scripts/build-manifest.py "$app/Contents/Resources/HanQBuild.json" "$development"
 plutil -lint "$app/Contents/Info.plist"
-codesign --force --sign - "$app"
+python3 scripts/sign-app.py "$app" --identity "$signing_identity"
 codesign --verify --deep --strict "$app"
 cmp LICENSE "$app/Contents/Resources/LICENSE.txt"
 if [[ -d "$previous_app" ]]; then

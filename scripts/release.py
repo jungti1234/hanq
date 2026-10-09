@@ -69,6 +69,7 @@ def prepare(app):
     if run('lipo', '-archs', app / 'Contents/MacOS/HanQ') != 'arm64':
         raise SystemExit('Unexpected architecture')
     run('codesign', '--verify', '--deep', '--strict', app)
+    code_signing = json.loads(run('python3', ROOT / 'scripts/sign-app.py', '--inspect', app))
     sparkle = Path(run('bash', 'scripts/prepare-sparkle.sh'))
     if run(sparkle / 'bin/generate_keys', '--account', 'taek.in.hanq', '-p') != info['SUPublicEDKey']:
         raise SystemExit('Signing key does not match the candidate public key')
@@ -127,7 +128,8 @@ def prepare(app):
                     'sourceCommit': run('git', 'rev-parse', 'HEAD'),
                     'workingTreeDirty': bool(run('git', 'status', '--porcelain')),
                     'sourceSHA256': identity['sourceSHA256'], 'dmg': name, 'sha256': digest,
-                    'edSignature': signature, 'signing': 'ad-hoc', 'notarized': False,
+                    'edSignature': signature, 'signing': code_signing['mode'],
+                    'codeSigning': code_signing, 'notarized': False,
                     'validation': ['app-signature', 'dmg-integrity', 'mounted-app-signature',
                                    'mounted-executable-match', 'applications-link', 'ed25519-signature']}
         (output / 'release-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')

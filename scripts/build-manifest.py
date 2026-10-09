@@ -11,7 +11,8 @@ def source_hashes():
     paths = set(Path('Sources').rglob('*.swift')) | set(Path('Resources').rglob('*'))
     paths |= {Path('LICENSE'), Path('version.env'), Path('updates/config.json'),
               Path('scripts/build-app.sh'), Path('scripts/configure-updates.py'),
-              Path('scripts/prepare-sparkle.sh'), Path('scripts/build-manifest.py')}
+              Path('scripts/prepare-sparkle.sh'), Path('scripts/build-manifest.py'),
+              Path('scripts/sign-app.py')}
     return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(paths) if p.is_file() and p.name != '.DS_Store'}
 
 

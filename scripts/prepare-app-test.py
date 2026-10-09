@@ -186,6 +186,68 @@ def ensure_same_app(identity):
         raise PreflightError('준비한 앱의 내용이 바뀌었습니다. 새 기록으로 다시 준비하세요.')
 
 
+def code_signature(app):
+    return json.loads(run([sys.executable, str(ROOT / 'scripts/sign-app.py'),
+                           '--inspect', str(app)]).stdout)
+
+
+def reuse_permissions(app, previous_record, previous_app, output=None, operations=None):
+    """Verify certificate continuity and real permission before launching a new main app."""
+    identity = app_identity(app)
+    baseline = json.loads(pathlib.Path(previous_record).read_text())
+    if (baseline.get('kind') != 'hanq-app-test-preflight' or
+            baseline.get('status') != 'permissions_ready' or
+            baseline.get('permission_result', {}).get('ax') is not True or
+            baseline.get('permission_result', {}).get('post') is not True):
+        raise PreflightError('승인·검사가 완료된 이전 준비 기록이 필요합니다.')
+    if identity['path'] != baseline['app']['path']:
+        raise PreflightError('권한 재사용은 이전에 승인한 동일 앱 경로에서만 검사합니다.')
+    archived = app_identity(previous_app)
+    if dict(archived, path=baseline['app']['path']) != baseline['app']:
+        raise PreflightError('이전 앱 사본이 승인 당시 기록과 다릅니다.')
+    old_signature, new_signature = code_signature(previous_app), code_signature(app)
+    if (not old_signature.get('certificateSHA1') or
+            old_signature['certificateSHA1'] != new_signature.get('certificateSHA1') or
+            old_signature['designatedRequirement'] != new_signature.get('designatedRequirement') or
+            'cdhash' in old_signature['designatedRequirement']):
+        raise PreflightError('동일 인증서와 안정적인 서명 식별 조건을 확인할 수 없습니다.')
+    operations = operations or MacOS()
+    output = pathlib.Path(output or ROOT / '.build/hanq/test-preflight' / uuid.uuid4().hex).resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    record_path = output / 'record.json'
+    record = {'schema_version': 1, 'kind': 'hanq-app-test-preflight', 'app': identity,
+              'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'status': 'preparing', 'previous_record': str(pathlib.Path(previous_record).resolve()),
+              'code_signature': new_signature, 'steps': {'previous_app_stopped': 'not_run',
+              'accessibility_reset': 'not_performed_certificate_continuity',
+              'new_app_launched': 'not_run', 'gui_approval': 'previous_approval_pending_verification',
+              'fresh_permission_check': 'not_run'}}
+    save_record(record_path, record)
+    try:
+        operations.stop(operations.processes())
+        record['steps']['previous_app_stopped'] = 'completed'
+        ensure_same_app(identity)
+        if operations.processes():
+            raise PreflightError('다른 한Q가 실행 중입니다.')
+        result = operations.probe(identity['path'])
+        record['permission_result'] = result
+        ensure_same_app(identity)
+        if result.get('ax') is not True or result.get('post') is not True:
+            raise PreflightError('권한이 유지되지 않았습니다. 일반 prepare와 GUI 승인이 필요합니다.')
+        record['steps']['fresh_permission_check'] = 'passed_before_launch'
+        record['steps']['gui_approval'] = 'previous_approval_verified'
+        record['launched_pid'] = operations.launch(identity['path'])
+        record['steps']['new_app_launched'] = 'completed'
+        record['status'] = 'awaiting_approval'
+        save_record(record_path, record)
+        return check(record_path, operations=operations)
+    except Exception as error:
+        record['status'] = 'failed'
+        record['error'] = str(error)
+        save_record(record_path, record)
+        raise
+
+
 def prepare(app, output=None, dry_run=False, operations=None):
     identity = app_identity(app)
     operations = operations or MacOS()
@@ -249,10 +311,15 @@ def check(record_path, operations=None):
     record_path = pathlib.Path(record_path).expanduser().resolve()
     record = json.loads(record_path.read_text())
     steps = record.get('steps', {})
+    reset_ready = steps.get('accessibility_reset') == 'completed' or (
+        steps.get('accessibility_reset') == 'not_performed_certificate_continuity' and
+        bool(record.get('code_signature', {}).get('certificateSHA1')) and
+        bool(record.get('previous_record')))
     if (record.get('schema_version') != 1 or record.get('kind') != 'hanq-app-test-preflight' or
             record.get('status') not in ('awaiting_approval', 'permissions_ready') or
+            not reset_ready or
             not all(steps.get(key) == 'completed' for key in
-                    ('previous_app_stopped', 'accessibility_reset', 'new_app_launched'))):
+                    ('previous_app_stopped', 'new_app_launched'))):
         raise PreflightError('준비가 완료된 기록이 아닙니다. prepare부터 다시 실행하세요.')
     identity = record['app']
     try:
@@ -301,11 +368,18 @@ def main():
     prepare_parser.add_argument('app', type=pathlib.Path)
     prepare_parser.add_argument('--output', type=pathlib.Path, help='새 기록 디렉터리 (기존 경로 덮어쓰기 금지)')
     prepare_parser.add_argument('--dry-run', action='store_true', help='앱 확인과 계획 출력만 수행')
+    prepare_parser.add_argument('--reuse-permissions-from', type=pathlib.Path,
+                                help='같은 인증서·경로의 이전 승인 기록 (초기화 없이 실제 권한 검사)')
+    prepare_parser.add_argument('--previous-app', type=pathlib.Path, help='승인 당시의 보존된 앱 사본')
     check_parser = commands.add_parser('check', help='GUI 승인 후 새 앱의 권한 확인')
     check_parser.add_argument('record', type=pathlib.Path)
     args = parser.parse_args()
     try:
         if args.command == 'prepare':
+            if args.reuse_permissions_from or args.previous_app:
+                if not (args.reuse_permissions_from and args.previous_app) or args.dry_run:
+                    raise PreflightError('재사용 검사는 이전 기록·앱 사본이 모두 필요하며 dry-run과 함께 사용할 수 없습니다.')
+                return reuse_permissions(args.app, args.reuse_permissions_from, args.previous_app, args.output)
             return prepare(args.app, args.output, args.dry_run)
         return check(args.record)
     except (PreflightError, OSError, ValueError, KeyError) as error:

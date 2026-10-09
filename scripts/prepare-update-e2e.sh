@@ -6,6 +6,7 @@ mode="${1:-normal}"
 [[ "$mode" == normal || "$mode" == --required ]] || { echo 'Usage: prepare-update-e2e.sh [--required]' >&2; exit 1; }
 root="$PWD/.build/hanq/update-e2e"
 [[ "$mode" != --required ]] || root="$PWD/.build/hanq/update-required-e2e"
+root="${HANQ_UPDATE_E2E_ROOT:-$root}"
 [[ -f "$root/port" ]] || { echo 'Start Tests/UpdateEndToEnd/server.py first' >&2; exit 1; }
 if [[ -e "$root/installed/HanQ Update E2E.app" || -e "$root/server/update.dmg" ]]; then
   echo 'Existing test run found. Stop the test app/server and move .build/hanq/update-e2e before starting a fresh run.' >&2
@@ -18,7 +19,7 @@ swiftc -module-cache-path .build/hanq/module-cache -F "$sparkle" -framework Spar
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks Sources/HanQ/AppUpdater.swift Sources/HanQ/UpdatePolicy.swift \
   Sources/HanQ/UpdatePolicyClient.swift Tests/UpdateEndToEnd/main.swift -o "$root/HanQUpdateE2E"
 python3 - "$root" "$sparkle" "$mode" <<'PY'
-import json, plistlib, shutil, subprocess, sys
+import json, os, plistlib, shutil, subprocess, sys
 from pathlib import Path
 root, sparkle = map(Path, sys.argv[1:3])
 required = sys.argv[3] == "--required"
@@ -45,7 +46,7 @@ for folder, version in [('installed','1'), ('new','2')]:
  config=dict(info,SUFeedURL='https://jungti1234.github.io/hanq/appcast.xml',
              HanQPolicyURL='https://jungti1234.github.io/hanq/policy.json',HanQPolicyPublicKey=key)
  with (app/'Contents/Resources/Config.bundle/Contents/Info.plist').open('wb') as f: plistlib.dump(config,f)
- subprocess.run(['codesign','--force','--sign','-',str(app)],check=True)
+ subprocess.run(['python3','scripts/sign-app.py',str(app),'--identity',os.environ.get('HANQ_SIGNING_IDENTITY','-')],check=True)
  subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True)
 PY
 hdiutil create -quiet -srcfolder "$root/new" -volname 'HanQ Update Test' -fs APFS -format ULFO "$root/server/update.dmg"
