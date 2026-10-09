@@ -310,4 +310,65 @@ do {
  check(sent.count==2 && sent[1].type == .keyUp && focusReads==0,"release of delivered key bypasses redundant AX check even if focus moved")
  b.fail("test_end")
 }
+// A field replacement between completed transactions is a new observation,
+// while replacement during an owned boundary must still retain pending input.
+for typedBeforeSwitch in [false,true] {
+ let b=SourceSwitchBarrier();var focused=field,text="old",range=NSRange(location:3,length:0),source=en,switches=0,retained=0
+ b.read={.init(field:focused,text:text,selection:range)};b.readFocus={focused}
+ b.source={source};b.select={source=$0;switches+=1;return noErr};b.retained={retained+=$0.count}
+ b.observe(.keyDown,key(0));text="olda";range=NSRange(location:4,length:0)
+ focused=other;text="new";range=NSRange(location:3,length:0)
+ if typedBeforeSwitch {b.observe(.keyDown,key(11));text="newb";range=NSRange(location:4,length:0)}
+ check(b.request(ko),"replacement field accepts first source boundary")
+ b.step();check(switches==1 && source==ko && retained==0,"idle replacement uses new field and preserves its preceding input")
+ b.step();check(!b.busy,"replacement boundary completes without cursor recovery")
+}
+do {
+ let b=SourceSwitchBarrier();var focused=field,text="old",range=NSRange(location:3,length:0),source=en,switches=0
+ b.read={.init(field:focused,text:text,selection:range)};b.readFocus={focused};b.source={source};b.select={source=$0;switches+=1;return noErr}
+ b.observe(.keyDown,key(0));focused=other;text="";range=NSRange(location:0,length:0)
+ b.observe(.keyDown,key(11)) // Submitted to the new editor, not yet reflected in AX.
+ check(b.expected?.0=="b","first key in replacement field starts new prediction")
+ check(b.request(ko),"delayed new-field insertion boundary accepted");b.step()
+ check(b.busy && switches==0,"replacement does not switch ahead of its pending insertion")
+ text="b";range=NSRange(location:1,length:0);b.step();check(switches==1,"switch after replacement insertion is acknowledged")
+ b.fail("test_end")
+}
+do {
+ let b=SourceSwitchBarrier();var focused=field,text="old",range=NSRange(location:3,length:0),source=en,switches=0
+ b.read={.init(field:focused,text:text,selection:range)};b.readFocus={focused};b.source={source};b.select={source=$0;switches+=1;return noErr};b.applySelection={_,r in range=r;return true}
+ b.observe(.keyDown,key(0));focused=other;text="새 입력칸";range=NSRange(location:text.utf16.count,length:0)
+ b.observe(.keyDown,key(0,.maskCommand))
+ check(b.expected?.0==text && b.expected?.1==NSRange(location:0,length:text.utf16.count),"replacement select-all is bounded to new text")
+ check(b.request(ko),"source toggle joins new-field select-all boundary")
+ for _ in 0..<4 {b.step()}
+ check(switches==1 && source==ko && !b.busy,"new-field selection is acknowledged before switching")
+}
+for readyBeforeRequest in [false,true] {
+ let b=SourceSwitchBarrier();var focused=field,ready=readyBeforeRequest,switches=0,retained=0,source=en
+ b.read={.init(field:focused,text:"a",selection:NSRange(location:1,length:0))};b.readFocus={focused};b.ready={ready};b.source={source};b.select={source=$0;switches+=1;return noErr};b.retained={retained+=$0.count}
+ check(b.request(ko),"original transaction starts")
+ check(b.receive(.keyDown,key(11)),"original transaction owns following key")
+ focused=other;ready=true
+ check(b.request(ko),"subsequent toggle stays with active transaction")
+ b.step();check(!b.busy && switches==0 && retained==1,"active replacement cannot rebase or send held input to new field")
+}
+do {
+ let b=SourceSwitchBarrier();var readable=true,focused=field,source=en,switches=0,retained=0
+ b.read={readable ? .init(field:focused,text:"a",selection:NSRange(location:1,length:0)):nil};b.readFocus={readable ? focused:nil};b.source={source};b.select={source=$0;switches+=1;return noErr};b.retained={retained+=$0.count}
+ b.observe(.keyDown,key(0));readable=false;focused=other
+ check(b.request(ko),"missing focus does not discard old evidence")
+ check(b.receive(.keyDown,key(11)),"uncertain transaction owns following key")
+ b.step();check(b.busy && switches==0 && retained==0,"missing reply is not a new-field confirmation")
+ readable=true;b.step();check(!b.busy && switches==0 && retained==1,"later actual focus change retains held input")
+}
+do {
+ let b=SourceSwitchBarrier();var text="",range=NSRange(location:0,length:0),source=en,switches=0
+ b.read={.init(field:field,text:text,selection:range)};b.readFocus={field};b.source={source};b.select={source=$0;switches+=1;return noErr}
+ b.observe(.keyDown,key(0));text="different";range=NSRange(location:9,length:0)
+ check(b.request(ko),"unchanged field preserves preceding prediction");b.step()
+ check(switches==0 && b.expected?.0=="a","same-field unexpected content cannot be accepted as a new baseline")
+ b.fail("test_end")
+}
+
 print("Source switch barrier:",checks,"checks passed")

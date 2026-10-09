@@ -80,6 +80,17 @@ final class SourceSwitchBarrier {
         return fold(actual.substring(with:insertion))==fold(wanted.substring(with:insertion))
     }
     func resetObservation(){field=nil;ledger=nil;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    /// A completed boundary leaves prediction history for the next key. A new
+    /// focused field must start its own history before that key is submitted.
+    /// Never rebase an active transaction or treat a missing reply as a move.
+    private func refreshIdleField() {
+        guard !busy,ready(),let field else{return}
+        let focused:AXUIElement?
+        if let readFocus {focused=readFocus()} else{focused=read()?.field}
+        guard let focused,!CFEqual(field,focused) else{return}
+        resetObservation()
+        trace("observation_field_changed")
+    }
     /// A repair owns its replay and acknowledges the final editor state itself.
     /// Its marked events must not leave our pre-repair prediction alive.
     func noteExternalEdit() {
@@ -115,6 +126,7 @@ final class SourceSwitchBarrier {
         }
         let flags=event.flags.intersection([.maskCommand,.maskControl,.maskAlternate])
         if event.getIntegerValueField(.keyboardEventKeycode)==0,flags == .maskCommand,!event.flags.contains(.maskShift) {
+            refreshIdleField()
             if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)}
             selectedRange=ledger.map{NSRange(location:0,length:$0.text.utf16.count)}
             pendingSelectAll=selectedRange != nil
@@ -130,6 +142,7 @@ final class SourceSwitchBarrier {
               MismatchRecoveryPlan.character(code,event.flags.contains(.maskShift)) != nil else{resetObservation();return}
         let id=source()
         guard id.hasPrefix("com.apple.keylayout." ) || MismatchKeyboardLayout.supports(id) else{resetObservation();return}
+        refreshIdleField()
         if ledger == nil {
             guard let snap=read(),snap.selection.location>=0,snap.selection.length>=0,
                   NSMaxRange(snap.selection)<=snap.text.utf16.count else{return}
@@ -170,6 +183,7 @@ final class SourceSwitchBarrier {
         queued.append(copy);schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0)->Bool {
+        refreshIdleField()
         if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection}
         guard field != nil,ledger != nil else{return false}
         if !busy { transactionField=field }
