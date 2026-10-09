@@ -2,11 +2,11 @@
 
 이 문서는 배포 파일 준비, GitHub Release 게시, 운영 업데이트 피드와 필수 업데이트 정책 관리 절차를 설명한다.
 
-현재 공개 버전은 [0.2.0-beta.1](https://github.com/jungti1234/hanq/releases/tag/v0.2.0-beta.1)(빌드 82)이며, 0.3.0-beta.1은 미배포 상태다. 소스 문서나 릴리스 노트 초안을 수정하는 것만으로 공개 릴리스·운영 피드가 바뀌지는 않는다.
+현재 공개 버전은 [0.3.0-beta.1](https://github.com/jungti1234/hanq/releases/tag/v0.3.0-beta.1)(빌드 148)이다. 소스 문서나 릴리스 노트 초안을 수정하는 것만으로 공개 릴리스·운영 피드가 바뀌지는 않는다.
 
 ### 코드 서명과 권한
 
-공개 0.2.0은 ad-hoc 서명이며, 0.3.0 배포 준비에는 동일 자체 서명 인증서를 사용한다. `--signing-identity` 또는 `HANQ_SIGNING_IDENTITY`로 같은 인증서 지문을 명시한다. 생략하면 기본 빌드는 ad-hoc이다. `release.py`가 기록한 실제 서명 방식·인증서 지문·코드 식별 조건을 준비한 앱과 대조한다.
+공개 0.2.0은 ad-hoc 서명이며, 0.3.0부터 동일 자체 서명 인증서를 사용한다. `--signing-identity` 또는 `HANQ_SIGNING_IDENTITY`로 같은 인증서 지문을 명시한다. 생략하면 기본 빌드는 ad-hoc이다. `release.py`가 기록한 실제 서명 방식·인증서 지문·코드 식별 조건을 준비한 앱과 대조한다.
 
 자체 서명은 Developer ID 서명·공증을 대신하지 않는다. 최초 다운로드의 Gatekeeper 실행 차단과 기존 ad-hoc 앱에서 전환할 때의 손쉬운 사용 재승인 가능성을 설치 안내에 명시한다. 같은 인증서의 권한 재사용 조건과 확인 절차는 [개발 안내](DEVELOPMENT.md#검증된-동일-인증서의-권한-재사용)를 따른다.
 
@@ -28,7 +28,7 @@
 | GitHub Releases | 베타 설치 파일과 릴리스 노트 제공 |
 | DMG | 앱과 Applications 바로가기를 포함한 설치 이미지 |
 | Sparkle 2.10.0 | 업데이트 조회·다운로드·서명 검증·설치·재실행 |
-| HTTPS appcast | GitHub Pages에 빌드 82 및 업데이트 창용 릴리스 노트 게시 |
+| HTTPS appcast | GitHub Pages에 빌드 148 및 업데이트 창용 릴리스 노트 게시 |
 | 서명된 업데이트 정책 | 최소 허용 빌드·적용 대상·사유·시점을 관리. GitHub Pages에 별도 파일 게시. 현재 제한 규칙 없음 |
 
 한Q는 단일 앱을 복사해 사용하는 구조이므로 PKG는 현재 필요하지 않다. DMG에서 Applications로 복사한 뒤 실행하도록 안내한다. GitHub의 자동 생성 `Source code (zip)`은 실행 앱이 아니다.
