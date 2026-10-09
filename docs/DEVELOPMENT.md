@@ -8,16 +8,44 @@ macOS에서 Swift 컴파일러를 포함한 Xcode Command Line Tools가 필요�
 
 ```sh
 bash scripts/build-app.sh
-open build/HanQ.app
 ```
 
-[빌드 스크립트](../scripts/build-app.sh)는 컴파일, 자동 검사, plist·ad-hoc 서명 검증을 마친 뒤 `build/HanQ.app`을 생성한다. 기존 앱이 있으면 `.build/hanq/backups/`에 보관하고 교체하며, 실행 중인 앱은 교체하지 않는다. 서명이 바뀌면 손쉬운 사용 권한 재등록이 필요할 수 있다.
+[빌드 스크립트](../scripts/build-app.sh)는 컴파일, 자동 검사, plist·ad-hoc 서명 검증을 마친 뒤 `build/HanQ.app`을 생성한다. 기존 앱이 있으면 `.build/hanq/backups/`에 보관하고 교체하며, 실행 중인 앱은 교체하지 않는다. 새 앱을 실행해 테스트하기 전에 아래 권한 사전 체크를 완료한다.
 
 앱 버전은 `version.env`에서 읽으며 변경 규칙은 [버전 관리](VERSIONING.md)를 따른다. 작업자는 AI를 포함해 별도 요청 없이 변경 내용·공개 상태에 맞는 버전과 변경 이력을 갱신한다. 문서 수정이나 동일 입력의 재빌드만으로 번호를 올리지 않는다. 배포 대상·번들 ID는 빌드 스크립트에서 관리하고 컴파일 아키텍처는 arm64로 고정한다. 기존 설치를 업데이트할 때는 번들 ID와 앱 경로를 유지하고 사용자 설정이 보존되는지 확인한다.
 
+### 새 빌드 테스트 전 손쉬운 사용 권한 사전 체크
+
+현재 ad-hoc 서명에서는 이전 빌드의 손쉬운 사용 권한이 새 빌드에 이어지지 않을 수 있다. 일반·개발·후보 빌드로 실제 앱·입력 테스트를 시작하기 전에 매번 다음 순서로 확인한다. 후보 생성과 권한이 필요 없는 자동 검사만 수행하는 단계에는 적용하지 않는다.
+
+[테스트 준비 도구](../scripts/prepare-app-test.py)가 CUI로 준비와 권한 검사를 수행하고, 사용자는 GUI에서 권한을 승인한다. 다음 명령은 계획 확인과 실제 준비를 구분한다. 후보·설치본은 `build/HanQ.app` 대신 이번에 테스트할 정확한 앱 경로를 지정한다.
+
+```sh
+# 종료·초기화·실행 없이 앱 확인과 계획 출력
+python3 scripts/prepare-app-test.py prepare build/HanQ.app --dry-run
+
+# 기존 한Q 종료·한Q 권한 초기화·새 앱 실행·설정 열기
+python3 scripts/prepare-app-test.py prepare build/HanQ.app
+```
+
+- [ ] CUI: 실행 경로와 번들 ID가 확인된 기존 한Q 및 그 보조 프로세스를 종료하고 잔여 프로세스가 없는지 확인한다. 종료가 확인되지 않으면 다음 단계로 진행하지 않는다.
+- [ ] CUI: `tccutil reset Accessibility taek.in.hanq`로 한Q의 권한 결정만 초기화한다. 이는 GUI 목록의 `−` 삭제를 확인한 것과 다르다. 기존 항목 혼선이 남으면 GUI에서 기존 한Q를 제거한다.
+- [ ] CUI: 앱의 경로·버전·빌드 번호·서명을 확인한 새 `HanQ.app`을 LaunchServices로 실행해 권한 요청을 표시하고 손쉬운 사용 설정을 연다. 목록에 없다면 GUI의 `+`로 도구에 표시된 정확한 앱을 추가한다.
+- [ ] GUI 승인 후 CUI 확인: 시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용에서 해당 한Q를 ON으로 승인하고, 준비 도구가 출력한 `python3 …/prepare-app-test.py check …/record.json` 명령을 그대로 실행한다.
+
+`prepare`는 앱을 빌드하거나 교체하지 않으며, 사용자 승인 완료를 자동으로 기록하지 않는다. 기록은 기본적으로 `.build/hanq/test-preflight/<실행별 ID>/record.json`에 생성하며, `--output`으로 새 디렉터리를 지정할 수 있다. 기존 기록 디렉터리는 덮어쓰지 않는다. `--dry-run`은 기록을 생성하거나 네 단계 완료로 세지 않는다.
+
+`check`는 권한을 초기화하거나 앱을 종료하지 않고, 준비한 경로의 한Q만 실행 중인지 확인한 뒤 같은 앱의 새 LaunchServices 보조 프로세스로 접근성(AX)·합성 키 전송(post) 허용을 조회한다. 기록에 저장한 버전·빌드 번호·코드 해시·실행 파일·plist가 바뀌면 새 준비가 필요하다. AX와 post가 모두 true일 때만 종료 코드 0과 `permissions_ready`를 기록한다. 권한 미허용은 종료 코드 2, 앱 변경·검사 오류는 종료 코드 1이며 실제 앱·입력 테스트를 시작하지 않는다. 권한 조회 통과는 입력 감시 활성화나 실제 키 동작 검증을 대신하지 않는다.
+
+테스트 기록에는 앱의 전체 경로·버전·빌드 번호, 단계별 완료·대기·오류와 새 프로세스의 권한 조회 결과를 남긴다. 기존 목록의 한Q가 ON인 사실만으로 새 빌드의 준비가 끝났다고 판단하지 않는다. 직접 확인·조작할 수 없는 GUI 단계만 사용자에게 요청하고 완료를 추정하지 않는다. 승인·검사 완료 후 앱의 입력 감시와 실제 입력 동작을 별도로 확인한다. 독립 자동 검사는 승인 대기 중에도 계속 수행할 수 있다.
+
+`python3 Tests/AppTestPreparation/test_prepare_app_test.py`는 실제 앱 종료·권한 변경 없이 준비 순서, 종료·초기화 실패 시 중단, 다른 번들의 제외, 앱 변경·프로세스 변경·권한 거부·검사 오류 처리와 기록 보존을 검사한다. 실제 `tccutil` 초기화·GUI 승인·입력 테스트와 구분한다.
+
+이 절차는 [이슈 5](https://github.com/jungti1234/hanq/issues/5)의 서명 개선 전 임시 운영 규칙이다. Developer ID 서명·공증 또는 동일 자체 서명 인증서 사용을 적용한 뒤, 동일 서명 정체성을 유지하는 서로 다른 두 빌드의 설치·업데이트에서 권한 유지를 검증하고 지침을 갱신해 해제한다. 자체 서명 인증서로의 전환은 아직 검증하지 않았다. ad-hoc 서명은 인증서를 사용하지 않으므로 동일 자체 서명 인증서 사용과 다르며, 공증만으로 권한 유지가 확인된 것으로 보지 않는다. 서명 방식의 구분은 [Apple 코드 서명 요구사항 안내](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)를 참고한다.
+
 ### 별도 후보 빌드와 업데이트 의존성
 
-`bash scripts/build-app.sh --candidate`는 `build/candidate/HanQ.app`을 생성한다. 기존 `build/HanQ.app`은 계속 실행할 수 있으며 후보 앱 자체가 실행 중이면 교체하지 않는다. 실제 입력 검증은 기존 앱을 종료한 뒤 같은 설치 경로에서 수행한다. 후보 생성과 실제 실행 검증은 구분한다.
+`bash scripts/build-app.sh --candidate`는 `build/candidate/HanQ.app`을 생성한다. 기존 `build/HanQ.app`은 계속 실행할 수 있으며 후보 앱 자체가 실행 중이면 교체하지 않는다. 실제 입력 검증은 기존 앱을 종료한 뒤 같은 설치 경로에서 수행하며, 위 권한 사전 체크를 완료한다. 후보 생성과 실제 실행 검증은 구분한다.
 
 Sparkle 2.10.0 공식 아카이브와 SHA-256은 `scripts/prepare-sparkle.sh`에 고정한다. 최초 빌드에는 네트워크가 필요하고 이후 검증된 로컬 아카이브를 사용한다. 프레임워크의 심볼릭 링크·서명과 라이선스를 보존해 앱에 포함한다. 공개 업데이트 주소·검증키는 `updates/config.json`에 있으며 개인키는 포함하지 않는다.
 
@@ -35,7 +63,7 @@ Sparkle 2.10.0 공식 아카이브와 SHA-256은 `scripts/prepare-sparkle.sh`에
 
 `bash scripts/test-development-build.sh`로 앱 초기화 없이 일반·개발 모드의 테스트 액션 포함 여부를 실행 검증할 수 있다.
 
-개발 빌드에서만 다음 실행 옵션을 사용할 수 있다. 앱이 이미 실행 중이면 먼저 종료한다.
+개발 빌드에서만 다음 실행 옵션을 사용할 수 있다. 새 개발 빌드의 권한 사전 체크를 먼저 완료하고, 앱이 이미 실행 중이면 종료한 뒤 실행한다.
 
 ```sh
 open build/HanQ.app --args --test-jamo-panel
