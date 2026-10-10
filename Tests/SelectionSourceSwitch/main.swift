@@ -110,4 +110,63 @@ check(lostNativeSelection.owner.commitSelection(field:lostNativeSelection.elemen
 let nativeRecipe=SelectionPreservingSourceSwitch().commitSelectionEvents()!
 check(nativeRecipe.map{$0.getIntegerValueField(.keyboardEventKeycode)}==[124,124,55,0,0,55],"native commit precedes complete Command-A press/release")
 check(nativeRecipe.last!.flags.isEmpty && Set(nativeRecipe.map{$0.getIntegerValueField(.eventSourceStateID)}).count==1,"native selection uses one private state and releases Command")
+// Deferred editor acknowledgment must yield, never repost or mistake the old
+// full selection for completion of a newly posted cursor/select-all sequence.
+do {
+ let f=Fixture();var time=0.0,posts=0
+ f.owner.now={time};f.owner.postCommit={_,_ in posts+=1;return true}
+ check(f.owner.select("com.apple.keylayout.ABC",asynchronous:true)==AXError.cannotComplete.rawValue && f.owner.isPending,"switch yields after posting once")
+ time=0.08
+ check(f.owner.select("com.apple.keylayout.ABC",asynchronous:true)==AXError.cannotComplete.rawValue && posts==1 && f.selectedTargets.isEmpty,"old selection after 40ms is pending, not a failed/reposted switch")
+ f.selection=CFRange(location:0,length:0);time=0.10
+ check(f.owner.select("com.apple.keylayout.ABC",asynchronous:true)==noErr && !f.owner.isPending,"late confirmed cursor permits one switch")
+ check(posts==1 && f.selectedTargets.count==1 && f.selection.length==3,"original selection restored after deferred switch")
+}
+for reason in ["focus","text","source","timeout","cancel"] {
+ let f=Fixture();var time=0.0
+ f.owner.now={time};f.owner.postCommit={_,_ in true}
+ _=f.owner.select("com.apple.keylayout.ABC",asynchronous:true)
+ switch reason {
+ case "focus":f.owner.focus={f.other}
+ case "text":f.value="changed"
+ case "source":f.source="changed"
+ case "timeout":time=0.31
+ default:f.owner.cancelPending()
+ }
+ if reason != "cancel" {_=f.owner.select("com.apple.keylayout.ABC",asynchronous:true)}
+ check(!f.owner.isPending && f.selectedTargets.isEmpty && f.writes.isEmpty,"deferred switch safely ends on \(reason)")
+}
+do {
+ let f=Fixture();var time=0.0,cursorPosts=0,selectPosts=0
+ f.owner.now={time};f.owner.postCommit={_,key in check(key==124,"select-all commits towards selection end");cursorPosts+=1;return true}
+ f.owner.postSelectAll={_ in selectPosts+=1;return true}
+ func poll()->OSStatus{f.owner.commitSelection(field:f.element,text:"알트탭",range:NSRange(location:0,length:3),asynchronous:true)}
+ check(poll()==AXError.cannotComplete.rawValue,"select-all yields after commit")
+ time=0.08
+ check(poll()==AXError.cannotComplete.rawValue && cursorPosts==1 && selectPosts==0,"stale full selection is not acknowledgment")
+ f.selection=CFRange(location:3,length:0)
+ check(poll()==AXError.cannotComplete.rawValue && selectPosts==1,"select-all posted only after cursor acknowledgment")
+ check(poll()==AXError.cannotComplete.rawValue && selectPosts==1,"wait for actual full selection without duplicate shortcut")
+ f.selection=CFRange(location:0,length:3)
+ check(poll()==noErr && f.selectedTargets.isEmpty,"selection acknowledged without changing source")
+}
+// A delayed select-all must not post its shortcut after the original editor,
+// text, source or permission changed, or after its acknowledgment deadline.
+for reason in ["focus","text","source","permission","timeout"] {
+ let f=Fixture();var time=0.0,cursorPosts=0,selectPosts=0
+ f.owner.now={time};f.owner.postCommit={_,_ in cursorPosts+=1;return true}
+ f.owner.postSelectAll={_ in selectPosts+=1;return true}
+ func poll()->OSStatus{f.owner.commitSelection(field:f.element,text:"알트탭",range:NSRange(location:0,length:3),asynchronous:true)}
+ check(poll()==AXError.cannotComplete.rawValue,"select-all starts before \(reason)")
+ f.selection=CFRange(location:3,length:0)
+ switch reason {
+ case "focus":f.owner.focus={f.other}
+ case "text":f.value="changed"
+ case "source":f.source="com.apple.keylayout.ABC"
+ case "permission":f.owner.allowed={false}
+ default:time=0.31
+ }
+ check(poll() == -50,"select-all rejects changed \(reason)")
+ check(cursorPosts==1 && selectPosts==0 && f.selectedTargets.isEmpty && f.writes.isEmpty,"no delayed shortcut or source switch after \(reason)")
+}
 print("PASS: selection-preserving source switch \(checks) checks")

@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 stage=$(mktemp -d "$PWD/.build/hanq/onset.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 swiftc Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/main.swift -o "$stage/tests"
-for mode in layouts ack-timeout shift-onset early-capture early-publication restart recovery selection-retry selected-replacement superseded selection-read auto-resume prefix-delay drain rollback field-tracking; do
+for mode in editor-transitions layouts ack-timeout shift-onset early-capture early-publication restart recovery selection-retry selected-replacement superseded selection-read auto-resume prefix-delay drain rollback field-tracking; do
     "$stage/tests" "--test-$mode"
 done
 "$stage/tests" --test-integration --diagnose-input "$stage/privacy.log"

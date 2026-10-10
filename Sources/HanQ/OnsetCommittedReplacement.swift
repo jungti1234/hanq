@@ -13,7 +13,7 @@ extension OnsetRecoveryEngine {
         if let testOriginalSnapshot{return testOriginalSnapshot(field)}
         guard AXIsProcessTrusted(),!IsSecureEventInputEnabled(),
               attr(field,kAXSubroleAttribute) as? String != "AXSecureTextField",
-              let role=attr(field,kAXRoleAttribute) as? String,["AXTextArea","AXTextField"].contains(role),
+              let role=attr(field,kAXRoleAttribute) as? String,OnsetEditableRole.supports(role),
               let text=attr(field,kAXValueAttribute) as? String,
               let raw=attr(field,kAXSelectedTextRangeAttribute),CFGetTypeID(raw)==AXValueGetTypeID() else{return nil}
         var range=CFRange()

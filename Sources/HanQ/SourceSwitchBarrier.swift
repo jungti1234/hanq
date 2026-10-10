@@ -11,6 +11,10 @@ final class SourceSwitchBarrier {
     var source:()->String = InputSourceAccess.currentID
     var ready:()->Bool = {true}
     var select:(String)->OSStatus = InputSourceAccess.select
+    var selectionPending:()->Bool = {false}
+    var cancelSelection:()->Void = {}
+    private var switchSnapshot:Snapshot?
+    private var selectionCommitSnapshot:Snapshot?
     var didSelect:(CGEventTimestamp)->Void = {_ in}
     var send:(CGEvent)->Void = {$0.post(tap:.cgSessionEventTap)}
     var retained:([CGEvent])->Void = {_ in}
@@ -48,6 +52,26 @@ final class SourceSwitchBarrier {
         }
     }
     private var repairInFlight:Set<DeliveryKey>=[]
+    private struct OnsetDeliveryKey:Hashable {
+        let timestamp:CGEventTimestamp
+        let code:Int64
+        init(_ event:CGEvent){timestamp=event.timestamp;code=event.getIntegerValueField(.keyboardEventKeycode)}
+    }
+    private var onsetInFlight:[OnsetDeliveryKey:CGEvent]=[:]
+    /// The main tap precedes the onset gate. A key seen here may be held there,
+    /// so do not predict it until that gate reports its actual delivery decision.
+    func observeBeforeOnset(_ type:CGEventType,_ event:CGEvent,waiting:Bool) {
+        if type == .keyDown,(waiting || !onsetInFlight.isEmpty) {
+            guard onsetInFlight.count<256,let copy=event.copy() else{fail("delivery_limit");return}
+            onsetInFlight[OnsetDeliveryKey(event)]=copy
+            return
+        }
+        observe(type,event)
+    }
+    func confirmOnsetDelivery(_ event:CGEvent,passed:Bool) {
+        guard let original=onsetInFlight.removeValue(forKey:OnsetDeliveryKey(event)) else{return}
+        if passed {observe(.keyDown,original)}
+    }
     private var deadline=0.0
     private var repairWaitStarted:Double?
     private var generation=0
@@ -79,7 +103,33 @@ final class SourceSwitchBarrier {
         }
         return fold(actual.substring(with:insertion))==fold(wanted.substring(with:insertion))
     }
+    /// Select-all is an explicit request for the current editor body. Some
+    /// editors expose an initial prompt as AXValue and remove it on typing.
+    /// Acknowledge that removal only when every observed key, across all source
+    /// segments, accounts for the entire current body. Never rewrite text or
+    /// accept a partial delivery, a changed field, or an arbitrary new baseline.
+    private func acknowledgeInitialBodyRemoval(_ snap:Snapshot) {
+        guard pendingSelectAll,let field,CFEqual(field,snap.field),
+              let previous=ledger,!previous.before.isEmpty,
+              !previous.insertion.isEmpty,snap.text==previous.insertion,
+              snap.selection==NSRange(location:snap.text.utf16.count,length:0) ||
+                snap.selection==NSRange(location:0,length:snap.text.utf16.count) else{return}
+        var acknowledged=MismatchReplayLedger(before:"",caret:0)
+        acknowledged.segments=previous.segments
+        ledger=acknowledged
+        selectedRange=NSRange(location:0,length:snap.text.utf16.count)
+        trace("select_all_initial_body_removed")
+    }
     func resetObservation(){field=nil;ledger=nil;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    /// The onset engine has selected its exact replacement on this field.
+    /// Seed prediction before posting, then observe each posted event once.
+    /// This is not editor acknowledgment: selection/switch still requires the
+    /// resulting full text and caret, and ready() must wait for replay delivery.
+    func beginOnsetReplay(field:AXUIElement,before:String,caret:Int) {
+        guard !busy,caret>=0,caret<=before.utf16.count else{return}
+        resetObservation()
+        self.field=field;ledger=MismatchReplayLedger(before:before,caret:caret)
+    }
     /// A completed boundary leaves prediction history for the next key. A new
     /// focused field must start its own history before that key is submitted.
     /// Never rebase an active transaction or treat a missing reply as a move.
@@ -152,6 +202,7 @@ final class SourceSwitchBarrier {
         if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil}
         guard (ledger?.segments.reduce(0,{$0+$1.keys.count}) ?? 0)<128 else{resetObservation();return}
         ledger?.append(source:id,keys:[(code,event.flags.contains(.maskShift))])
+
     }
     /// Reserve the edit boundary in the HID stream, before a later right
     /// Command can be consumed by the repair's source gate. Queue the original
@@ -209,6 +260,7 @@ final class SourceSwitchBarrier {
         if repairWaitStarted != nil {repairWaitStarted=nil;deadline=now()+1}
         guard now()<deadline else{fail("deadline");return}
         guard repairInFlight.isEmpty else{schedule();return}
+        guard onsetInFlight.isEmpty else{schedule();return}
         // The next replay cannot advance until the previous event reaches the
         // main tap. AX work here only delays that acknowledgment.
         guard !awaitingReplay else{schedule();return}
@@ -242,7 +294,10 @@ final class SourceSwitchBarrier {
             trace("repair_acknowledged")
         }
         if pendingSelectAll {
-            guard ready(),matchesText(snap),let selectedRange else{schedule();return}
+            guard ready() else{schedule();return}
+            if !matchesText(snap) {acknowledgeInitialBodyRemoval(snap)}
+            guard matchesText(snap) else{schedule();return}
+            guard let selectedRange else{schedule();return}
             if snap.selection != selectedRange {
                 guard applySelection(snap.field,selectedRange) else{fail("select_all_failed");return}
                 // Keep subsequent editing keys behind the selection acknowledgment.
@@ -266,17 +321,28 @@ final class SourceSwitchBarrier {
             awaitingSelection=false
         }
         if selectionCommitPending {
-            guard matches(snap) else{schedule();return}
-            let result=commitSelection(snap)
+            if selectionCommitSnapshot == nil {
+                guard matches(snap) else{schedule();return}
+                selectionCommitSnapshot=snap
+            }
+            let result=commitSelection(selectionCommitSnapshot!)
             if result==AXError.cannotComplete.rawValue {schedule();return}
             guard result==noErr else{fail("select_all_commit_failed");return}
+            selectionCommitSnapshot=nil
             selectionCommitPending=false;awaitingSelection=true
             selectionAttempts=1;selectionRetryAt=now()+0.01
             trace("select_all_committed");schedule();return
         }
         if let target {
-            guard ready(),matches(snap) else{schedule();return}
-            guard select(target)==noErr,source()==target else{fail("switch_failed");return}
+            guard ready() else{schedule();return}
+            if switchSnapshot == nil {
+                guard matches(snap) else{schedule();return}
+                switchSnapshot=snap
+            }
+            let result=select(target)
+            if selectionPending(){schedule();return}
+            guard result==noErr,source()==target else{fail("switch_failed");return}
+            let snap=switchSnapshot!;switchSnapshot=nil
             didSelect(targetTimestamp);targetTimestamp=0
             let previous=ledger
             self.target=nil;resetObservation();self.field=snap.field
@@ -316,7 +382,10 @@ final class SourceSwitchBarrier {
         awaitingReplay=true;deadline=now()+1.0;send(event);schedule()
     }
     func fail(_ reason:String){
+
+        cancelSelection();switchSnapshot=nil;selectionCommitSnapshot=nil
         repairInFlight.removeAll()
+        onsetInFlight.removeAll()
         repairWaitStarted=nil
         waitingForRepairBoundary=false
         generation+=1;scheduled=false;busy=false;transactionField=nil;target=nil;targetTimestamp=0;awaitingReplay=false;externalEditPending=false

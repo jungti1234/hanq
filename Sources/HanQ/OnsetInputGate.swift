@@ -188,7 +188,17 @@ final class OnsetInputGate {
     }
     func healthy()->Bool{lock.lock();defer{lock.unlock()};return !stopped}
     func fail(_ reason:String){diagnosticFailure=reason;stopped=true;holdUntil=0;early=nil;deferred=nil;passedInput=nil;hintUntil=0;DispatchQueue.main.async{self.failed?(reason)}}
+    var didProcessPhysicalKey:((CGEvent,Bool)->Void)?
     func receive(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
+        let result=processEvent(type,event)
+        if type == .keyDown,!Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
+           didProcessPhysicalKey != nil,let copy=event.copy() {
+            let passed=result != nil
+            DispatchQueue.main.async{self.didProcessPhysicalKey?(copy,passed)}
+        }
+        return result
+    }
+    private func processEvent(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
         // A main-thread heartbeat/take can briefly own this lock. A single failed
         // try is normal contention, not an unhealthy gate. Never wait indefinitely.
         guard lock.try() || lock.lock(before:Date(timeIntervalSinceNow:0.002)) else{

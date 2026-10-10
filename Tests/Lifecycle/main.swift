@@ -112,3 +112,55 @@ boundary.step()
 precondition(waitingSource=="com.apple.keylayout.ABC" && detector.plan==nil && detector.lastUserSourceSwitchTimestamp==1000)
 boundary.fail("test_end")
 print("PASS: queued user switch preserves preceding Korean candidate and advances timestamp only at verified source change")
+
+// The onset replay bypasses the main tap, but must still feed source-boundary
+// prediction once. A subsequent physical vowel/final continues its composition.
+do {
+ let app=AppDelegate(), field=AXUIElementCreateApplication(23456)
+ let b=app.sourceSwitchBarrier, c=app.onsetRecovery
+ var text="abc ㄱ",range=NSRange(location:5,length:0),source=mismatchKoreanID,ready=false
+ b.read={.init(field:field,text:text,selection:range)};b.readFocus={field};b.source={source};b.ready={ready}
+ b.applySelection={_,r in range=r;return true};b.commitSelection={_ in noErr}
+ b.select={source=$0;return noErr}
+ c.launchEngine={$0.enabled=true};c.replaceStoppedEngine()
+ let engine=c.engine!
+ engine.testPost={_ in};engine.testSource={source}
+ engine.willBeginRepair()
+ engine.willReplay(field,"abc ",4)
+ var plan=OnsetRecoveryPlan(before:"abc ",caret:4);plan.codes=[(15,false)];plan.roman="ㄱ";plan.allowSingle=true
+ engine.currentPlan=plan;engine.replayStarted=true
+ precondition(engine.post(observedKey(15)))
+ let physicalVowel=observedKey(40)
+ b.observeBeforeOnset(.keyDown,physicalVowel,waiting:true)
+ precondition(b.expected?.0=="abc ㄱ","main tap defers key that the onset gate may hold")
+ // The downstream mismatch handler can strip its token; timestamp remains.
+ physicalVowel.setIntegerValueField(.eventSourceUserData,value:0)
+ engine.didProcessPhysicalKey(physicalVowel,false)
+ precondition(engine.post(observedKey(40)))
+ precondition(b.expected?.0=="abc 가","posted onset and held vowel replace old prediction exactly once")
+ ready=true
+ let final=observedKey(2)
+ b.observeBeforeOnset(.keyDown,final,waiting:true)
+ engine.didProcessPhysicalKey(final,true)
+ engine.didProcessPhysicalKey(final,true)
+ precondition(b.expected?.0=="abc 강","physical final consonant continues replayed composition")
+ let all=observedKey(0);all.flags = .maskCommand
+ b.observe(.keyDown,all);b.step()
+ precondition(range.length==0,"posting alone cannot authorize select-all before editor text")
+ text="abc 강";range=NSRange(location:5,length:0)
+ b.step();b.step();b.step()
+ precondition(!b.busy && range==NSRange(location:0,length:5),"one select-all after onset replay completes at acknowledged body")
+ precondition(b.request("com.apple.keylayout.ABC"));b.step();b.step()
+ b.observe(.keyDown,observedKey(0))
+ precondition(b.expected?.0=="a","source switch and replacement preserve post-onset selected range")
+ b.fail("test_end");engine.enabled=false;engine.replayStarted=false
+}
+print("PASS: production onset replay handoff, continuing final, delayed editor, select-all, source switch and replacement")
+
+precondition(MismatchRecoveryEngine.supportsSnapshotRole("AXComboBox",includeContent:true,allowComboBox:true))
+precondition(!MismatchRecoveryEngine.supportsSnapshotRole("AXComboBox",includeContent:true,allowComboBox:false),"automatic mismatch recovery scope remains unchanged")
+precondition(!MismatchRecoveryEngine.supportsSnapshotRole("AXComboBox",includeContent:false,allowComboBox:true),"combo cannot bypass text/range validation through role-only snapshot")
+precondition(!MismatchRecoveryEngine.supportsSnapshotRole("AXPopUpButton",includeContent:true,allowComboBox:true),"menu-only controls are not text editors")
+precondition(SelectionPreservingSourceSwitch.supportsEditableRole("AXComboBox"))
+precondition(!SelectionPreservingSourceSwitch.supportsEditableRole("AXPopUpButton"))
+print("PASS: combo source boundary requires content/range validation without widening automatic mismatch detection")

@@ -26,9 +26,12 @@ final class SelectionPreservingSourceSwitch {
         var result = CFRange()
         return AXValueGetValue(value as! AXValue, .cfRange, &result) ? result : nil
     }
+    static func supportsEditableRole(_ role:String?)->Bool {
+        role == kAXTextFieldRole || role == kAXTextAreaRole || role == kAXComboBoxRole
+    }
     var editable: (AXUIElement) -> Bool = { element in
         let role = attribute(element, kAXRoleAttribute) as? String
-        guard role == kAXTextFieldRole || role == kAXTextAreaRole,
+        guard supportsEditableRole(role),
               attribute(element, kAXSubroleAttribute) as? String != kAXSecureTextFieldSubrole else { return false }
         var settable = DarwinBoolean(false)
         return AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &settable) == .success && settable.boolValue
@@ -60,9 +63,16 @@ final class SelectionPreservingSourceSwitch {
             for event in events {event.postToPid(pid)}
             return true
         }
-        // This small, synchronous transaction runs on the input callback. Bound
-        // each AX request. A posted cursor commit is acknowledged within a bounded
-        // interval; no sleeps, run-loop pumping, or repeated key posting.
+        postSelectAll = { [weak self] field in
+            guard CGPreflightPostEventAccess(),let events=self?.commitSelectionEvents() else{return false}
+            var pid:pid_t=0
+            guard AXUIElementGetPid(field,&pid) == .success,pid>0 else{return false}
+            for event in events.dropFirst(2){event.postToPid(pid)}
+            return true
+        }
+        // Bound each AX request in both the asynchronous barrier path and the
+        // synchronous fallback. A cursor commit is posted once, then verified;
+        // neither path sleeps or pumps the run loop.
         AXUIElementSetMessagingTimeout(system, 0.01)
         let system = self.system
         focus = {
@@ -88,6 +98,7 @@ final class SelectionPreservingSourceSwitch {
         range.location >= 0 && range.length > 0 && range.location <= length && range.length <= length - range.location
     }
 
+    var postSelectAll:(AXUIElement)->Bool = {_ in false}
     var postCommitAndSelectAll:(AXUIElement)->Bool = {_ in false}
     func commitSelectionEvents()->[CGEvent]? {
         guard let source=commitSource else{return nil}
@@ -106,17 +117,88 @@ final class SelectionPreservingSourceSwitch {
     }
     /// The user explicitly requested select-all. Order its native command after
     /// composition commit, rather than racing an AX selection with the IME.
-    func commitSelection(field:AXUIElement,text expectedText:String,range expectedRange:NSRange)->OSStatus {
+    func commitSelection(field:AXUIElement,text expectedText:String,range expectedRange:NSRange,asynchronous:Bool=false)->OSStatus {
+        if pendingSelectAll != nil{return resumeSelectAll(field:field,text:expectedText,range:expectedRange)}
         guard !expectedText.isEmpty,currentSource().hasPrefix("com.apple.inputmethod.Korean.") else{return noErr}
         guard allowed() else{return -50}
         guard let current=focus() else{return AXError.cannotComplete.rawValue}
         guard CFEqual(current,field),editable(field),expectedRange==NSRange(location:0,length:expectedText.utf16.count) else{return -50}
         guard let value=text(field) else{return AXError.cannotComplete.rawValue}
         guard value==expectedText else{return -50}
+        if asynchronous {
+            guard postCommit(field,124) else{return -50}
+            pendingSelectAll=PendingSelectAll(field:field,text:expectedText,source:currentSource(),deadline:now()+0.30,selectionPosted:false)
+            trace(.commitPosted);return AXError.cannotComplete.rawValue
+        }
         guard postCommitAndSelectAll(field) else{return -50}
         trace(.commitPosted);return noErr
     }
-    func select(_ target:String)->OSStatus {
+    private struct PendingSelectAll {
+        let field:AXUIElement
+        let text:String
+        let source:String
+        let deadline:Double
+        var selectionPosted:Bool
+    }
+    private var pendingSelectAll:PendingSelectAll?
+    private func resumeSelectAll(field:AXUIElement,text expectedText:String,range expectedRange:NSRange)->OSStatus {
+        guard var pending=pendingSelectAll else{return -50}
+        func stop(_ stage:Stage)->OSStatus {pendingSelectAll=nil;trace(stage);return -50}
+        guard CFEqual(field,pending.field),expectedText==pending.text,
+              expectedRange==NSRange(location:0,length:pending.text.utf16.count),
+              allowed(),currentSource()==pending.source else{return stop(.changedContext)}
+        guard now()<pending.deadline else{return stop(.commitUnconfirmed)}
+        guard let current=focus() else{return AXError.cannotComplete.rawValue}
+        guard CFEqual(current,field) else{return stop(.changedContext)}
+        guard let value=text(field),let selected=range(field) else{return AXError.cannotComplete.rawValue}
+        guard value==pending.text else{return stop(.changedContext)}
+        if !pending.selectionPosted {
+            guard Self.equal(selected,CFRange(location:pending.text.utf16.count,length:0)) else{return AXError.cannotComplete.rawValue}
+            guard postSelectAll(field) else{return stop(.collapseFailed)}
+            pending.selectionPosted=true;pendingSelectAll=pending
+            return AXError.cannotComplete.rawValue
+        }
+        guard Self.equal(selected,CFRange(location:0,length:pending.text.utf16.count)) else{return AXError.cannotComplete.rawValue}
+        pendingSelectAll=nil;return noErr
+    }
+    private struct PendingSwitch {
+        let field:AXUIElement
+        let text:String
+        let selected:CFRange
+        let source:String
+        let target:String
+        let deadline:Double
+    }
+    private var pendingSwitch:PendingSwitch?
+    var isPending:Bool {pendingSwitch != nil}
+    func cancelPending(){pendingSwitch=nil;pendingSelectAll=nil}
+    private func resumeSwitch(_ target:String)->OSStatus {
+        guard let pending=pendingSwitch else{return -50}
+        func stop(_ stage:Stage)->OSStatus {pendingSwitch=nil;trace(stage);return -50}
+        guard target==pending.target,allowed(),currentSource()==pending.source else{return stop(.changedContext)}
+        guard now()<pending.deadline else{return stop(.commitUnconfirmed)}
+        guard let current=focus() else{return AXError.cannotComplete.rawValue}
+        guard CFEqual(current,pending.field) else{return stop(.changedContext)}
+        guard let value=text(current),let selected=range(current) else{return AXError.cannotComplete.rawValue}
+        guard value==pending.text else{return stop(.changedContext)}
+        let collapsed=CFRange(location:pending.selected.location,length:0)
+        if Self.equal(selected,pending.selected){return AXError.cannotComplete.rawValue}
+        guard Self.equal(selected,collapsed) else{return stop(.changedContext)}
+        pendingSwitch=nil;trace(.collapsed)
+        return finishSwitch(target,source:pending.source,element:current,original:pending.text,selected:pending.selected,collapsed:collapsed)
+    }
+    private func finishSwitch(_ target:String,source:String,element:AXUIElement,original:String,selected:CFRange,collapsed:CFRange)->OSStatus {
+        let result=selectSource(target)
+        trace(.switched)
+        if currentSource() == (result == noErr ? target:source),allowed(),
+           let current=focus(),CFEqual(current,element),text(element)==original,
+           Self.equal(range(element),collapsed) {
+            trace(setRange(element,selected) ? .restored:.restoreFailed)
+        }else{trace(.restoreSkipped)}
+        return result
+    }
+    func select(_ target:String,asynchronous:Bool=false)->OSStatus {
+        if isPending{return resumeSwitch(target)}
         trace(.begin)
         let source = currentSource(), started = now()
         func fallback(_ stage:Stage)->OSStatus {trace(stage);return selectSource(target)}
@@ -138,6 +220,10 @@ final class SelectionPreservingSourceSwitch {
         // the editor. Prepare and post the full pair once, then require proof.
         guard postCommit(element,123) else { return fallback(.collapseFailed) }
         trace(.commitPosted)
+        if asynchronous {
+            pendingSwitch=PendingSwitch(field:element,text:original,selected:selected,source:source,target:target,deadline:now()+0.30)
+            return AXError.cannotComplete.rawValue
+        }
         let commitDeadline=now()+0.04
         var committed=false
         repeat {
@@ -156,13 +242,6 @@ final class SelectionPreservingSourceSwitch {
         trace(.collapsed)
         // An AX selection change may itself commit composition. Never restore
         // stale coordinates if that changed the text, focus, or selection.
-        let result = selectSource(target)
-        trace(.switched)
-        if currentSource() == (result == noErr ? target : source),
-           allowed(), let current = focus(), CFEqual(current, element),
-           text(element) == original, Self.equal(range(element), collapsed) {
-            trace(setRange(element, selected) ? .restored : .restoreFailed)
-        } else { trace(.restoreSkipped) }
-        return result
+        return finishSwitch(target,source:source,element:element,original:original,selected:selected,collapsed:collapsed)
     }
 }

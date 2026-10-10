@@ -260,7 +260,12 @@ final class MismatchRecoveryEngine:NSObject {
         focusAccess.read=testFocusedRead ?? InputFocusAccess.readFocused
         return focusAccess.focusedElement(application:application,pid:pid)
     }
-    func snapshot(includeContent:Bool=true)->MismatchSnapshot?{
+    // Combo editors are admitted only by the explicit selection/source boundary.
+    // They must pass all content, range, coordinate and focus checks below.
+    static func supportsSnapshotRole(_ role:String,includeContent:Bool,allowComboBox:Bool)->Bool {
+        ["AXTextArea","AXTextField"].contains(role) || (allowComboBox && includeContent && role=="AXComboBox")
+    }
+    func snapshot(includeContent:Bool=true,allowComboBox:Bool=false)->MismatchSnapshot?{
         let queryStart=ProcessInfo.processInfo.systemUptime,previousID=activeSnapshotID
         traceSequence+=1;let id=traceSequence;activeSnapshotID=id
         if traceLatency{log("snapshot_started",["id":id,"stage":snapshotStage,"includeContent":includeContent,"uptime":queryStart])}
@@ -286,7 +291,7 @@ final class MismatchRecoveryEngine:NSObject {
         if duration>5{log("snapshot_batch_latency",["ms":duration,"result":result.rawValue])}
         guard result == .success,let list=values as? [AnyObject],list.count==(includeContent ? 4:2) else{unavailableReason="attribute_batch_unreadable";return nil}
         guard let role=list[0] as? String else{unavailableReason="role_unreadable";return nil}
-        guard ["AXTextArea","AXTextField"].contains(role) else{unavailableReason="not_supported_text_field";return nil}
+        guard Self.supportsSnapshotRole(role,includeContent:includeContent,allowComboBox:allowComboBox) else{unavailableReason="not_supported_text_field";return nil}
         guard list[1] as? String != "AXSecureTextField" else{unavailableReason="secure_text_field";return nil}
         if !includeContent{return MismatchSnapshot(element:element,text:"",selection:NSRange(location:0,length:0))}
         guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{unavailableReason="text_unreadable";return nil}

@@ -7,6 +7,9 @@ final class OnsetRecoveryEngine:NSObject {
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
     var canBeginRepair: () -> Bool = { true }
     var willBeginRepair: () -> Void = {}
+    var willReplay: (AXUIElement,String,Int) -> Void = {_,_,_ in}
+    var didPostReplayEvent: (CGEvent) -> Void = {_ in}
+    var didProcessPhysicalKey:(CGEvent,Bool)->Void = {_,_ in}
     var didStop:(()->Void)?
     var enabled=false
     var target:NSRunningApplication?
@@ -236,7 +239,8 @@ final class OnsetRecoveryEngine:NSObject {
             return true
         }
         if let field=deferredField,!CFEqual(field,snap.element){cancelDeferredObservation();return false}
-        let baseline=deferredBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0.text:nil}
+        if let prior=outsideObservation.baseline(for:snap.element,before:first.time){deferredBaseline=prior}
+        let baseline=Self.firstConsonantBaseline(deferredBaseline,current:snap)
         // The late path relaxes only publication time, never the exact text,
         // caret, physical key, input source or no-following-input requirements.
         var detector=OnsetRecoveryDetector(layout:layout)
@@ -269,6 +273,27 @@ final class OnsetRecoveryEngine:NSObject {
         log("early_observation_resumed")
         return true
     }
+    // Match observed content transitions, independent of application identity.
+    static func firstConsonantBaseline(_ previous:OnsetSnapshot?,current:OnsetSnapshot)->String? {
+        // With only one character present there is no surrounding user content
+        // to guess or replace. The detector still requires the exact onset key.
+        if current.text.utf16.count == 1,current.selection == NSRange(location:1,length:0){return ""}
+        guard let previous,CFEqual(previous.element,current.element),previous.selection.length == 0 else{return nil}
+        let length=previous.text.utf16.count
+        if length>0,
+           current.selection == NSRange(location:length+2,length:0),
+           current.text.utf16.count == length+2,current.text.hasPrefix(previous.text+" ") {
+            return previous.text+" "
+        }
+        return previous.text
+    }
+    let outsideObservation=OnsetOutsideObservation()
+    func observeOutsideEditors(){
+        guard testSnapshot == nil else{return}
+        guard let ax,let target,focusAccess.currentPID()==target.processIdentifier else{return}
+        guard let window=attr(ax,kAXFocusedWindowAttribute),CFGetTypeID(window)==AXUIElementGetTypeID() else{return}
+        outsideObservation.advance(root:window as! AXUIElement,focused:focusAccess.focusedElement(application:ax,pid:target.processIdentifier))
+    }
     func sampleEarly(_ observed:OnsetSnapshot?,now:Double=ProcessInfo.processInfo.systemUptime){
         guard let gate else{return}
         observePassedIdentity()
@@ -292,7 +317,8 @@ final class OnsetRecoveryEngine:NSObject {
             guard snap.selection.length==0 else{emergencyStop("early_selection_changed");return}
             if let field=earlyObservedField,!CFEqual(field,snap.element){emergencyStop("early_field_changed");return}
             earlyObservedField=snap.element
-            let baseline=earlyBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0.text:nil}
+            if let prior=outsideObservation.baseline(for:snap.element,before:reservation.time){earlyBaseline=prior}
+            let baseline=Self.firstConsonantBaseline(earlyBaseline,current:snap)
             var detector=OnsetRecoveryDetector(layout:layout)
             detector.outsideKey(code:reservation.code,shift:reservation.shift,time:reservation.time,korean:true,plain:true)
             detector.entered(time:now)
@@ -326,7 +352,7 @@ final class OnsetRecoveryEngine:NSObject {
         earlyObservationTime=nil;earlyObservedField=nil;earlyWaiting=false
         let layout=currentLayout()
         let eligible=observed==nil && unavailableReason=="not_supported_text_field" && layout != nil
-        if eligible{earlyBaseline=lastEditable}
+        if eligible{earlyBaseline=lastEditable;observeOutsideEditors()}
         gate.configureEarly(eligible,sourceID:layout?.sourceID ?? "",normal:Set(layout?.normal.keys.map{$0} ?? []),shifted:Set(layout?.shifted.keys.map{$0} ?? []))
         if let snap=observed {
             if lastText != snap.text{lastText=snap.text;log("text",["text":snap.text,"selection":[snap.selection.location,snap.selection.length],"source":currentSource()])}
@@ -351,7 +377,9 @@ final class OnsetRecoveryEngine:NSObject {
         if gate?.healthy()==false{return false}
         if testPost == nil && (!AXIsProcessTrusted() || IsSecureEventInputEnabled()){return false}
         if event.getIntegerValueField(.keyboardEventKeycode)==51 && !OnsetDeletionKey.hasDeletePayload(event){emergencyStop("unsafe_delete_payload_blocked");return false}
-        if let testPost { testPost(event) } else { recordPostedEvent();event.post(tap:.cghidEventTap) };return true }
+        if let testPost { testPost(event) } else { recordPostedEvent();event.post(tap:.cghidEventTap) }
+        if replayStarted,!rollingBack,currentPlan?.supportsReplay == true {didPostReplayEvent(event)}
+        return true }
     var lastAXFailure=""
     var accessibilityRequested=false
     var lastFocusRoute=""
@@ -451,7 +479,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{unavailableReason="focused_element_unreadable";return nil}
         guard attr(element,kAXSubroleAttribute) as? String != "AXSecureTextField" else{unavailableReason="secure_field";return nil}
         guard let role=attr(element,kAXRoleAttribute) as? String else{unavailableReason="role_unreadable";return nil}
-        guard ["AXTextArea","AXTextField"].contains(role) else{unavailableReason="not_supported_text_field";return nil}
+        guard OnsetEditableRole.supports(role) else{unavailableReason="not_supported_text_field";return nil}
         // Respect an editor's explicit active composition; unsupported attributes
         // remain unknown, as in the original compatibility probe.
         var markedValue: CFTypeRef?
@@ -466,7 +494,6 @@ final class OnsetRecoveryEngine:NSObject {
         guard let raw=attr(element,kAXSelectedTextRangeAttribute),CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
         var range=CFRange();guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.location>=0,range.length>=0,range.location+range.length<=text.utf16.count else{unavailableReason="selection_invalid";return nil}
         guard let after=focusedElement(ax,pid:target.processIdentifier),CFEqual(element,after) else{unavailableReason="focus_changed_during_snapshot";return nil}
-        if target.bundleIdentifier=="com.openai.codex",text == "\n무엇이든 요청하세요",range.length==0,range.location<=1{return OnsetSnapshot(element:element,text:"",selection:NSRange(location:0,length:0))}
         return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length))
     }
     func observeAvailability(_ snap:OnsetSnapshot?){
@@ -497,6 +524,7 @@ final class OnsetRecoveryEngine:NSObject {
         ax=AXUIElementCreateApplication(target.processIdentifier);AXUIElementSetMessagingTimeout(ax!,0.05)
         AXUIElementSetMessagingTimeout(systemAX,0.05);accessibilityRequested=false;lastFocusRoute="";lastAXFailure=""
         let gate=OnsetInputGate(marker:marker);if InputDiagnostics.shared.isEnabled{gate.enableReentryTrace()};self.gate=gate;postedToGate=0;unacknowledgedPosts=[];acknowledgmentWaitBegan=nil
+        gate.didProcessPhysicalKey = { [weak self] event,passed in self?.didProcessPhysicalKey(event,passed) }
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}
         gate.observationNeeded={[weak self,weak gate] in
@@ -533,7 +561,7 @@ final class OnsetRecoveryEngine:NSObject {
             cancelDeferredObservation()
             gate?.configurePassedBaseline(nil)
             gate?.configureEarly(false);onset.cancel();planElement=nil
-            lastEditable=nil;earlyBaseline=nil;lastText=nil
+            lastEditable=nil;earlyBaseline=nil;lastText=nil;outsideObservation.reset()
             return
         }
         let observed=snapshot();traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
@@ -643,6 +671,7 @@ final class OnsetRecoveryEngine:NSObject {
 
     func replayPair(_ candidate:OnsetRecoveryPlan){
         guard candidate.supportsReplay else{abort("unsupported_repair_plan");return}
+        if let field=planElement {willReplay(field,candidate.before,candidate.caret)}
         replayStarted=true;deliveryPrefixConfirmed=false;prefixRemainder=[];lastPrefixObservation=""
         var events:[CGEvent]=[]
         for (code,shift) in candidate.codes{

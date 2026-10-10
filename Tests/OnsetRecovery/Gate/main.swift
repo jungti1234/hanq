@@ -82,4 +82,18 @@ let repeated=reserved();check(repeated.claimEarly(),"claim before repeat");_ = r
 check(repeated.receive(.keyUp,event(15,false))==nil,"release cannot overtake engine-side repeated down")
 let ordered=reserved();check(ordered.claimEarly(),"claim before ordered queue");_ = ordered.receive(.keyDown,event(40))
 check(ordered.receive(.keyUp,event(15,false))==nil,"first release cannot overtake queued input")
+// The result notification runs after the gate lock and reports actual capture,
+// including a key that crosses release of a replay hold.
+do {
+ let gate=OnsetInputGate(marker:99);gate.beat()
+ var decisions:[Bool]=[]
+ gate.didProcessPhysicalKey={_,passed in decisions.append(passed)}
+ check(gate.begin(),"notification hold begins")
+ _ = gate.receive(.keyDown,event(40))
+ _ = gate.take();check(gate.finishIfEmpty(),"notification hold finishes")
+ _ = gate.receive(.keyDown,event(2))
+ let deadline=Date().addingTimeInterval(0.2)
+ while decisions.count<2 && Date()<deadline {RunLoop.main.run(until:Date().addingTimeInterval(0.001))}
+ check(decisions==[false,true],"report captured then passed key in delivery order")
+}
 print("PASS \(checks) input gate checks; no event tap installed, no keys posted")

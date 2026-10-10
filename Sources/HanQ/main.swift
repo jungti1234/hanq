@@ -15,11 +15,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         controller.canBeginRepair = { [weak self] in
             guard let self else { return false }
-            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && !self.mismatchRecovery.busy
+            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && !self.mismatchRecovery.busy && !self.sourceSwitchBarrier.busy
         }
         controller.willBeginRepair = { [weak self] in
+            self?.sourceSwitchBarrier.resetObservation()
             self?.mismatchRecovery.engine.cancelDetection()
             self?.jamoRepair.inputDidChange()
+        }
+        controller.willReplay = { [weak self] field,text,caret in
+            self?.sourceSwitchBarrier.beginOnsetReplay(field:field,before:text,caret:caret)
+        }
+        controller.didPostReplayEvent = { [weak self] event in
+            self?.sourceSwitchBarrier.observe(event.type,event)
+        }
+        controller.didProcessPhysicalKey = { [weak self] event,passed in
+            self?.sourceSwitchBarrier.confirmOnsetDelivery(event,passed:passed)
         }
         return controller
     }()
@@ -83,7 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         barrier.read = { [weak self] in
             guard let self,self.permissionGranted,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
             self.mismatchRecovery.engine.followFrontmost()
-            guard let snap=self.mismatchRecovery.engine.snapshot() else{return nil}
+            guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true) else{return nil}
             return SourceSwitchBarrier.Snapshot(field:snap.element,text:snap.text,selection:snap.selection)
         }
         barrier.ready = { [weak self] in
@@ -95,12 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let access=self.mismatchRecovery.engine.focusAccess
             return access.read(access.system)
         }
-        barrier.select = { [weak self] target in self?.selectionSourceSwitch.select(target) ?? -50 }
+        barrier.select = { [weak self] target in self?.selectionSourceSwitch.select(target,asynchronous:true) ?? -50 }
+        barrier.selectionPending = { [weak self] in self?.selectionSourceSwitch.isPending ?? false }
+        barrier.cancelSelection = { [weak self] in self?.selectionSourceSwitch.cancelPending() }
         barrier.didSelect = { [weak self] timestamp in
             self?.mismatchRecovery.engine.noteUserSourceSwitch(at:timestamp)
         }
         barrier.commitSelection = { [weak self] snap in
-            self?.selectionSourceSwitch.commitSelection(field:snap.field,text:snap.text,range:snap.selection) ?? -50
+            self?.selectionSourceSwitch.commitSelection(field:snap.field,text:snap.text,range:snap.selection,asynchronous:true) ?? -50
         }
         barrier.retained = { [weak self] events in
             guard let self else{return}
@@ -513,7 +525,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 if result.consume || option.consume { return nil }
                 event.flags = option.flags
-                owner.sourceSwitchBarrier.observe(type,event)
+                owner.sourceSwitchBarrier.observeBeforeOnset(type,event,waiting:
+                    owner.onsetRecovery.engine?.gate?.hasActiveReplayHold() == true)
                 if forwardOriginalIfMoved(){return nil}
                 return Unmanaged.passUnretained(event)
             }

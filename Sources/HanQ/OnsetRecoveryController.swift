@@ -6,6 +6,9 @@ final class OnsetRecoveryController: NSObject {
     var canRun: () -> Bool = { false }
     var canBeginRepair: () -> Bool = { true }
     var willBeginRepair: () -> Void = {}
+    var willReplay: (AXUIElement,String,Int) -> Void = {_,_,_ in}
+    var didPostReplayEvent: (CGEvent) -> Void = {_ in}
+    var didProcessPhysicalKey:(CGEvent,Bool)->Void = {_,_ in}
     var engine: OnsetRecoveryEngine?
     var timer: Timer?
     var failed = false
@@ -27,6 +30,9 @@ final class OnsetRecoveryController: NSObject {
         old?.pending=[];old?.retainedInput=[]
         next.canBeginRepair = { [weak self] in self?.canBeginRepair() ?? false }
         next.willBeginRepair = { [weak self] in self?.willBeginRepair() }
+        next.willReplay = { [weak self] field,text,caret in self?.willReplay(field,text,caret) }
+        next.didPostReplayEvent = { [weak self] event in self?.didPostReplayEvent(event) }
+        next.didProcessPhysicalKey = { [weak self] event,passed in self?.didProcessPhysicalKey(event,passed) }
         next.didStop = { [weak self,weak next] in
             guard let self,let next,self.engine === next else{return};self.noteFailure()
         }

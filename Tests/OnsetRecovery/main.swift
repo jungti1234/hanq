@@ -7,7 +7,150 @@ func testCheck(_ condition:@autoclosure ()->Bool,_ message:@autoclosure ()->Stri
     }
 }
 
-if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
+if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
+    let field=AXUIElementCreateApplication(12345),other=AXUIElementCreateApplication(12346)
+    func plan(_ prior:OnsetSnapshot?,_ text:String,_ caret:Int?=nil,_ element:AXUIElement?=nil)->OnsetRecoveryPlan? {
+        let current=OnsetSnapshot(element:element ?? field,text:text,selection:NSRange(location:caret ?? text.utf16.count,length:0))
+        var d=OnsetRecoveryDetector();d.outsideKey(code:15,shift:false,time:0,korean:true,plain:true);d.entered(time:0.05)
+        return d.firstConsonant(time:0.1,text:text,selection:current.selection,previousText:OnsetRecoveryEngine.firstConsonantBaseline(prior,current:current))
+    }
+    for old in ["Codex와 함께 작업하세요\n","\n무엇이든 요청하세요","unknown hint","\n","actual old text"] {
+        let prior=OnsetSnapshot(element:field,text:old,selection:NSRange(location:0,length:0))
+        testCheck(plan(prior,"ㄱ")?.before == "","single-character current editor has no surrounding text to guess")
+        testCheck(plan(prior,"ㄱ"+old,1)?.before == old,"literal content is preserved")
+        for text in ["ㄴ","가","ㄱㅏ"]{testCheck(plan(prior,text)==nil,"key matching and multi-key guards retained")}
+    }
+    for prefix in ["abc","앞😀뒤","abc "] {
+        let n=prefix.utf16.count,prior=OnsetSnapshot(element:field,text:prefix,selection:NSRange(location:prefix.utf16.count,length:0))
+        let candidate=plan(prior,prefix+" ㄱ")
+        testCheck(candidate?.before == prefix+" " && candidate?.caret == n+1,"one added separator preserved without app identity")
+        testCheck(candidate?.matches(text:prefix+" ㄱ",selection:NSRange(location:n+2,length:0)) == true,"full edit precondition preserved")
+        testCheck(candidate?.matches(text:prefix+"xㄱ",selection:NSRange(location:n+2,length:0)) == false,"changed context rejected")
+        for suffix in ["  ㄱ","\nㄱ","\tㄱ","\u{00A0}ㄱ"," ㄴ"," 가"," ㄱㅏ"]{testCheck(plan(prior,prefix+suffix)==nil,"unrelated text change rejected")}
+        testCheck(plan(nil,prefix+" ㄱ")==nil,"missing baseline never guessed")
+        testCheck(plan(prior,prefix+" ㄱ",nil,other)==nil,"foreign field rejected")
+        testCheck(plan(prior,prefix+" ㄱ",n+1)==nil,"stale caret rejected")
+        testCheck(plan(.init(element:field,text:prefix,selection:NSRange(location:NSNotFound,length:0)),prefix+" ㄱ") != nil,"full preserved prefix supports unfocused editor with unknown prior cursor")
+        testCheck(plan(.init(element:field,text:prefix,selection:NSRange(location:0,length:n)),prefix+" ㄱ")==nil,"selected baseline rejected")
+        testCheck(plan(prior,prefix+"ㄱ") != nil,"exact transition unchanged")
+    }
+    let cache=OnsetOutsideObservation();var time=10.0
+    cache.clock={time}
+    let root=AXUIElementCreateApplication(12347)
+    cache.read={node,name in
+        if CFEqual(node,root) {
+            if name==kAXRoleAttribute{return kAXWindowRole as CFString}
+            if name==kAXChildrenAttribute{return [field] as CFArray}
+        }else if CFEqual(node,field){
+            if name==kAXRoleAttribute{return kAXTextFieldRole as CFString}
+            if name==kAXValueAttribute{return "abc" as CFString}
+            if name==kAXSelectedTextRangeAttribute{var range=CFRange(location:3,length:0);return AXValueCreate(.cfRange,&range)}
+        }
+        return nil
+    }
+    cache.advance(root:root)
+    testCheck(cache.baseline(for:field,before:10.1)?.text=="abc","never-focused field discovered before key")
+    testCheck(cache.baseline(for:other,before:10.1)==nil,"discovery does not guess field identity")
+    testCheck(cache.baseline(for:field,before:10)==nil,"same-time or post-key sample excluded")
+    testCheck(cache.baseline(for:field,before:11)==nil,"stale sample excluded")
+    let normalRead=cache.read
+    cache.read={node,name in name == kAXSelectedTextRangeAttribute ? nil:normalRead(node,name)}
+    time=10.2;cache.advance(root:root)
+    testCheck(cache.baseline(for:field,before:10.3)?.selection.location == NSNotFound,"unfocused cursor absence recorded as unknown")
+    cache.read={node,name in
+        if name == kAXSelectedTextRangeAttribute{var range=CFRange(location:0,length:3);return AXValueCreate(.cfRange,&range)}
+        return normalRead(node,name)
+    }
+    cache.reset();time=10.4;cache.advance(root:root)
+    testCheck(cache.entries.isEmpty,"explicit prior selection excluded")
+    cache.read=normalRead;cache.reset();time=10.5;cache.advance(root:root)
+    time=10.6;cache.advance(root:other)
+    testCheck(cache.baseline(for:field,before:10.7)==nil,"window change discards cached editors")
+    cache.reset();time=20
+    cache.read={node,name in
+        let value=normalRead(node,name)
+        if CFEqual(node,root),name==kAXRoleAttribute{time+=0.020}
+        return value
+    }
+    cache.advance(root:root)
+    time+=0.020;cache.advance(root:root)
+    testCheck(cache.baseline(for:field,before:time+0.01)?.text=="abc","time budget after role read must not discard child subtree")
+    // A document behind deep native wrapper nodes is reachable from outside
+    // focus without relaxing the window walk's depth or total-node budgets.
+    let wrappers=(0..<15).map{AXUIElementCreateApplication(pid_t(12400+$0))}
+    let document=wrappers.last!
+    cache.reset();time=30
+    cache.read={node,name in
+        if CFEqual(node,field){return normalRead(node,name)}
+        if name==kAXRoleAttribute{return kAXGroupRole as CFString}
+        if name==kAXWindowAttribute{return root}
+        if name==kAXChildrenAttribute {
+            if CFEqual(node,root){return [wrappers[0]] as CFArray}
+            if let i=wrappers.firstIndex(where:{CFEqual($0,node)}) {
+                return [i+1<wrappers.count ? wrappers[i+1]:field] as CFArray
+            }
+        }
+        return nil
+    }
+    cache.advance(root:root)
+    testCheck(cache.entries.isEmpty,"bounded window traversal cannot reach deeply wrapped document")
+    cache.reset();cache.advance(root:root,focused:document)
+    testCheck(cache.baseline(for:field,before:30.1)?.text=="abc","outside document anchor discovers never-focused editor")
+    let anchoredRead=cache.read
+    for foreignWindow in [true,false] {
+        cache.reset()
+        cache.read={node,name in
+            if name==kAXWindowAttribute{return foreignWindow ? other:nil}
+            return anchoredRead(node,name)
+        }
+        cache.advance(root:root,focused:document)
+        testCheck(cache.entries.isEmpty,"foreign or unverified window anchor rejected")
+    }
+    // Editable ARIA combo boxes expose the same text/selection contract as
+    // fields. Menu-only combos must not contribute a text baseline.
+    cache.reset();time=40
+    cache.read={node,name in
+        if CFEqual(node,field),name==kAXRoleAttribute{return kAXComboBoxRole as CFString}
+        return normalRead(node,name)
+    }
+    cache.advance(root:root)
+    testCheck(cache.baseline(for:field,before:40.1)?.text=="abc","editable combo contributes pre-key baseline")
+    let comboRead=cache.read
+    for missingSelection in [true,false] {
+        cache.reset()
+        cache.read={node,name in
+            if CFEqual(node,field),name==kAXSelectedTextRangeAttribute{return missingSelection ? nil:("invalid" as CFString)}
+            return comboRead(node,name)
+        }
+        cache.advance(root:root)
+        testCheck(cache.entries.isEmpty,"menu-only or invalid-selection combo excluded")
+    }
+    testCheck(!OnsetEditableRole.supports(kAXPopUpButtonRole),"popup menu remains outside editor roles")
+    // Entire product path with no previous focused-editor observation.
+    let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true};p.testSource={onsetKoreanID}
+    let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
+    p.outsideObservation.entries=[.init(snapshot:.init(element:field,text:"abc",selection:NSRange(location:NSNotFound,length:0)),completed:ProcessInfo.processInfo.systemUptime-0.05)]
+    func key(_ code:UInt16,_ down:Bool=true)->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;e.flags=[];return e}
+    testCheck(g.receive(.keyDown,key(15)) != nil,"original outside onset passes")
+    var text="abc ㄱ",range=NSRange(location:5,length:0),selected:[NSRange]=[]
+    p.testSnapshot={.init(element:field,text:text,selection:range)}
+    p.testSetRange={_,r in selected.append(r);range=r;return .success}
+    p.testPost={event in
+        _=g.receive(event.type,event)
+        guard event.type == .keyDown else{return}
+        let code=event.getIntegerValueField(.keyboardEventKeycode)
+        if code==15{testCheck(range==NSRange(location:4,length:1),"only fresh onset selected");range=NSRange(location:5,length:0)}
+        if code==40{testCheck(text=="abc ㄱ","prefix intact before vowel");text="abc 가";range=NSRange(location:5,length:0)}
+    }
+    p.sample()
+    testCheck(p.recovering,"never-focused baseline authorizes verified recovery")
+    for down in [true,false]{testCheck(g.receive(down ? .keyDown:.keyUp,key(40,down))==nil,"vowel held only after verified claim")}
+    let deadline=Date().addingTimeInterval(0.5)
+    while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
+    testCheck(text=="abc 가" && !p.recovering && p.pending.isEmpty,"outside-first entry finishes with prefix preserved")
+    p.closeSession()
+    print("PASS: app-independent transitions, never-focused discovery, pre-key timestamps, expiry, window/field identity and full no-prior-focus recovery")
+} else if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     do {
         let p=OnsetRecoveryEngine();p.enabled=true
         var source="com.apple.keylayout.ABC",reads=0

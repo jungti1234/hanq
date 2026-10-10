@@ -371,4 +371,72 @@ do {
  b.fail("test_end")
 }
 
+
+// A deferred source switch owns the temporary collapsed selection. The barrier
+// keeps the original replacement range and queues later keys until completion.
+do {
+ let b=SourceSwitchBarrier();var source=ko,range=NSRange(location:0,length:3),pending=false,calls=0,posts=0,cancelled=0
+ b.read={.init(field:field,text:"가나다",selection:range)};b.source={source}
+ b.selectionPending={pending};b.cancelSelection={pending=false;cancelled+=1}
+ b.select={target in calls+=1;if calls==1{pending=true;range=NSRange(location:0,length:0);return AXError.cannotComplete.rawValue};pending=false;source=target;range=NSRange(location:0,length:3);return noErr}
+ b.send={_ in posts+=1}
+ check(b.request(en),"deferred selected request")
+ b.step();check(b.busy && pending && calls==1,"pending switch remains owned")
+ check(b.receive(.keyDown,key(0)),"input held during deferred commit")
+ b.step();check(calls==2 && source==en && b.expected?.1==NSRange(location:0,length:3) && posts==0,"poll despite owned collapse; preserve original selection before replay")
+ b.fail("test_cleanup");check(cancelled==1 && !pending,"cancel propagates to selection transaction")
+}
+
+for unreadable in [false,true] {
+ let b=SourceSwitchBarrier();var clock=0.0,missing=false;var traces:[String]=[]
+ b.now={clock};b.source={en};b.trace={traces.append($0)}
+ b.read={missing ? nil:.init(field:field,text:"PRIVATE_CONTENT",selection:NSRange(location:15,length:0))}
+ b.observe(.keyDown,key(0))
+ b.observe(.keyDown,key(0,.maskCommand));missing=unreadable
+ b.step();clock=2;b.step()
+ check(!b.busy && traces.contains("deadline"),"unconfirmed read and mismatched body both end at bounded deadline")
+ check(!traces.joined().contains("PRIVATE_CONTENT"),"wait diagnosis does not log editor content")
+}
+// An editor may remove its initial AX body on the first key. Select-all can
+// acknowledge this only after the full observed insertion is present.
+for scenario in 0..<8 {
+ let b=SourceSwitchBarrier();var text="initial prompt",range=NSRange(location:0,length:0),focused=field,writes=0
+ b.source={en};b.read={.init(field:focused,text:text,selection:range)}
+ b.applySelection={_,r in writes+=1;range=r;return true}
+ b.observe(.keyDown,key(0));b.observe(.keyDown,key(11)) // ab
+ switch scenario {
+ case 0:text="ab";range=NSRange(location:2,length:0)
+ case 1:text="ab";range=NSRange(location:0,length:2)
+ case 2:text="a";range=NSRange(location:1,length:0) // partial delivery
+ case 3:text="ac";range=NSRange(location:2,length:0) // different key
+ case 4:text="ab?";range=NSRange(location:3,length:0) // unobserved body
+ case 5:text="ab";range=NSRange(location:1,length:0) // unexpected caret
+ case 6:text="ab";range=NSRange(location:0,length:1) // partial selection
+ default:text="ab";range=NSRange(location:2,length:0)
+ }
+ b.observe(.keyDown,key(0,.maskCommand))
+ if scenario==7 {focused=other}
+ b.step()
+ if scenario<2 {
+  check(b.expected?.0=="ab" && b.expected?.1==NSRange(location:0,length:2),"explicit select-all acknowledges all typed keys without initial body")
+  b.step();b.step();check(!b.busy,"selection completes without stale initial body deadline")
+ } else {
+  check(writes==0,"partial delivery, changed text, caret, selection or field cannot authorize selection")
+  check(b.expected?.0 != "ab","unverified removal never replaces prediction")
+ }
+ b.fail("test_cleanup")
+}
+// Korean insertion also acknowledges initial-body removal; following input
+// must replace the verified full selection exactly once.
+do {
+ let b=SourceSwitchBarrier();var text="initial prompt",range=NSRange(location:0,length:0)
+ b.source={ko};b.read={.init(field:field,text:text,selection:range)}
+ b.applySelection={_,r in range=r;return true}
+ b.observe(.keyDown,key(0));b.observe(.keyDown,key(40))
+ text="마";range=NSRange(location:1,length:0)
+ b.observe(.keyDown,key(0,.maskCommand));b.step();b.step();b.step()
+ check(!b.busy && b.expected?.0=="마","Korean insertion acknowledges removed initial body")
+ b.observe(.keyDown,key(2));check(b.expected?.0=="ㅇ","typing after select-all replaces selected Korean body once")
+ b.fail("test_cleanup")
+}
 print("Source switch barrier:",checks,"checks passed")
