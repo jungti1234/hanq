@@ -754,6 +754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 // MARK: Executable entry
+HanjaCandidates.runProbeIfRequested()
 PermissionRelauncher.runIfRequested()
 let app = NSApplication.shared
 PermissionProbe.runIfRequested()

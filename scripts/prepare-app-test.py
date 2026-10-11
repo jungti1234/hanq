@@ -107,7 +107,7 @@ class MacOS:
             if info.get('CFBundleIdentifier') != BUNDLE_ID:
                 continue
             command = run(['/bin/ps', '-p', str(pid), '-o', 'command=']).stdout
-            helper = any(flag in command for flag in ('--permission-probe', '--permission-relauncher'))
+            helper = any(flag in command for flag in ('--permission-probe', '--permission-relauncher', '--hanja-candidate-probe', '--hanja-candidates-list-probe'))
             processes.append({'pid': pid, 'identity': identity, 'app': str(app), 'helper': helper})
         return processes
 

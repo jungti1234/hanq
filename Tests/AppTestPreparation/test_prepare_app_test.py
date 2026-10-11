@@ -275,13 +275,15 @@ class PreparationTests(unittest.TestCase):
         operations = preflight.MacOS.__new__(preflight.MacOS)
         operations.process_identity = lambda pid: (
             str((self.app if pid == 100 else unrelated) / 'Contents/MacOS/HanQ'), 'start')
-        with mock.patch.object(preflight.subprocess, 'run', return_value=
-                               subprocess.CompletedProcess([], 0, '100\n101\n', '')):
-            with mock.patch.object(preflight, 'run', return_value=
-                                   subprocess.CompletedProcess([], 0, '--permission-relauncher', '')):
-                processes = operations.processes()
-        self.assertEqual([item['pid'] for item in processes], [100])
-        self.assertTrue(processes[0]['helper'])
+        for flag in ('--permission-relauncher', '--permission-probe', '--hanja-candidate-probe', '--hanja-candidates-list-probe'):
+            with self.subTest(flag=flag):
+                with mock.patch.object(preflight.subprocess, 'run', return_value=
+                                       subprocess.CompletedProcess([], 0, '100\n101\n', '')):
+                    with mock.patch.object(preflight, 'run', return_value=
+                                           subprocess.CompletedProcess([], 0, flag, '')):
+                        processes = operations.processes()
+                self.assertEqual([item['pid'] for item in processes], [100])
+                self.assertTrue(processes[0]['helper'])
 
     def reuse_fixture(self):
         self.prepare()

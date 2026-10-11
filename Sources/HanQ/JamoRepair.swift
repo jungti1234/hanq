@@ -130,9 +130,33 @@ final class JamoRepair {
         }
         let isHanja: Bool
         if case .hanja = action { isHanja = true } else { isHanja = false }
+        if isHanja {
+            busy = true
+            let expectedRevision = revision
+            let target = (text as NSString).substring(with: range)
+            HanjaCandidates.lookup(target) { [weak self] result in
+                guard let self else { return }
+                self.busy = false
+                guard self.revision == expectedRevision, result.shouldRequestCandidates else { return }
+                self.prepareSelection(element, app: app, pid: pid, text: text, range: range,
+                                      originalSelection: originalSelection, action: action,
+                                      inputSourceID: inputSourceID)
+            }
+            return
+        }
+        prepareSelection(element, app: app, pid: pid, text: text, range: range,
+                         originalSelection: originalSelection, action: action, inputSourceID: inputSourceID)
+    }
+
+    private func prepareSelection(_ element: AXUIElement, app: AXUIElement, pid: pid_t,
+                                  text: String, range: NSRange, originalSelection: NSRange,
+                                  action: Action, inputSourceID: String?) {
+        let isHanja: Bool
+        if case .hanja = action { isHanja = true } else { isHanja = false }
         InputDiagnostics.shared.record("변환 선택 준비: hanja=\(isHanja) selected=\(originalSelection.length > 0)")
         var writable: DarwinBoolean = false
-        guard AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &writable) == .success,
+        guard AXIsProcessTrusted(),
+              AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &writable) == .success,
               writable.boolValue,
               InputSourceSnapshot.read()?.id == inputSourceID,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
