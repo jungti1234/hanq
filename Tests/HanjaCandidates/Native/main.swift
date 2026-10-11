@@ -54,6 +54,10 @@ func currentSource() -> String? {
 let originalSources = sourceIDs(), originalSource = currentSource()
 let originalApp = NSWorkspace.shared.frontmostApplication?.processIdentifier
 let first = Fixture(); first.show()
+let sizedWindow = NSApp.windows.first { $0.isVisible && $0.contentView.map { NSStringFromClass(type(of: $0)) == "IMKUIVisualEffectView" } == true }!
+check(sizedWindow.frame.height < 100, "two candidates do not leave a nine-row blank panel")
+check(abs(sizedWindow.frame.minX - 650) < 1 && abs(sizedWindow.frame.maxY - 650) < 1,
+    "native window top-left remains at the supplied Cocoa screen anchor")
 check(first.press(18) == .consumed && first.commits == ["韓國"], "number 1 commits the first dictionary candidate")
 check(first.owner.receive(.keyUp, event(18, down: false)) == .consumed, "commit key release consumed after window closes")
 let arrow = Fixture(); arrow.show(); arrow.press(125)
@@ -77,6 +81,7 @@ check(shortcut.press(0, flags: .maskCommand) == .normal && shortcut.cancellation
 let changed = Fixture(); changed.show(); changed.allowed = false
 check(changed.press(19) == .normal && changed.commits.isEmpty && changed.cancellations == 1, "changed input context prevents commit")
 let pages = Fixture(); let values = (1...20).map { "候補\($0)" }; pages.show(values)
+check(NSApp.windows.first { $0.isVisible }!.frame.height > 200, "nine visible candidates retain enough list height")
 for _ in 0..<10 { pages.press(125) }
 pages.press(18)
 check(pages.commits == [values[9]], "numbering restarts at 1 on the second page")

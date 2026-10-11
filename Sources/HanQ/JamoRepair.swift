@@ -192,9 +192,9 @@ final class JamoRepair {
             guard let self else { return }
             self.busy = false
             guard self.revision == expectedRevision else { return }
-            self.prepareSelection(element, app: app, pid: pid, text: text, range: range,
-                                  originalSelection: originalSelection, action: .paste(value),
-                                  inputSourceID: inputSourceID)
+            self.commitHanjaComposition(element, app: app, pid: pid, text: text, range: range,
+                                        originalSelection: originalSelection, replacement: value,
+                                        inputSourceID: inputSourceID, expectedRevision: expectedRevision)
         }
         busy = true
         if candidatePanel.show(candidates, at: anchor) {
@@ -203,6 +203,55 @@ final class JamoRepair {
         }
         busy = false
         return false
+    }
+
+    /// AX selection alone does not end Chromium's marked Korean text. Commit
+    /// through the editor before applying the replacement selection.
+    private func commitHanjaComposition(_ element: AXUIElement, app: AXUIElement, pid: pid_t,
+                                        text: String, range: NSRange, originalSelection: NSRange,
+                                        replacement: String, inputSourceID: String?, expectedRevision: Int) {
+        guard revision == expectedRevision, AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              InputSourceSnapshot.read()?.id == inputSourceID,
+              attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true,
+              (attribute(element, kAXValueAttribute) as? String)?.utf8.elementsEqual(text.utf8) == true,
+              selection(element) == originalSelection else { return }
+        busy = true
+        postKey(124, flags: [], pid: pid)
+        let end = NSMaxRange(originalSelection)
+        let following = end < (text as NSString).length
+            ? NSMaxRange((text as NSString).rangeOfComposedCharacterSequence(at: end)) : end
+        var previous: NSRange?
+        func poll(_ attempt: Int) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                guard let self else { return }
+                guard self.revision == expectedRevision, AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+                      InputSourceSnapshot.read()?.id == inputSourceID,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                      self.attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true,
+                      let value = self.attribute(element, kAXValueAttribute) as? String,
+                      value.utf8.elementsEqual(text.utf8) else { self.busy = false; return }
+                let caret = self.selection(element)
+                var marked = CFRange()
+                let hasMarked: Bool
+                if let raw = self.attribute(element, "AXMarkedTextRange"), CFGetTypeID(raw) == AXValueGetTypeID() {
+                    hasMarked = AXValueGetValue(raw as! AXValue, .cfRange, &marked) && marked.length > 0
+                } else { hasMarked = false }
+                if let caret, caret.length == 0, [end, following].contains(caret.location),
+                   !hasMarked, previous == caret {
+                    self.busy = false
+                    self.prepareSelection(element, app: app, pid: pid, text: text, range: range,
+                                          originalSelection: caret, action: .paste(replacement), inputSourceID: inputSourceID)
+                } else if attempt < 15 {
+                    previous = caret
+                    poll(attempt + 1)
+                } else {
+                    self.busy = false
+                    InputDiagnostics.shared.record("한자 확정 중단: 조합 확정 반영 시간 초과")
+                }
+            }
+        }
+        poll(0)
     }
 
     private func prepareSelection(_ element: AXUIElement, app: AXUIElement, pid: pid_t,

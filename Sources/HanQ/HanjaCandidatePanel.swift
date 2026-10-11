@@ -109,7 +109,15 @@ final class HanjaCandidatePanel: NSObject {
         nativeWindow = NSApp.windows.first { window in
             window.isVisible && window.contentView.map { NSStringFromClass(type(of: $0)) == "IMKUIVisualEffectView" } == true
         }
-        if let window = nativeWindow {
+        if let window = nativeWindow, let view = window.contentView {
+            func documentSize(_ view: NSView) -> NSSize? {
+                if let scroll = view as? NSScrollView { return scroll.documentView?.frame.size }
+                return view.subviews.lazy.compactMap(documentSize).first
+            }
+            if let size = documentSize(view), size.width > 0, size.height > 0,
+               size.width.isFinite, size.height.isFinite {
+                window.setContentSize(size)
+            }
             window.setFrameTopLeftPoint(position(panel, size: window.frame.size))
         }
         return panel.isVisible() && nativeWindow != nil
