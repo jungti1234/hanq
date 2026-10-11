@@ -111,6 +111,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 <key>NSHumanReadableCopyright</key><string>© 2026 Taek In Jung</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>InputMethodServerControllerClass</key><string>HanQCandidateInputController</string>
+<key>InputMethodConnectionName</key><string>taek.in.hanq.candidates</string>
 <key>CFBundleAllowMixedLocalizations</key><true/>
 </dict></plist>
 EOF

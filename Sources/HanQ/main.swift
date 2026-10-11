@@ -457,6 +457,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     return Unmanaged.passUnretained(event)
                 }
                 let originalRecipient=owner.inputDeliveryOrigin?.take(type,event)
+                switch owner.jamoRepair.receiveCandidates(type, event) {
+                case .consumed: return nil
+                case .panelMouse: return Unmanaged.passUnretained(event)
+                case .normal: break
+                }
                 func forwardOriginalIfMoved()->Bool {
                     guard let routing=owner.inputDeliveryOrigin else{return false}
                     let token=event.getIntegerValueField(.eventSourceUserData)
@@ -586,7 +591,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         freshPermission.stop()
         filter = CommandFilter()
         optionFilter = CommandFilter(keyCode: 61, left: 0x20, right: 0x40, aggregate: .maskAlternate)
-        jamoRepair.inputDidChange()
+        jamoRepair.stop()
         externalKeyboards.stop()
         InputDiagnostics.shared.record("tap.stop.end")
     }

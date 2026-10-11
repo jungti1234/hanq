@@ -13,6 +13,16 @@ final class JamoRepair {
     private var hanjaWatchID = 0
     private var watchingHanja = false
     private var confirmationRevision: Int?
+    private let candidatePanel = HanjaCandidatePanel()
+
+    func receiveCandidates(_ type: CGEventType, _ event: CGEvent) -> HanjaCandidateEventDisposition {
+        candidatePanel.receive(type, event)
+    }
+
+    func stop() {
+        candidatePanel.stop()
+        inputDidChange()
+    }
 
     private enum Action {
         case paste(String)
@@ -21,6 +31,7 @@ final class JamoRepair {
 
     func inputDidChange(type: CGEventType? = nil, key: Int64 = -1, flags: CGEventFlags = []) {
         revision += 1
+        candidatePanel.close(notify: true)
         guard watchingHanja else { return }
         switch HanjaReplacement.input(type: type, key: key, flags: flags) {
         case .confirm:
@@ -34,6 +45,7 @@ final class JamoRepair {
 
     func inputSourceDidChange() {
         revision += 1
+        candidatePanel.close(notify: true)
         cancelHanjaWatch()
     }
 
@@ -134,10 +146,14 @@ final class JamoRepair {
             busy = true
             let expectedRevision = revision
             let target = (text as NSString).substring(with: range)
-            HanjaCandidates.lookup(target) { [weak self] result in
+            HanjaCandidates.lookupCandidates(target) { [weak self] result in
                 guard let self else { return }
                 self.busy = false
-                guard self.revision == expectedRevision, result.shouldRequestCandidates else { return }
+                guard self.revision == expectedRevision, result.status.shouldRequestCandidates else { return }
+                if result.status == .available,
+                   self.showCandidates(result.candidates, element: element, app: app, pid: pid, text: text,
+                                       range: range, originalSelection: originalSelection,
+                                       inputSourceID: inputSourceID, expectedRevision: expectedRevision) { return }
                 self.prepareSelection(element, app: app, pid: pid, text: text, range: range,
                                       originalSelection: originalSelection, action: action,
                                       inputSourceID: inputSourceID)
@@ -146,6 +162,47 @@ final class JamoRepair {
         }
         prepareSelection(element, app: app, pid: pid, text: text, range: range,
                          originalSelection: originalSelection, action: action, inputSourceID: inputSourceID)
+    }
+
+    private func showCandidates(_ candidates: [String], element: AXUIElement, app: AXUIElement, pid: pid_t,
+                                text: String, range: NSRange, originalSelection: NSRange,
+                                inputSourceID: String?, expectedRevision: Int) -> Bool {
+        guard AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              InputSourceSnapshot.read()?.id == inputSourceID,
+              (attribute(element, kAXValueAttribute) as? String) == text,
+              selection(element) == originalSelection,
+              attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true else { return false }
+        var requested = CFRange(location: range.location, length: range.length)
+        guard let request = AXValueCreate(.cfRange, &requested) else { return false }
+        var result: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString,
+                                                        request, &result) == .success,
+              let result, CFGetTypeID(result) == AXValueGetTypeID(), let screen = NSScreen.screens.first else { return false }
+        var rect = CGRect.zero
+        guard AXValueGetValue(result as! AXValue, .cgRect, &rect) else { return false }
+        let anchor = NSPoint(x: rect.minX, y: screen.frame.maxY - rect.maxY - 2)
+        candidatePanel.allowed = { [weak self] in
+            self?.revision == expectedRevision && AXIsProcessTrusted() && !IsSecureEventInputEnabled()
+                && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+                && InputSourceSnapshot.read()?.id == inputSourceID
+        }
+        candidatePanel.onCancel = { [weak self] in self?.busy = false }
+        candidatePanel.onCommit = { [weak self] value in
+            guard let self else { return }
+            self.busy = false
+            guard self.revision == expectedRevision else { return }
+            self.prepareSelection(element, app: app, pid: pid, text: text, range: range,
+                                  originalSelection: originalSelection, action: .paste(value),
+                                  inputSourceID: inputSourceID)
+        }
+        busy = true
+        if candidatePanel.show(candidates, at: anchor) {
+            InputDiagnostics.shared.record("한자 후보 표시: 원문 제외 목록")
+            return true
+        }
+        busy = false
+        return false
     }
 
     private func prepareSelection(_ element: AXUIElement, app: AXUIElement, pid: pid_t,
