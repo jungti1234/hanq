@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>한Q 0.3.1-beta.1</title>
+<style>
+:root{color-scheme:light dark;background-color:Canvas;color:CanvasText}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:14px;line-height:1.6;margin:20px;background-color:Canvas;color:CanvasText}
+h1{font-size:23px}
+h2{font-size:19px;margin-top:24px}
+h3{font-size:16px}
+li{margin:6px 0}
+a{color:LinkText}
+blockquote{border-left:3px solid GrayText;padding-left:12px;margin-left:0;color:inherit}
+code{background-color:rgba(127,127,127,.18);color:inherit;padding:1px 3px;border-radius:3px}
+</style>
+</head><body>
+<h1 dir="auto">한Q 0.3.1-beta.1</h1>
+<blockquote>
+<p dir="auto">미배포 초안입니다. 현재 공개된 다운로드는 0.3.0-beta.1이며, 아래 변경은 다음 업데이트에 포함될 예정입니다.</p>
+</blockquote>
+<p dir="auto">한자 후보의 표시와 확정을 개선하고, 입력창 진입·전체 선택·한영 전환의 안정성을 보완하는 베타 업데이트입니다.</p>
+<h2 dir="auto">한자 입력 개선</h2>
+<ul dir="auto">
+<li>한자 후보에서 원문 한글 항목을 제외합니다. 기본 사전과 사용자 등록 사전을 함께 확인하며, 사용자 등록 변환 문구도 유지합니다.</li>
+<li>원문과 다른 후보가 없으면 후보창을 열지 않습니다. 조회에 실패하거나 후보창을 표시할 수 없으면 기존 Apple 입력기의 후보창을 사용합니다.</li>
+<li>숫자 1–9, 방향키와 Return, 마우스로 후보를 선택할 수 있습니다. 후보가 많으면 Page Up/Down으로 이동하며 Escape로 취소합니다.</li>
+<li>한글 조합 직후 한자를 선택했는데 원문이 그대로 남거나 글자가 중복되는 문제를 수정했습니다.</li>
+<li>후보창이 화면 모서리에 뜨거나 적은 후보 아래에 큰 빈 공간이 남는 문제를 보완했습니다.</li>
+</ul>
+<h2 dir="auto">입력·선택 안정성 개선</h2>
+<ul dir="auto">
+<li>입력창을 먼저 클릭하지 않고 타이핑을 시작할 때 첫 자음 보정을 개선했습니다. 기존 글자·공백·선택을 보존하고 입력창 안내 문구가 사라지는 경우도 처리합니다.</li>
+<li>텍스트 선택을 제공하는 콤보 상자 입력란에서도 첫 자음 보정·전체 선택·선택 유지 한영 전환을 지원합니다.</li>
+<li>첫 자음 보정 직후 전체 선택하거나 한영을 전환할 때 선택이 풀리거나 후속 입력이 지연되는 문제를 보완했습니다.</li>
+<li>전체 선택 시 안내 문구가 사라지는 경우와 커서·선택 반영이 늦는 경우에도 앞선 입력과 후속 키의 순서를 확인합니다.</li>
+</ul>
+<h2 dir="auto">사용 조건과 알려진 제한</h2>
+<ul dir="auto">
+<li>Apple 공식 한국어 입력기인 두벌식·세벌식·세벌식 390·공진청 로마자·한컴 로마자가 지원 대상입니다.</li>
+<li>한자 변환과 자동 보정은 현재 입력칸의 접근성 지원과 입력 상태에 따라 동작합니다. 보안 입력, 대상 입력칸 변경, 본문·선택 변경 시 작업을 중단할 수 있습니다.</li>
+<li>기존 후보창으로 복귀한 경우에는 원문 한글 항목 등 Apple 입력기의 기존 동작이 나타날 수 있습니다.</li>
+<li>한자 변환의 실행 취소는 편집기마다 다르며, 한 번의 Undo로 원문 복원을 보장하지 않습니다.</li>
+<li>Safari의 자모 분리와 VS Code 기본 편집기의 본문 조회 제한은 남아 있습니다. 모든 macOS·앱·키보드 환경에서의 동작을 보장하지 않습니다.</li>
+<li>한국어 입력 불일치 자동 복구에는 macOS의 Control-Space 입력 소스 전환 단축키가 활성화되어 있어야 합니다. 복구 중 Caps Lock·메뉴바 전환 구간의 추적은 지원하지 않습니다.</li>
+</ul>
+<h2 dir="auto">업데이트 및 설치</h2>
+<ul dir="auto">
+<li>이 초안의 버전은 아직 다운로드하거나 앱에서 업데이트할 수 없습니다. 공개 후 기존 사용자는 한Q 메뉴의 <strong>업데이트 확인…</strong>으로 설치할 수 있습니다.</li>
+<li>새로 설치할 때는 공개 릴리스의 Assets에서 <code class="notranslate">.dmg</code> 파일을 받아 열고 <code class="notranslate">HanQ.app</code>을 Applications(응용 프로그램) 폴더로 복사하세요.</li>
+<li>Apple Silicon Mac, macOS 13.0 이상 대상이며 손쉬운 사용 권한이 필요합니다.</li>
+<li>이 베타는 기존 0.3.0과 동일한 자체 서명 인증서를 사용합니다. Developer ID 서명·공증은 미적용이며, 정식 출시 시 적용할 예정입니다. 최초 실행이 차단되면 출처를 확인한 설치 파일에 한해 시스템 설정 → 개인정보 보호 및 보안에서 <strong>그래도 열기</strong>를 선택하세요.</li>
+<li>동일 인증서 업데이트에서도 환경에 따라 손쉬운 사용 권한 재승인이 필요할 수 있습니다. 기존 0.2.0의 ad-hoc 서명 앱에서 전환하는 경우에는 재승인이 필요할 수 있습니다. 권한 안내가 계속되면 기존 한Q 항목을 제거하고 응용 프로그램 폴더의 <code class="notranslate">HanQ.app</code>을 다시 추가하세요.</li>
+</ul>
+<p dir="auto">자세한 사용법과 기존 자동 보정의 적용 조건은 <a href="https://github.com/jungti1234/hanq#readme">README</a>를 참고하세요. 문제 제보는 앱 메뉴의 <strong>피드백 남기기…</strong>를 이용하고, 사용 앱·입력 소스·키보드 종류와 재현 순서·기대 결과·실제 결과를 함께 알려주세요.</p>
+</body></html>
