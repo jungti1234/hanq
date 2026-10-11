@@ -3,6 +3,18 @@ import Foundation
 /// Greedy modern two-set composition. Existing syllables, punctuation and foreign
 /// text are boundaries; standalone consonants/vowels are never discarded.
 enum JamoComposer {
+    // Apple ignores finals after an incomplete three-set initial or medial.
+    // Share this rule between automatic onset and wrong-language recovery.
+    static func composeNativeThreeSet(_ text:String)->String {
+        var accepted=""
+        for scalar in text.unicodeScalars {
+            if (0x11A8...0x11C2).contains(scalar.value),
+               let last=composeThreeSet(accepted,preserveStandaloneFinals:true).unicodeScalars.last,
+               (0x3131...0x3163).contains(last.value) { continue }
+            accepted.unicodeScalars.append(scalar)
+        }
+        return composeThreeSet(accepted,preserveStandaloneFinals:true)
+    }
     /// Explicit ASCII selections only. A layout must be resolved by the caller;
     /// the caller resolves unknown sources to the two-set default.
     static func selectedRomanReplacement(in text: String, selection: NSRange,
@@ -67,7 +79,7 @@ enum JamoComposer {
     private static let vowelPairs: [String: Character] = ["ㅗㅏ":"ㅘ", "ㅗㅐ":"ㅙ", "ㅗㅣ":"ㅚ", "ㅜㅓ":"ㅝ", "ㅜㅔ":"ㅞ", "ㅜㅣ":"ㅟ", "ㅡㅣ":"ㅢ"]
     private static let finalPairs: [String: Character] = ["ㄱㅅ":"ㄳ", "ㄴㅈ":"ㄵ", "ㄴㅎ":"ㄶ", "ㄹㄱ":"ㄺ", "ㄹㅁ":"ㄻ", "ㄹㅂ":"ㄼ", "ㄹㅅ":"ㄽ", "ㄹㅌ":"ㄾ", "ㄹㅍ":"ㄿ", "ㄹㅎ":"ㅀ", "ㅂㅅ":"ㅄ"]
 
-    static func compose(_ text: String, vowelCombinations:[String:Character]?=nil) -> String {
+    static func compose(_ text: String, vowelCombinations:[String:Character]?=nil,combineStandalone:Bool=false) -> String {
         let vowelPairs=vowelCombinations ?? Self.vowelPairs
         // NFC respects explicit choseong/jungseong/jongseong roles in NFD text.
         var normalized = ""
@@ -87,6 +99,12 @@ enum JamoComposer {
         func vowel(at index: Int) -> Bool { index < chars.count && vowels.contains(chars[index]) }
         while i < chars.count {
             guard let initial = initials.firstIndex(of: chars[i]), vowel(at: i + 1) else {
+                // A detached initial leaves an IME run starting with a medial.
+                // Native typing still combines its standalone vowel keys.
+                if combineStandalone,i+1<chars.count,
+                   let combined=vowelPairs[String(chars[i...i+1])] {
+                    chars[i+1]=combined;i+=1;continue
+                }
                 result.append(chars[i]); i += 1; continue
             }
             var v = chars[i + 1]

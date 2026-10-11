@@ -71,11 +71,15 @@ final class OnsetInputGate {
     private func observePassed(_ type:CGEventType,_ event:CGEvent){
         guard var p=passedInput else{return}
         let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        // Shift changes neither text nor source. Each printable down records its
+        // own Shift state; a physical release between keys must not erase history.
+        if type == .flagsChanged,[56,60].contains(code),
+           event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskAlphaShift,.maskSecondaryFn]).isEmpty {return}
         guard ProcessInfo.processInfo.systemUptime-p.first.time<2,
               type == .keyDown || type == .keyUp,
               event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskAlphaShift,.maskSecondaryFn]).isEmpty,
               event.getIntegerValueField(.keyboardEventAutorepeat)==0,
-              (PhysicalLetterKeys.letters[code] != nil || code==49) else{traceReentry(.history,.history_invalid);passedInput=nil;return}
+              PhysicalLetterKeys.printableCodes.contains(code) else{traceReentry(.history,.history_invalid);passedInput=nil;return}
         if type == .keyDown {
             guard p.keys.count<16,!p.pressed.contains(code) else{traceReentry(.history,.history_limit);passedInput=nil;return}
             p.keys.append((code,event.flags.contains(.maskShift)));p.pressed.insert(code)
@@ -252,7 +256,7 @@ final class OnsetInputGate {
         if !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty {hintUntil=0}
         var observedPassed=false
         if type == .keyDown,passedInput==nil,let revision=passedBaselineRevision,
-           passedBaselineSource=="com.apple.inputmethod.Korean.2SetKorean",
+           !passedBaselineSource.isEmpty,passedBaselineSource==hintSourceID,
            event.getIntegerValueField(.keyboardEventAutorepeat)==0,
            event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskAlphaShift,.maskSecondaryFn]).isEmpty,
            (event.flags.contains(.maskShift) ? hintShifted:hintNormal).contains(code),now>=hintUntil {
@@ -263,7 +267,7 @@ final class OnsetInputGate {
            (event.flags.contains(.maskShift) ? hintShifted:hintNormal).contains(code) {
             // Observe the first key. Only an atomic claim after AX validation may hold later input.
             early=Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:hintSourceID)
-            if hintSourceID=="com.apple.inputmethod.Korean.2SetKorean",let first=early {
+            if !hintSourceID.isEmpty,let first=early {
                 passedInput=PassedInput(first:first,keys:[(code,event.flags.contains(.maskShift))],pressed:[code])
             }else{passedInput=nil}
             deferred=nil;earlyReleasePending=true;hintUntil=0;holdUntil=now+0.35

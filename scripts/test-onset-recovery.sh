@@ -57,7 +57,7 @@ swiftc Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cac
 "$stage/replay-read-wait"
 
 # Bounded history of already delivered keys may repair only an exact split sequence.
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/JamoComposer.swift Tests/OnsetRecovery/LateSequence/main.swift -o "$stage/late-sequence"
+swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/JamoComposer.swift Tests/OnsetRecovery/LateLayoutCases.swift Tests/OnsetRecovery/LateSequence/main.swift -o "$stage/late-sequence"
 "$stage/late-sequence"
 
 # A completed replay must not poison later unedited observations after a pause.

@@ -30,7 +30,7 @@ enum MismatchKeyboardLayout {
             jamo.append(char)
         }
         if sourceID==gongjinID || sourceID==hncID{return JamoComposer.composeRomanized(jamo,kind:layout.kind)}
-        return layout.kind == .twoSet ? JamoComposer.compose(jamo):threeSet(jamo)
+        return layout.kind == .twoSet ? JamoComposer.compose(jamo):JamoComposer.composeNativeThreeSet(jamo)
     }
     static func render(roman:String,sourceID:String)->String? {
         var keys:[(UInt16,Bool)]=[]
@@ -48,21 +48,4 @@ enum MismatchKeyboardLayout {
         }
         return result
     }()
-}
-
-
-extension MismatchKeyboardLayout {
-    private static func threeSet(_ text:String)->String {
-        var accepted=""
-        for scalar in text.unicodeScalars {
-            if (0x11A8...0x11C2).contains(scalar.value),
-               let last=JamoComposer.composeThreeSet(accepted,preserveStandaloneFinals:true).unicodeScalars.last,
-               (0x3131...0x3163).contains(last.value) {
-                // Apple ignores a final key after an incomplete initial/medial.
-                continue
-            }
-            accepted.unicodeScalars.append(scalar)
-        }
-        return JamoComposer.composeThreeSet(accepted,preserveStandaloneFinals:true)
-    }
 }

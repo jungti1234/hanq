@@ -169,16 +169,16 @@ final class OnsetRecoveryEngine:NSObject {
     var publishedPassedRevision=0
     func publishPassedBaseline(_ snap:OnsetSnapshot?){
         guard enabled,!recovering,pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,
-              currentSource()==onsetKoreanID,let snap,snap.selection.length==0 else{gate?.configurePassedBaseline(nil);return}
+              let layout=currentLayout(),let snap,snap.selection.length==0 else{gate?.configurePassedBaseline(nil);return}
         if let last=publishedPassedBaselines.last,CFEqual(last.snapshot.element,snap.element),last.snapshot.text==snap.text,last.snapshot.selection==snap.selection {
-            gate?.configurePassedBaseline(last.revision,sourceID:onsetKoreanID);return
+            gate?.configurePassedBaseline(last.revision,sourceID:layout.sourceID);return
         }
         publishedPassedRevision+=1
         publishedPassedBaselines.append((publishedPassedRevision,snap))
         // The current and previous publication cover a gate/main-thread race.
         // Once observed, an active sequence has its own anchored snapshot below.
         if publishedPassedBaselines.count>2{publishedPassedBaselines.removeFirst()}
-        gate?.configurePassedBaseline(publishedPassedRevision,sourceID:onsetKoreanID)
+        gate?.configurePassedBaseline(publishedPassedRevision,sourceID:layout.sourceID)
     }
     // A focus pause may hide the original field from snapshot(). Refresh only
     // its read-only baseline after every issued event has crossed the gate.
@@ -200,14 +200,14 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func samplePassed(_ snap:OnsetSnapshot?)->Bool {
         guard let gate,let p=gate.passedObservation(),p.keys.count>=2 else{return false}
-        guard canBeginRepair(),currentSource()==p.first.sourceID,p.first.sourceID==onsetKoreanID,
+        guard canBeginRepair(),currentSource()==p.first.sourceID,currentLayout() != nil,
               pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
               gate.seenCount()>=postedToGate else{traceReentryObservation("history_guard_failed",hasSnapshot:snap != nil);gate.discardPassed(reason:.guard_failed);return false}
         guard let snap else{if !transientReadFailure{gate.discardPassed()};return true}
         if let field=passedField,!CFEqual(field,snap.element){traceReentryObservation("history_field_changed",hasSnapshot:true);gate.discardPassed(reason:.field_changed);return false}
         passedField=snap.element
         let baseline=passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
-        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection) {
+        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID) {
         case .waiting:traceReentryObservation("history_wait",hasSnapshot:true);return true
         case .complete:traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
         case .rejected:traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
@@ -222,6 +222,8 @@ final class OnsetRecoveryEngine:NSObject {
     // atomic claim rejects any event that already passed during the AX read.
     func observeDeferredBeforeInput(_ type:CGEventType,_ event:CGEvent){
         guard enabled,!recovering,!waitingForContext,(gate?.reservation() != nil || gate?.deferredReservation() != nil || gate?.passedObservation() != nil) else{return}
+        if type == .flagsChanged,[56,60].contains(UInt16(event.getIntegerValueField(.keyboardEventKeycode))),
+           event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskAlphaShift,.maskSecondaryFn]).isEmpty {return}
         guard (type == .keyDown || type == .keyUp),
               event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{cancelDeferredObservation();return}
         if gate?.reservation()==nil,gate?.deferredReservation()==nil,gate?.passedObservation()?.baselineRevision != nil {
