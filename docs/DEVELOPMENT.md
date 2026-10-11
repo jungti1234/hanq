@@ -29,7 +29,7 @@ HANQ_SIGNING_IDENTITY=<인증서의-40자리-SHA1> python3 scripts/test-code-sig
 
 sign-app.py는 실제 인증서 지문과 코드 식별 조건을 확인한다. 내장 Sparkle의 기존 서명은 보존하며 Developer ID·공증이나 시스템 전체 인증서 신뢰 설정을 대신하지 않는다. test-code-signing.py는 내용이 다른 두 앱의 코드 해시 차이·같은 식별 조건·교차 검증, ad-hoc 앱 거부, 인증서 누락과 변조 거부를 검사한다. 실제 TCC 권한 유지나 물리 키 검증은 별개다.
 
-Sparkle 시험은 기존 prepare-update-e2e.sh에 같은 HANQ_SIGNING_IDENTITY를 전달한다. 독립 시험 폴더는 HANQ_UPDATE_E2E_ROOT의 절대 경로로 지정하고 해당 폴더에서 로컬 서버를 먼저 실행한다. 시험 키는 종료 후 삭제한다. 공개 피드·운영 업데이트 키는 변경하지 않는다.
+Sparkle 시험은 기존 prepare-update-e2e.sh에 같은 HANQ_SIGNING_IDENTITY를 전달한다. 독립 시험 폴더는 `/private/tmp` 아래의 `HANQ_UPDATE_E2E_ROOT` 절대 경로로 지정하고 해당 폴더에서 로컬 서버를 먼저 실행한다. 시험 키는 종료 후 삭제한다. 공개 피드·운영 업데이트 키는 변경하지 않는다.
 
 ### 새 빌드 테스트 전 손쉬운 사용 권한 사전 체크
 
@@ -82,9 +82,22 @@ Sparkle 2.10.0 공식 아카이브와 SHA-256은 `scripts/prepare-sparkle.sh`에
 
 `bash scripts/test-update-policy.sh`는 정책 서명·경계·만료·적용 범위와 네트워크 실패·정책 철회의 기능 복귀 결정을 검사한다. `test-lifecycle.sh`는 제한 시 입력 해제·재활성화 방지·설정 보존도 확인한다. 실서버 조회는 `bash scripts/test-update-network.sh`로 별도 확인한다. `bash scripts/test-update-integration.sh`는 별도 번들에서 실제 안내창·AppDelegate 제한·오프라인 복귀·서명된 정책 철회를 함께 검사한다. `--interactive`는 재확인 버튼을 직접 확인할 때 사용한다. 운영 정책·실제 한Q 설정·전역 입력 탭은 변경하지 않는다.
 
-실제 Sparkle 설치 검증용 별도 앱은 `Tests/UpdateEndToEnd/`와 `scripts/prepare-update-e2e.sh`에 있다. `.build/hanq/update-e2e/server`를 만든 뒤 `python3 Tests/UpdateEndToEnd/server.py .build/hanq/update-e2e`를 별도 터미널에서 실행하고 준비 스크립트를 실행한다. 서버는 127.0.0.1에만 바인딩한다. `installed/HanQ Update E2E.app`에서 테스트 업데이트를 실행해 설치·재실행 후 `result.json`의 빌드 2·설정 유지·동일 경로를 확인한다. 잘못된 서명과 취소 경로도 확인한다. 테스트 전용 HTTP 허용·번들 ID·임시 키는 해당 테스트 앱에만 포함된다. 종료 후 앱·서버를 닫고 `test-signing.key`를 삭제한다. 재실행할 때는 이전 테스트 디렉터리를 옮겨 새 환경을 만든다.
+실제 Sparkle 설치 검증용 별도 앱은 `Tests/UpdateEndToEnd/`와 `scripts/prepare-update-e2e.sh`에 있다. 새 임시 폴더를 만들고 같은 경로를 서버와 준비 스크립트에 전달한다. 서버가 실행된 뒤 다른 터미널에서 준비 스크립트를 실행한다.
 
-필수 정책과 설치를 연결하는 검증은 `.build/hanq/update-required-e2e/server`를 만들고 같은 서버 스크립트에 `.build/hanq/update-required-e2e`를 전달한 뒤 `bash scripts/prepare-update-e2e.sh --required`로 준비한다. 별도 번들 `taek.in.hanq.required-tests`에서 동일하게 서명된 최소 빌드 2 정책을 유지하며 빌드 1의 제한 안내 → Sparkle 설치·재실행 → 빌드 2의 제한 해제를 확인한다. `result.json`의 `policyChecked`, `restricted`, 빌드·설정 유지 값을 검사한다. 정책 GET과 다운로드 가능 여부 HEAD는 테스트 응답이며, 실제 운영 HTTPS 정책 조회나 키 입력 중단·복귀를 대신하지 않는다. 종료 후 해당 서버와 테스트 앱을 종료하고 임시 `test-signing.key`를 삭제한다.
+```sh
+# 첫 번째 터미널
+trial=$(mktemp -d /private/tmp/hanq-update-e2e.XXXXXX)
+mkdir -p "$trial/server"
+printf '시험 폴더: %s\n' "$trial"
+python3 Tests/UpdateEndToEnd/server.py "$trial"
+
+# 두 번째 터미널: 위에 출력된 시험 폴더의 절대 경로 사용
+HANQ_UPDATE_E2E_ROOT=<시험-폴더> bash scripts/prepare-update-e2e.sh
+```
+
+기본 경로는 `/private/tmp/hanq-update-e2e-$UID`이며, 위처럼 새 경로를 명시하면 실행별로 격리할 수 있다. Documents 아래의 이전 시험 폴더는 재사용하지 않는다. 서버는 127.0.0.1에만 바인딩한다. `installed/HanQ Update E2E.app`에서 테스트 업데이트를 실행해 설치·재실행 후 `result.json`의 빌드 2·설정 유지·동일 경로를 확인한다. 잘못된 서명과 취소 경로도 확인한다. 테스트 전용 HTTP 허용·번들 ID·임시 키는 해당 테스트 앱에만 포함된다. 종료 후 앱·서버를 닫고 `test-signing.key`를 삭제한다. 재실행할 때는 이전 테스트 디렉터리를 옮겨 새 환경을 만든다.
+
+필수 정책과 설치를 연결하는 검증도 `/private/tmp` 아래에 새 시험 폴더와 `server` 하위 폴더를 만들고 같은 서버 스크립트에 전달한다. 같은 경로를 `HANQ_UPDATE_E2E_ROOT`로 지정해 `bash scripts/prepare-update-e2e.sh --required`로 준비한다. 경로를 생략하면 `/private/tmp/hanq-update-required-e2e-$UID`를 사용한다. 별도 번들 `taek.in.hanq.required-tests`에서 동일하게 서명된 최소 빌드 2 정책을 유지하며 빌드 1의 제한 안내 → Sparkle 설치·재실행 → 빌드 2의 제한 해제를 확인한다. `result.json`의 `policyChecked`, `restricted`, 빌드·설정 유지 값을 검사한다. 정책 GET과 다운로드 가능 여부 HEAD는 테스트 응답이며, 실제 운영 HTTPS 정책 조회나 키 입력 중단·복귀를 대신하지 않는다. 종료 후 해당 서버와 테스트 앱을 종료하고 임시 `test-signing.key`를 삭제한다.
 
 이 검사는 한Q 배포본의 손쉬운 사용 권한 유지나 최초 다운로드 Gatekeeper 검증을 대신하지 않는다.
 
@@ -243,6 +256,10 @@ SourceSwitchBarrier는 주 입력 경로에서 앞선 문자·선택의 예상 �
 
 ## 검증과 진단
 
+시험 실행 스크립트는 `scripts/test-workspace.sh`를 통해 실행 파일·복사한 리소스·제어 파일·진단 로그를 `/private/tmp` 아래의 실행별 임시 폴더에 둔다. 시험 프로세스의 작업 디렉터리도 해당 폴더이며, 필요한 원본 자료는 터미널이 먼저 복사한다. 외부 키보드 화면과 첫 자음 시험 결과는 종료 후 터미널이 지정된 작업 폴더로 복사한다. Documents 접근 허용이나 전체 디스크 접근을 추가하지 않는다. 손쉬운 사용·키 전송 권한 사전 체크는 그대로 필요하다.
+
+`python3 Tests/TestWorkspace/test_runtime_paths.py`는 임시 작업 디렉터리에서의 읽기·쓰기와 종료 코드 전달, 영구 시험 폴더의 보호 경로·심볼릭 링크 거부를 검사한다. Sparkle 설치 시험의 서버·앱·결과도 `/private/tmp` 아래에서 유지하고, 필요한 결과는 시험 종료 후 터미널로 복사한다.
+
 첫 자음 보정을 제외한 비교 진단은 실행 중인 한Q를 종료한 뒤 `open build/HanQ.app --args --disable-onset-recovery`로 시작한다. 해당 실행에만 적용하며 일반 실행은 보정을 활성화한다.
 
 `bash scripts/test-versioning.sh`는 기존 앱이 없는 작업 폴더에서도 버전이 동일한지와 버전 형식 검사를 확인한다. `bash scripts/build-app.sh --print-version`으로 앱을 교체하지 않고 현재 배포 준비 번호를 확인할 수 있다.
@@ -265,7 +282,7 @@ bash scripts/test-recovery-app.sh
 
 텍스트 변환의 요청·선택 준비·정상 중단 등 상세 과정은 `--diagnose-input` 모드에서만 기록한다. 대상 앱 식별자는 상세 로그에서 제외한다. AX 읽기 실패·선택 반영 시간 초과·편집 결과 확인 실패와 권한 안전 종료·입력 소스 전환 실패는 일반 실행에서도 시스템 로그에 남긴다. 입력 문자열과 클립보드 내용은 기록하지 않는다.
 
-권한 문제는 [run-app-input-diagnostic.py](../scripts/run-app-input-diagnostic.py)로 LaunchServices를 통해 재현한다. 터미널 자식으로 직접 실행하면 일반 앱 실행과 권한 조회 결과가 다를 수 있다. 사용 가능한 옵션은 다음 명령으로 확인한다.
+권한 문제는 [run-app-input-diagnostic.py](../scripts/run-app-input-diagnostic.py)로 LaunchServices를 통해 재현한다. 터미널 자식으로 직접 실행하면 일반 앱 실행과 권한 조회 결과가 다를 수 있다. 앱에 전달하는 진단 로그는 임시 폴더에 쓰고 감독 도구가 종료 시 `--output` 폴더로 복사한다. 사용 가능한 옵션은 다음 명령으로 확인한다.
 
 ```sh
 python3 scripts/run-app-input-diagnostic.py --help

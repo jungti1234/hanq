@@ -6,6 +6,8 @@ import json
 import os
 import pathlib
 import signal
+import shutil
+import tempfile
 import subprocess
 import time
 
@@ -35,66 +37,71 @@ def identity(pid):
 if pids():
     parser.error('Quit HanQ before starting this controlled run')
 args.output.mkdir(parents=True, exist_ok=False)
-trace = str(args.output.resolve() / 'trace.log')
-with (args.output / 'supervisor.jsonl').open('w') as log:
-    def record(event, **fields):
-        log.write(json.dumps(dict(time=time.time(), event=event, **fields)) + '\n')
-        log.flush()
-    command = ['open', '-n', str(app)]
-    if not args.no_trace:
-        command += ['--args', '--diagnose-input', trace]
-    subprocess.run(command, check=True)
-    pid = None
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        matches = [(item, identity(item)) for item in pids()]
-        matches = [(item, ident) for item, ident in matches if ident and ident[0] == executable
-                   and not any(flag in subprocess.run(
-                       ['ps', '-p', str(item), '-o', 'command='], capture_output=True, text=True).stdout
-                               for flag in ('--permission-probe', '--permission-relauncher'))]
-        if len(matches) == 1:
-            pid, original = matches[0]
-            break
-        time.sleep(0.05)
-    if pid is None:
-        raise RuntimeError('LaunchServices did not produce a matching HanQ process')
-    record('started', pid=pid, identity=original, deadline_seconds=args.seconds, trace_enabled=not args.no_trace)
-    print(f'LaunchServices HanQ PID {pid}; forced stop in {args.seconds:g}s', flush=True)
-    tracked = {pid: original}
-    exited = set()
-    def stop_tracked():
-        for item, ident in tracked.items():
-            if identity(item) == ident:
-                try:
-                    os.kill(item, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+with tempfile.TemporaryDirectory(prefix='hanq-app-diagnostic-', dir='/private/tmp') as directory:
+    trace = str(pathlib.Path(directory) / 'trace.log')
     try:
-        end = time.monotonic() + args.seconds
-        while time.monotonic() < end:
-            if args.follow_recovery:
-                for item in pids():
-                    if item in tracked:
-                        continue
-                    ident = identity(item)
-                    command = subprocess.run(['ps', '-p', str(item), '-o', 'command='], capture_output=True, text=True).stdout
-                    if ident and ident[0] == executable and '--permission-recovery' in command:
-                        tracked[item] = ident
-                        record('recovered', pid=item, identity=ident)
-                if len(tracked) > 3:
-                    record('restart-loop', count=len(tracked))
+        with (args.output / 'supervisor.jsonl').open('w') as log:
+            def record(event, **fields):
+                log.write(json.dumps(dict(time=time.time(), event=event, **fields)) + '\n')
+                log.flush()
+            command = ['open', '-n', str(app)]
+            if not args.no_trace:
+                command += ['--args', '--diagnose-input', trace]
+            subprocess.run(command, check=True)
+            pid = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                matches = [(item, identity(item)) for item in pids()]
+                matches = [(item, ident) for item, ident in matches if ident and ident[0] == executable
+                           and not any(flag in subprocess.run(
+                               ['ps', '-p', str(item), '-o', 'command='], capture_output=True, text=True).stdout
+                                       for flag in ('--permission-probe', '--permission-relauncher'))]
+                if len(matches) == 1:
+                    pid, original = matches[0]
                     break
-            for item, ident in tracked.items():
-                if item not in exited and identity(item) != ident:
-                    record('exited', pid=item)
-                    exited.add(item)
-            if pid in exited and not args.follow_recovery:
-                break
-            time.sleep(0.05)
-        else:
-            for item, ident in tracked.items():
-                if identity(item) == ident:
-                    record('deadline.kill', pid=item)
+                time.sleep(0.05)
+            if pid is None:
+                raise RuntimeError('LaunchServices did not produce a matching HanQ process')
+            record('started', pid=pid, identity=original, deadline_seconds=args.seconds, trace_enabled=not args.no_trace)
+            print(f'LaunchServices HanQ PID {pid}; forced stop in {args.seconds:g}s', flush=True)
+            tracked = {pid: original}
+            exited = set()
+            def stop_tracked():
+                for item, ident in tracked.items():
+                    if identity(item) == ident:
+                        try:
+                            os.kill(item, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+            try:
+                end = time.monotonic() + args.seconds
+                while time.monotonic() < end:
+                    if args.follow_recovery:
+                        for item in pids():
+                            if item in tracked:
+                                continue
+                            ident = identity(item)
+                            command = subprocess.run(['ps', '-p', str(item), '-o', 'command='], capture_output=True, text=True).stdout
+                            if ident and ident[0] == executable and '--permission-recovery' in command:
+                                tracked[item] = ident
+                                record('recovered', pid=item, identity=ident)
+                        if len(tracked) > 3:
+                            record('restart-loop', count=len(tracked))
+                            break
+                    for item, ident in tracked.items():
+                        if item not in exited and identity(item) != ident:
+                            record('exited', pid=item)
+                            exited.add(item)
+                    if pid in exited and not args.follow_recovery:
+                        break
+                    time.sleep(0.05)
+                else:
+                    for item, ident in tracked.items():
+                        if identity(item) == ident:
+                            record('deadline.kill', pid=item)
+            finally:
+                stop_tracked()
+                record('finished', pid=pid)
     finally:
-        stop_tracked()
-        record('finished', pid=pid)
+        if pathlib.Path(trace).exists():
+            shutil.copyfile(trace, args.output / 'trace.log')

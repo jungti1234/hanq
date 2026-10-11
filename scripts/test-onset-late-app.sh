@@ -11,7 +11,8 @@ python3 scripts/prepare-app-test.py check "$record"
 if [[ -e "$output" ]]; then echo '결과 디렉터리를 덮어쓰지 않습니다.' >&2; exit 1; fi
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
-ipc=$(mktemp -d /private/tmp/hanq-late-app.XXXXXX)
+source scripts/test-workspace.sh
+ipc=$(hanq_test_stage late-app)
 printf '%s\n' "$ipc" > "$output/ipc-path.txt"
 if [[ -n "$prior" ]]; then cp "$prior" "$ipc/prior.json"; fi
 app="$ipc/LateAppFixture.app"
@@ -25,7 +26,7 @@ codesign --force --sign - "$app"
 if [[ "$mode" == --physical || "$mode" == --physical-normal ]]; then
     open -n "$app" --args "$ipc/results.json" "$mode"
 else
-    "$ipc/sender" "$ipc" > "$output/sender.log" 2>&1 &
+    (cd "$ipc"; exec ./sender "$ipc") > "$output/sender.log" 2>&1 &
     sender_pid=$!
     trap 'kill "$sender_pid" 2>/dev/null || true; wait "$sender_pid" 2>/dev/null || true' EXIT
     open -n "$app" --args "$ipc/results.json"

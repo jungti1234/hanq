@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-stage=$(mktemp -d "${TMPDIR:-/tmp}/hanq-versioning.XXXXXX")
+source scripts/test-workspace.sh
+stage=$(hanq_test_stage versioning)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/scripts"
 cp scripts/build-app.sh "$stage/scripts/"

@@ -2,7 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 sparkle=$(bash scripts/prepare-sparkle.sh)
-root="$PWD/.build/hanq/update-integration"
+source scripts/test-workspace.sh
+stage=$(hanq_test_stage update-integration)
+trap 'rm -rf "$stage"' EXIT
+root="$stage"
 mkdir -p "$root" .build/hanq/module-cache
 app="$root/HanQ Update Tests.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
@@ -19,4 +22,4 @@ ditto "$sparkle/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/UpdatePolicy.swift Tests/UpdateIntegration/fixtures.swift -o "$root/make-fixtures"
 "$root/make-fixtures" "$app"
 codesign --force --sign - "$app"
-"$app/Contents/MacOS/HanQUpdateTests" "$@"
+hanq_test_run "$app/Contents/MacOS/HanQUpdateTests" "$@"

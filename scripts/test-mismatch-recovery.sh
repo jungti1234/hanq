@@ -3,12 +3,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .build/hanq
-stage=$(mktemp -d "$PWD/.build/hanq/mismatch.XXXXXX")
+source scripts/test-workspace.sh
+stage=$(hanq_test_stage mismatch)
 trap 'rm -rf "$stage"' EXIT
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/MismatchRecovery/*.swift -o "$stage/tests"
+swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/MismatchRecovery/*.swift -o "$stage/mismatch-tests"
+mkdir -p "$stage/Tests/MismatchRecovery"
+cp Tests/MismatchRecovery/NativeLayoutExpectations.json "$stage/Tests/MismatchRecovery/"
 for mode in layouts source-timestamps select-all-boundary shortcut-source-state delivered-key-release mixed-transition delivery-progress editor-coordinates web-spaces async-snapshot fast-overwrite source-interruption snapshot-retry early-retry replay-verification release-sources app-following boundary-gate detection-only retry-exhaustion modifier-loop focus-routing field-tracking rollback; do
-    "$stage/tests" "--test-$mode"
+    hanq_test_run "$stage/mismatch-tests" "--test-$mode"
 done
-"$stage/tests" --test-product --diagnose-input "$stage/privacy.log"
+hanq_test_run "$stage/mismatch-tests" --test-product --diagnose-input "$stage/privacy.log"
 if rg -q 'PRIVATE_MISMATCH_PAYLOAD|"text"|"code"' "$stage/privacy.log"; then exit 1; fi
 rg -q 'mismatch.mismatch_confirmed' "$stage/privacy.log"

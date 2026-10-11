@@ -53,7 +53,9 @@ if [[ $process_status -eq 0 ]]; then
 fi
 mkdir -p .build/hanq/module-cache "$(dirname "$output")"
 stage=$(mktemp -d "$PWD/.build/hanq/stage.XXXXXX")
-trap 'rm -rf "$stage"' EXIT
+source scripts/test-workspace.sh
+test_stage=$(hanq_test_stage core)
+trap 'rm -rf "$stage" "$test_stage"' EXIT
 app="$stage/HanQ.app"
 runtime_resources=(HanQ.icns HanQ-MenuBar-Template.pdf HanQ-Logo.png)
 for resource in "${runtime_resources[@]}"; do
@@ -72,8 +74,10 @@ for resource in "${runtime_resources[@]}"; do
   cp "Resources/$resource" "$app/Contents/Resources/"
 done
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
-swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Tests/main.swift -o "$stage/filter-tests"
-"$stage/filter-tests"
+swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/HanjaReplacement.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/InputSourceObserver.swift Tests/main.swift -o "$test_stage/filter-tests"
+mkdir -p "$test_stage/Tests/MismatchRecovery"
+cp Tests/MismatchRecovery/NativeLayoutExpectations.json "$test_stage/Tests/MismatchRecovery/"
+(cd "$test_stage"; ./filter-tests)
 bash scripts/test-hanja-candidates.sh
 bash scripts/test-external-keyboards.sh
 bash scripts/test-input-focus.sh

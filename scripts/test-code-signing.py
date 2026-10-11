@@ -13,7 +13,7 @@ signing = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(signing)
 identity = os.environ.get('HANQ_SIGNING_IDENTITY')
 
-with tempfile.TemporaryDirectory(prefix='hanq-signing-tests-') as directory:
+with tempfile.TemporaryDirectory(prefix='hanq-signing-tests-', dir='/private/tmp') as directory:
     def fixture(name, version):
         app = Path(directory) / (name + '.app')
         (app / 'Contents/MacOS').mkdir(parents=True)

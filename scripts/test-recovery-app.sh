@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-stage=$(mktemp -d "$PWD/.build/hanq/recovery-app.XXXXXX")
+source scripts/test-workspace.sh
+stage=$(hanq_test_stage recovery-app)
 trap 'rm -rf "$stage"' EXIT
 app="$stage/HanQRecoveryTest.app"
 mkdir -p "$app/Contents/MacOS"

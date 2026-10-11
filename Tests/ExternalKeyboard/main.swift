@@ -159,6 +159,14 @@ if CommandLine.arguments.contains("--ui") {
     devices.applySnapshot([100: ext, 200: internalDevice])
     controller.canConfigure = { true }
     controller.updateMenu()
+    // The production panel refuses to capture the release of an already held
+    // key. Wait for the same prerequisite instead of reporting a missing panel.
+    let releasedBy = Date().addingTimeInterval(10)
+    func keysHeld() -> Bool {
+        (0...127).contains { CGEventSource.keyState(.combinedSessionState, key: CGKeyCode($0)) }
+    }
+    while keysHeld() && Date() < releasedBy { pump(0.05) }
+    check(!keysHeld(), "release all keyboard keys before the UI capture test")
     controller.menuItem.submenu!.performActionForItem(at: 0)
     pump(0.5)
     guard let window = NSApp.windows.first(where: { $0.title == "한Q - 외부 키보드 설정" && $0.isVisible }) else {
@@ -175,7 +183,7 @@ if CommandLine.arguments.contains("--ui") {
     content.layoutSubtreeIfNeeded()
     if let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
         content.cacheDisplay(in: content.bounds, to: rep)
-        try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: ".build/hanq/external-keyboard-setup.png"))
+        try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "external-keyboard-setup.png"))
     }
     if CommandLine.arguments.contains("--preview") {
         print("PREVIEW: setup window ready")

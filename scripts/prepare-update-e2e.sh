@@ -1,17 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-sparkle=$(bash scripts/prepare-sparkle.sh)
 mode="${1:-normal}"
 [[ "$mode" == normal || "$mode" == --required ]] || { echo 'Usage: prepare-update-e2e.sh [--required]' >&2; exit 1; }
-root="$PWD/.build/hanq/update-e2e"
-[[ "$mode" != --required ]] || root="$PWD/.build/hanq/update-required-e2e"
-root="${HANQ_UPDATE_E2E_ROOT:-$root}"
+root="/private/tmp/hanq-update-e2e-$UID"
+[[ "$mode" != --required ]] || root="/private/tmp/hanq-update-required-e2e-$UID"
+root=$(python3 scripts/test_workspace.py "${HANQ_UPDATE_E2E_ROOT:-$root}")
 [[ -f "$root/port" ]] || { echo 'Start Tests/UpdateEndToEnd/server.py first' >&2; exit 1; }
 if [[ -e "$root/installed/HanQ Update E2E.app" || -e "$root/server/update.dmg" ]]; then
-  echo 'Existing test run found. Stop the test app/server and move .build/hanq/update-e2e before starting a fresh run.' >&2
+  echo 'Existing test run found. Stop the test app/server and move the test workspace before starting a fresh run.' >&2
   exit 1
 fi
+sparkle=$(bash scripts/prepare-sparkle.sh)
 mkdir -p "$root/new" "$root/installed" "$root/server" .build/hanq/module-cache
 swiftc -parse-as-library -module-cache-path .build/hanq/module-cache Sources/HanQ/UpdatePolicy.swift Tests/UpdateEndToEnd/key.swift -o "$root/make-key"
 "$root/make-key" "$root/test-signing.key" "$root/required.json" > "$root/public-key"
