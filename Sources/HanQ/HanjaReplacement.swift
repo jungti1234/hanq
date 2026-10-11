@@ -2,8 +2,8 @@ import Foundation
 import CoreGraphics
 
 /// A narrowly matched IME append result. Never infer a deletion from a general
-/// text diff: the complete original must remain, with only Hanja added at the
-/// end of the requested Hangul range.
+/// text diff: the complete original must remain, with only Hanja or an exact
+/// copy of the source Hangul added at the end of the requested range.
 enum HanjaReplacement {
     enum Input { case confirm, navigate, cancel }
 
@@ -37,16 +37,19 @@ enum HanjaReplacement {
               after.substring(to: end).utf8.elementsEqual(before.substring(to: end).utf8),
               after.substring(from: end + addedLength).utf8.elementsEqual(before.substring(from: end).utf8) else { return nil }
         let added = after.substring(with: NSRange(location: end, length: addedLength))
-        // Require one ideograph per source syllable. Ambiguous partial-word,
-        // formatted or mixed-script output is left untouched.
-        guard added.unicodeScalars.count == hangul.unicodeScalars.count,
-              added.unicodeScalars.allSatisfy({ scalar in
+        // The native candidates can also commit the unchanged Hangul. Match
+        // that exact source, or require one ideograph per source syllable.
+        // Ambiguous partial-word, formatted or mixed-script output is untouched.
+        let isOriginal = added.utf8.elementsEqual(hangul.utf8)
+        let isHanja = added.unicodeScalars.count == hangul.unicodeScalars.count
+            && added.unicodeScalars.allSatisfy({ scalar in
                   (0x3400...0x4DBF).contains(scalar.value)
                       || (0x4E00...0x9FFF).contains(scalar.value)
                       || (0xF900...0xFAFF).contains(scalar.value)
                       || (0x20000...0x2FA1F).contains(scalar.value)
                       || (0x30000...0x323AF).contains(scalar.value)
-              }) else { return nil }
+              })
+        guard isOriginal || isHanja else { return nil }
         return Correction(range: NSRange(location: target.location, length: target.length + addedLength),
                           replacement: added)
     }

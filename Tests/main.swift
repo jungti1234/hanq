@@ -159,6 +159,32 @@ let appended = "앞 😀한국韓國 뒤"
 let fix = correction(appended, 8)
 check(fix == HanjaReplacement.Correction(range: NSRange(location: 4, length: 4), replacement: "韓國"), "exact appended Hanja detected")
 check((appended as NSString).replacingCharacters(in: fix!.range, with: fix!.replacement) == "앞 😀韓國 뒤", "append correction preserves prefix, emoji and suffix")
+for (original, target, current, caret, expected) in [
+    ("가나다", NSRange(location: 0, length: 3), "가나다가나다", 6, "가나다"),
+    (sourceText, sourceRange, "앞 😀한국한국 뒤", 8, sourceText),
+    ("가나가나", NSRange(location: 2, length: 2), "가나가나가나", 6, "가나가나"),
+    ("가", NSRange(location: 0, length: 1), "가가", 2, "가")
+] {
+    let duplicate = HanjaReplacement.correction(original: original, target: target, current: current,
+                                                 selection: NSRange(location: caret, length: 0))
+    check(duplicate == HanjaReplacement.Correction(range: NSRange(location: target.location, length: target.length * 2),
+                                                    replacement: (original as NSString).substring(with: target)),
+          "unchanged Hangul candidate append detected")
+    check(duplicate.map { (current as NSString).replacingCharacters(in: $0.range, with: $0.replacement) } == expected,
+          "Hangul candidate correction preserves surrounding and preexisting repeated text")
+    check(HanjaReplacement.correction(original: original, target: target, current: expected,
+                                     selection: NSRange(location: NSMaxRange(target), length: 0)) == nil,
+          "unchanged or corrected Hangul is not edited again")
+}
+for (value, caret) in [("앞 😀한국한국 뒤", 6), ("앞 😀한국한국 수정", 8),
+                       ("다른 😀한국한국 뒤", 9), ("앞 😀한국한 뒤", 7),
+                       ("앞 😀한국한국한국 뒤", 10), ("앞 😀한국(한국) 뒤", 10),
+                       ("앞 😀한국韓국 뒤", 8)] {
+    check(correction(value, caret) == nil, "ambiguous Hangul append or changed context untouched")
+}
+check(HanjaReplacement.correction(original: sourceText, target: sourceRange, current: "앞 😀한국한국 뒤",
+                                 selection: NSRange(location: 6, length: 2)) == nil,
+      "uncommitted Hangul candidate selection untouched")
 for (value, caret) in [(sourceText, 6), ("앞 😀韓國 뒤", 6), (appended, 6),
                        ("다른 😀한국韓國 뒤", 9), ("앞 😀한국韓國 수정", 8),
                        ("앞 😀한국ab 뒤", 8), ("앞 😀한국한글 뒤", 8),
