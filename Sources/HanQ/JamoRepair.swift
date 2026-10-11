@@ -173,15 +173,7 @@ final class JamoRepair {
               (attribute(element, kAXValueAttribute) as? String) == text,
               selection(element) == originalSelection,
               attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true else { return false }
-        var requested = CFRange(location: range.location, length: range.length)
-        guard let request = AXValueCreate(.cfRange, &requested) else { return false }
-        var result: CFTypeRef?
-        guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString,
-                                                        request, &result) == .success,
-              let result, CFGetTypeID(result) == AXValueGetTypeID(), let screen = NSScreen.screens.first else { return false }
-        var rect = CGRect.zero
-        guard AXValueGetValue(result as! AXValue, .cgRect, &rect) else { return false }
-        let anchor = NSPoint(x: rect.minX, y: screen.frame.maxY - rect.maxY - 2)
+        guard let anchor = candidateAnchor(element, range: range, text: text, selection: originalSelection) else { return false }
         candidatePanel.allowed = { [weak self] in
             self?.revision == expectedRevision && AXIsProcessTrusted() && !IsSecureEventInputEnabled()
                 && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
@@ -203,6 +195,37 @@ final class JamoRepair {
         }
         busy = false
         return false
+    }
+
+    private func parameterized(_ element: AXUIElement, _ name: String, _ parameter: CFTypeRef) -> CFTypeRef? {
+        var result: CFTypeRef?
+        return AXUIElementCopyParameterizedAttributeValue(element, name as CFString, parameter, &result) == .success
+            ? result : nil
+    }
+
+    private func candidateAnchor(_ element: AXUIElement, range: NSRange, text: String, selection: NSRange) -> NSPoint? {
+        guard let position = attribute(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
+              let size = attribute(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID(),
+              let screen = NSScreen.screens.first else { return nil }
+        var point = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+              AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else { return nil }
+        let field = CGRect(origin: point, size: dimensions)
+        func anchor(_ raw: CFTypeRef?) -> NSPoint? {
+            guard let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+            var rect = CGRect.zero
+            guard AXValueGetValue(raw as! AXValue, .cgRect, &rect) else { return nil }
+            return HanjaCandidatePanel.anchor(for: rect, in: field, primaryHeight: screen.frame.maxY)
+        }
+        var requested = CFRange(location: range.location, length: range.length)
+        if let value = AXValueCreate(.cfRange, &requested),
+           let result = anchor(parameterized(element, kAXBoundsForRangeParameterizedAttribute, value)) { return result }
+        // Rich Chromium fields can return an empty range rectangle. Their
+        // selected text marker still locates the caret without changing text.
+        guard let marker = attribute(element, "AXSelectedTextMarkerRange"),
+              let selected = parameterized(element, "AXStringForTextMarkerRange", marker) as? String,
+              selected.utf8.elementsEqual((text as NSString).substring(with: selection).utf8) else { return nil }
+        return anchor(parameterized(element, "AXBoundsForTextMarkerRange", marker))
     }
 
     /// AX selection alone does not end Chromium's marked Korean text. Commit

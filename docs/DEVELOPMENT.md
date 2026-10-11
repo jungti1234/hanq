@@ -164,6 +164,8 @@ InputSourceAccess는 현재 입력 소스 ID 조회와 지정 ID 선택만 담�
 
 `HanjaCandidatePanel.swift`는 Apple InputMethodKit 후보창을 사용하며 입력 소스를 등록하거나 선택하지 않는다. 비공개 delegate와 후보 객체 접근은 실행 중 메서드·프로토콜 계약을 확인한 뒤 사용하고, 지원하지 않는 계약은 기존 Apple 입력기 호출로 복귀한다. `HanjaCandidateSelection.swift`는 후보 순서·9개 단위 페이지와 키 대응을 관리한다. 원문 선택은 확정 전까지 유지하고, 확정 시 JamoRepair가 대상 상태를 다시 확인한다. 이전 후보창의 콜백은 새 요청에 적용하지 않는다. OS 변경 시 표시·선택·마우스 확정과 실패 복귀를 별도로 확인한다.
 
+`AXBoundsForRange`의 빈·잘못된 좌표를 거부하고 실제 입력칸 범위와 대조한다. Chromium의 contenteditable에서 직접 범위 좌표를 제공하지 않는 경우 `AXSelectedTextMarkerRange`·`AXBoundsForTextMarkerRange`를 사용하며 선택 문자열도 대조한다. 0너비 커서는 양수 줄 높이가 있는 경우에만 허용한다. 위치 조회 중 본문·선택을 바꾸지 않으며 조회 실패는 기존 후보창 호출로 복귀한다.
+
 `bash scripts/test-hanja-candidates.sh`는 실제 기본 사전과 격리된 사용자 사전으로 목록·빈 결과·원문 제외·파일 보존·조회 실패를 검사한다. 별도 서명 시험 앱에서 제품의 Apple 후보창·delegate와 숫자·방향키·페이지·취소·키 놓음·마우스 전달·이전 콜백 차단을 검사하며 입력 소스 등록·전환이 없는지도 대조한다. OS에 키를 전송하지 않는다. 전체 빌드에 포함되며 설치 앱의 전역 입력 경로·물리 한자키 확인과 구분한다.
 
 후보 확정은 AX 선택만으로 조합이 끝났다고 가정하지 않는다. 편집기에 오른쪽 방향키를 전달한 뒤 같은 본문·포커스·입력 소스와 안정된 커서를 확인하고 대상 범위를 선택한다. 후보창은 Apple 제공 목록의 실제 내용 크기에 맞춰 조정한다. TextEdit와 Chromium의 textarea·contenteditable에서 조합 직후 확정과 중복 입력을 별도로 확인한다.

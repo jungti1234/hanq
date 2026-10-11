@@ -37,6 +37,17 @@ final class Fixture {
     }
 }
 func runChecks() {
+let field = CGRect(x: 400, y: 650, width: 600, height: 150)
+check(HanjaCandidatePanel.anchor(for: CGRect(x: 420, y: 670, width: 30, height: 20), in: field, primaryHeight: 900) == NSPoint(x: 420, y: 208),
+    "range location uses the editor's actual text line")
+check(HanjaCandidatePanel.anchor(for: CGRect(x: 450, y: 670, width: 0, height: 20), in: field, primaryHeight: 900) == NSPoint(x: 450, y: 208),
+    "zero-width selected text marker caret retains a valid line location")
+check(HanjaCandidatePanel.anchor(for: CGRect(x: 0, y: 900, width: 0, height: 0), in: field, primaryHeight: 900) == nil,
+    "empty Chromium range reply cannot put candidates at the lower-left screen corner")
+check(HanjaCandidatePanel.anchor(for: CGRect(x: 0, y: 0, width: 10, height: 20), in: field, primaryHeight: 900) == nil,
+    "range outside the focused input field is rejected")
+check(HanjaCandidatePanel.anchor(for: CGRect(x: 420, y: 670, width: 10, height: CGFloat.infinity), in: field, primaryHeight: 900) == nil,
+    "non-finite text bounds are rejected")
 func sourceIDs() -> Set<String> {
     let sources = TISCreateInputSourceList(nil, true).takeRetainedValue() as! [TISInputSource]
     return Set(sources.compactMap { source in

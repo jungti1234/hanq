@@ -24,6 +24,17 @@ final class HanjaCandidatePanel: NSObject {
     var onCommit: ((String) -> Void)?
     var onCancel: (() -> Void)?
 
+    /// Reject empty/default AX replies instead of placing a panel at a screen
+    /// corner. A zero-width caret is valid only with a real line height.
+    static func anchor(for rect: CGRect, in field: CGRect, primaryHeight: CGFloat) -> NSPoint? {
+        guard [rect.minX, rect.minY, rect.width, rect.height, field.minX, field.minY,
+               field.width, field.height, primaryHeight].allSatisfy(\.isFinite),
+              rect.width >= 0, rect.height > 0, field.width > 0, field.height > 0,
+              rect.minX >= field.minX - 1, rect.minX <= field.maxX + 1,
+              rect.maxY > field.minY, rect.minY < field.maxY else { return nil }
+        return NSPoint(x: rect.minX, y: primaryHeight - rect.maxY - 2)
+    }
+
     private static func signature(_ types: String) -> String { types.filter { !$0.isNumber } }
     private static func method(_ cls: AnyClass, _ name: String, _ types: String) -> Bool {
         guard let method = class_getInstanceMethod(cls, NSSelectorFromString(name)),
