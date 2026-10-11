@@ -145,6 +145,8 @@ InputSourceAccess는 현재 입력 소스 ID 조회와 지정 ID 선택만 담�
 
 `bash scripts/test-external-keyboards.sh`는 임시 UserDefaults와 합성 이벤트로 기기 식별·설정 보존·두 키 등록·반복·놓음·기기 분리·다른 키보드 modifier 보존을 검사한다. `--inventory`는 실제 IORegistry에서 읽은 키보드 서비스 개수만 출력한다. `--ui`는 별도 테스트 프로세스에서 실제 설정 창을 열고 저장·취소·분리 경로를 확인하며 `.build/hanq/external-keyboard-setup.png`를 생성한다. 전역 이벤트 탭과 실제 한Q 설정은 사용하지 않는다.
 
+화면 검사는 macOS의 키 상태 조회에 눌린 키가 없을 때만 시작한다. 최대 10초 동안 기다린 뒤에도 눌림이 보고되면 오류로 종료하며, 화면 검사·이미지 생성을 통과로 세지 않는다. 조회값만으로 사용자가 실제 키를 누르고 있다고 단정하지 않는다. 이미지가 남아 있어도 이전 실행의 산출물일 수 있으므로 현재 실행의 성공 여부를 함께 확인한다.
+
 구현은 `ExternalKeyboardModel.swift`(식별·설정·키 상태), `ExternalKeyboardDevices.swift`(읽기 전용 기기 알림·비공개 이벤트 기기 필드), `ExternalKeyboardController.swift`(확인 흐름·기기별 처리), `ExternalKeyboardSetupView.swift`(확인 창 레이아웃)에 나뉜다. Quartz 비공개 필드 87의 값은 현재 키보드 서비스 목록과 정확히 일치할 때만 사용한다. 필드의 지속 지원이나 실제 키보드 입력과의 연결은 자동 검사로 보증하지 않는다.
 
 실물에서는 USB/Bluetooth 최초 연결·기연결 시작·다시 연결·앱 재시작·내장/외장 번갈아 입력·포커스 변경·물리 한영/한자키·동일 모델 두 대·외부 매핑 앱·잠자기·보안 입력을 확인한다. 일련번호가 없는 기기의 포트 변경과 연결 방식 변경은 새 기기 등록이 필요할 수 있다. 연결 위치마저 없는 기기는 재연결 시 다시 등록한다.
