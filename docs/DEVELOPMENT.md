@@ -199,6 +199,10 @@ KeyboardStateMirror는 소비한 키를 별도 표식의 새 상태 전용 이�
 
 `bash scripts/test-keyboard-state-mirror.sh`는 전역 전송 없이 표식 소유·원래 flags·종료 및 시험 도구의 누름 목록을 검사한다. `bash scripts/test-keyboard-state-native.sh <새-결과-디렉터리>`는 별도 시험 창 두 개에서 고정된 L·Shift만 전송하여 HID/세션 소비, 원래 앱의 반복·놓음, SIGTERM·포커스 이동 중단을 검사한다. 두 전역 키 상태와 각 창의 수신을 함께 확인하며 사용자 입력은 기록하지 않는다. 시험 도구는 실제 전송한 누름만 역순으로 정리하고 활성 앱 조회 전에 run loop를 처리한다. 종료된 수신 앱에는 보내지 않는다. SIGKILL·프로세스 충돌·전송 권한 상실은 정상 정리 절차로 보장할 수 없다. 실제 물리 키·외부 기기 검증과 구분한다.
 
+`bash scripts/test-keyboard-state-physical.sh <권한-record.json> <새-결과-디렉터리>`는 실행 중인 후보에서 사람이 L 단발·반복, 우측 Command의 양방향 전환, 우측 Option의 선택 영타 변환, 각 우측 키를 누른 채 L 입력을 확인하는 7단계 도구다. 전역 이벤트 탭·OS 키 합성·키 상태 초기화 없이 시험 창의 고정 키 수신과 Quartz 상태를 관측한다. 문자 키는 keyState, 우측 modifier는 SDK의 좌우 flags로 누름·놓음을 확인하고 최종 키 상태도 대조한다. 시험 창은 표준 편집 메뉴와 선택 범위를 준비하며 실제 변환 결과를 최대 3초 동안 기다린다.
+
+세 번째 인자로 이전 결과를 주면 동일 후보에서 성공한 앞의 최대 4단계를 이어받고 실패·미실행 단계는 다시 검사한다. `--verify-editor`를 세 번째 인자로 주면 물리 입력 없이 로컬 AppKit 붙여넣기 단축키의 메뉴 유무·실제 대치를 비교하며 임시 클립보드와 입력 소스를 복원한다. 이 자체 검사는 물리 입력 통과로 세지 않는다. 실행 파일·IPC는 공통 임시 시험 폴더에 두고 결과는 터미널이 복사한다. 종료 시 입력 소스를 복원하며, 실물 외장 키보드·다른 앱의 확인과 구분한다.
+
 ## 첫 자음 조합 보정 개발
 
 `OnsetRecoveryController.swift`가 대상 앱과 한Q 입력 수명을 연결하고, `OnsetRecoveryEngine.swift`와 `OnsetInputGate.swift`가 보정·입력 대기를 담당한다. 실험 도구의 입력 로그와 UI는 제품에 포함하지 않는다. `bash scripts/test-onset-recovery.sh`는 실제 키 전송 없이 제품 엔진의 선택 대체·선택 해제 지연·선택 재시도·입력 순서·실패 복원을 검사한다. AppKit 검사는 제한된 실행 샌드박스 밖에서 수행한다. 실제 검증 시 독립 OnsetRecoveryProbe를 먼저 종료하여 두 보정기가 겹치지 않게 한다.
