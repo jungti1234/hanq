@@ -26,9 +26,10 @@ final class MismatchSwitchGate {
         return result.consume ? nil:Unmanaged.passUnretained(event)
     }
     func start()->Bool {
+        guard KeyboardStateMirror.shared.start() else{return false}
         let mask:CGEventMask=[CGEventType.flagsChanged,.keyDown,.keyUp].reduce(0){$0 | (1 << $1.rawValue)}
         tap=CGEvent.tapCreate(tap:.cghidEventTap,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
-            Unmanaged<MismatchSwitchGate>.fromOpaque(ref!).takeUnretainedValue().receive(type,event)
+            KeyboardStateMirror.shared.preserve(type,event) { Unmanaged<MismatchSwitchGate>.fromOpaque(ref!).takeUnretainedValue().receive(type,event) }
         },userInfo:Unmanaged.passUnretained(self).toOpaque())
         guard let tap else{return false}
         runSource=CFMachPortCreateRunLoopSource(nil,tap,0)

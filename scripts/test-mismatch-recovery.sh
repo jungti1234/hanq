@@ -6,7 +6,7 @@ mkdir -p .build/hanq
 source scripts/test-workspace.sh
 stage=$(hanq_test_stage mismatch)
 trap 'rm -rf "$stage"' EXIT
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/MismatchRecovery/*.swift -o "$stage/mismatch-tests"
+swiftc Sources/HanQ/KeyboardStateMirror.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/MismatchRecovery/*.swift -o "$stage/mismatch-tests"
 mkdir -p "$stage/Tests/MismatchRecovery"
 cp Tests/MismatchRecovery/NativeLayoutExpectations.json "$stage/Tests/MismatchRecovery/"
 for mode in layouts source-timestamps select-all-boundary shortcut-source-state delivered-key-release mixed-transition delivery-progress editor-coordinates web-spaces async-snapshot fast-overwrite source-interruption snapshot-retry early-retry replay-verification release-sources app-following boundary-gate detection-only retry-exhaustion modifier-loop focus-routing field-tracking rollback; do

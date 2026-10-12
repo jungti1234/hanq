@@ -193,6 +193,12 @@ Caps Lock 전환 설정의 비공개 HIToolbox API 호출은 `RomanSwitchControl
 
 InputDeliveryOrigin은 별도 HID 탭에서 원래 활성 앱 대상을 기록하고 주 입력 처리 전후에 앱 전환을 확인한다. 불일치 보정의 HID 언어 의도와 같은 식별자를 유지하며, 직접 전달된 원래 키의 이력은 한 번 소비한다. 불일치 게이트 재시작 뒤에는 원래 대상 관측을 앞단에 다시 설치한다. `bash scripts/test-input-delivery-origin.sh`는 실제 키 전송 없이 이벤트 시각 변경·대상 변경·중복 소비·패널·합성 표식·만료·수명 해제를 검사한다. 대상 PID 지정 필드만 바꾸는 것으로 실제 전달 대상을 고정했다고 가정하지 않는다. 실제 지연·앱 전환·기본 IME와 누름·놓음 수신 검사는 별도로 수행한다.
 
+원래 앱으로 직접 전달한 누름은 기기·키·생산 프로세스별로 반복과 놓음의 수신 앱을 유지한다. HID 앞단에서 대응 놓음을 처리하여 뒤의 보정기·후보창이 다시 소비하지 않게 한다. 종료된 앱의 PID를 새 프로세스에 재사용하지 않으며, 놓음과 감시 종료 시 소유 이력을 정리한다. 백그라운드 앱에 보낸 반복 누름은 일반 keyDown으로 전달하고 횟수·순서를 보존한다.
+
+KeyboardStateMirror는 소비한 키를 별도 표식의 새 상태 전용 이벤트로 대체하여 Quartz의 HID·세션 키 상태를 갱신한 뒤 annotated session 경계에서 폐기한다. 입력 대상에 같은 문자를 다시 전달하지 않으며 원래 modifier flags를 보존한다. 경계 시작에 실패하면 입력 소비를 시작하지 않고, 경계가 중단되면 전체 입력 감시를 중지한다. 종료 시 이미 처리 중인 상태 이벤트를 제한된 시간 동안 정리한다.
+
+`bash scripts/test-keyboard-state-mirror.sh`는 전역 전송 없이 표식 소유·원래 flags·종료 및 시험 도구의 누름 목록을 검사한다. `bash scripts/test-keyboard-state-native.sh <새-결과-디렉터리>`는 별도 시험 창 두 개에서 고정된 L·Shift만 전송하여 HID/세션 소비, 원래 앱의 반복·놓음, SIGTERM·포커스 이동 중단을 검사한다. 두 전역 키 상태와 각 창의 수신을 함께 확인하며 사용자 입력은 기록하지 않는다. 시험 도구는 실제 전송한 누름만 역순으로 정리하고 활성 앱 조회 전에 run loop를 처리한다. 종료된 수신 앱에는 보내지 않는다. SIGKILL·프로세스 충돌·전송 권한 상실은 정상 정리 절차로 보장할 수 없다. 실제 물리 키·외부 기기 검증과 구분한다.
+
 ## 첫 자음 조합 보정 개발
 
 `OnsetRecoveryController.swift`가 대상 앱과 한Q 입력 수명을 연결하고, `OnsetRecoveryEngine.swift`와 `OnsetInputGate.swift`가 보정·입력 대기를 담당한다. 실험 도구의 입력 로그와 UI는 제품에 포함하지 않는다. `bash scripts/test-onset-recovery.sh`는 실제 키 전송 없이 제품 엔진의 선택 대체·선택 해제 지연·선택 재시도·입력 순서·실패 복원을 검사한다. AppKit 검사는 제한된 실행 샌드박스 밖에서 수행한다. 실제 검증 시 독립 OnsetRecoveryProbe를 먼저 종료하여 두 보정기가 겹치지 않게 한다.

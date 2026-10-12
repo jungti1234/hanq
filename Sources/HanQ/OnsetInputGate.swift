@@ -287,10 +287,11 @@ final class OnsetGateThread {
     var thread:Thread?
     init(_ gate:OnsetInputGate){self.gate=gate}
     func start(){
+        guard KeyboardStateMirror.shared.start() else {gate.stop();gate.failed?("state_boundary_failed");return}
         let worker=Thread{[self] in
             let mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}
             guard let tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.tailAppendEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
-                Unmanaged<OnsetInputGate>.fromOpaque(ref!).takeUnretainedValue().receive(type,event)
+                KeyboardStateMirror.shared.preserve(type,event) { Unmanaged<OnsetInputGate>.fromOpaque(ref!).takeUnretainedValue().receive(type,event) }
             },userInfo:Unmanaged.passUnretained(gate).toOpaque()) else{
                 gate.stop();DispatchQueue.main.async{self.gate.failed?("tap_create_failed")};return
             }

@@ -960,11 +960,12 @@ final class MismatchRecoveryEngine:NSObject {
     }
     func start(){
         guard !enabled,tap==nil,!suspended,retained.isEmpty,AXIsProcessTrusted() else{return}
+        guard KeyboardStateMirror.shared.start() else{log("state_boundary_failed");return}
         followsFrontmost=true;target=nil;ax=nil
         let mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}
         tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.tailAppendEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
             let owner=Unmanaged<MismatchRecoveryEngine>.fromOpaque(ref!).takeUnretainedValue()
-            return owner.event(type,event)
+            return KeyboardStateMirror.shared.preserve(type,event) {owner.event(type,event)}
         },userInfo:Unmanaged.passUnretained(self).toOpaque())
         guard let tap else{log("start_failed");return}
         runSource=CFMachPortCreateRunLoopSource(kCFAllocatorDefault,tap,0)

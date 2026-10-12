@@ -21,7 +21,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>LateAppFixture</string><key>CFBundleIdentifier</key><string>taek.in.hanq.late-layout-fixture</string><key>CFBundleName</key><string>LateAppFixture</string><key>NSPrincipalClass</key><string>NSApplication</string></dict></plist>
 PLIST
 swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/InputSourceAccess.swift Tests/OnsetRecovery/LateLayoutCases.swift Tests/OnsetRecovery/LateApp/main.swift -o "$app/Contents/MacOS/LateAppFixture"
-swiftc -module-cache-path .build/hanq/module-cache Tests/OnsetRecovery/LateApp/sender.swift -o "$ipc/sender"
+swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/KeyboardStateMirror.swift Tests/OnsetRecovery/LateApp/PostedKeys.swift Tests/OnsetRecovery/LateApp/sender.swift -o "$ipc/sender"
 codesign --force --sign - "$app"
 if [[ "$mode" == --physical || "$mode" == --physical-normal ]]; then
     open -n "$app" --args "$ipc/results.json" "$mode"

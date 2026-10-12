@@ -424,6 +424,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         if tap == nil {
+            KeyboardStateMirror.shared.failed = { [weak self] in self?.stopMapping() }
+            guard KeyboardStateMirror.shared.start() else {
+                status.stringValue = "키 상태 감지 시작 실패 — 손쉬운 사용 권한을 확인하세요."; return
+            }
             let mask = (CGEventMask(1) << CGEventType.flagsChanged.rawValue)
                 | (CGEventMask(1) << CGEventType.keyDown.rawValue)
                 | (CGEventMask(1) << CGEventType.keyUp.rawValue)
@@ -432,108 +436,111 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 | (CGEventMask(1) << CGEventType.otherMouseDown.rawValue)
             let callback: CGEventTapCallBack = { proxy, type, event, context in
                 let owner = Unmanaged<AppDelegate>.fromOpaque(context!).takeUnretainedValue()
-                owner.diagnosticEventCount += 1
-                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    // Never re-enable a tap that macOS disabled. Release the input
-                    // path before doing UI or permission work on the main run loop.
-                    InputDiagnostics.shared.record("tap.disabled type=\(type.rawValue)")
-                    owner.enabled = false
-                    owner.koreanEnabled = false
-                    owner.hanjaEnabled = false
-                    owner.pendingActivation = false
-                    NSLog("입력 감지 중단: %u; 콜백 반환 후 해제", type.rawValue)
-                    DispatchQueue.main.async {
-                        owner.stopMapping()
-                        owner.updatePermission()
+                func process() -> Unmanaged<CGEvent>? {
+                    owner.diagnosticEventCount += 1
+                    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                        // Never re-enable a tap that macOS disabled. Release the input
+                        // path before doing UI or permission work on the main run loop.
+                        InputDiagnostics.shared.record("tap.disabled type=\(type.rawValue)")
+                        owner.enabled = false
+                        owner.koreanEnabled = false
+                        owner.hanjaEnabled = false
+                        owner.pendingActivation = false
+                        NSLog("입력 감지 중단: %u; 콜백 반환 후 해제", type.rawValue)
+                        DispatchQueue.main.async {
+                            owner.stopMapping()
+                            owner.updatePermission()
+                        }
+                        return Unmanaged.passUnretained(event)
                     }
-                    return Unmanaged.passUnretained(event)
-                }
-                guard owner.permissionGranted && !owner.updateRestricted else {
-                    owner.enabled = false
-                    DispatchQueue.main.async { owner.stopMapping() }
-                    return Unmanaged.passUnretained(event)
-                }
-                if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) {
-                    return Unmanaged.passUnretained(event)
-                }
-                let originalRecipient=owner.inputDeliveryOrigin?.take(type,event)
-                switch owner.jamoRepair.receiveCandidates(type, event) {
-                case .consumed: return nil
-                case .panelMouse: return Unmanaged.passUnretained(event)
-                case .normal: break
-                }
-                func forwardOriginalIfMoved()->Bool {
-                    guard let routing=owner.inputDeliveryOrigin else{return false}
-                    let token=event.getIntegerValueField(.eventSourceUserData)
-                    guard routing.forwardIfMoved(event,origin:originalRecipient) else{return false}
-                    owner.onsetRecovery.engine?.cancelDeferredObservation()
-                    owner.mismatchRecovery.engine.discardEventOrigin(token)
-                    if owner.sourceSwitchBarrier.busy {owner.sourceSwitchBarrier.fail("recipient_changed")}
-                    else {owner.sourceSwitchBarrier.resetObservation()}
-                    if !owner.mismatchRecovery.busy {owner.mismatchRecovery.engine.cancelDetection()}
-                    InputDiagnostics.shared.record("input.original_recipient_preserved")
-                    return true
-                }
-                if forwardOriginalIfMoved(){return nil}
-                if !owner.sourceSwitchBarrier.busy {
-                    owner.onsetRecovery.engine?.observeDeferredBeforeInput(type,event)
-                }else{owner.onsetRecovery.engine?.cancelDeferredObservation()}
-                if owner.sourceSwitchBarrier.receive(type,event) { return nil }
-                if [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
-                    owner.jamoRepair.inputDidChange(type: type, key: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
-                }
-                let active = owner.enabled && !IsSecureEventInputEnabled()
-                let key = event.getIntegerValueField(.keyboardEventKeycode)
-                let snapshot = owner.externalKeyboards.wantsInputSource(type: type, event: event)
-                    ? InputSourceSnapshot.read() : nil
-                let externalTarget = active && owner.koreanEnabled && snapshot != nil ? KoreanEnglishSwitch.target(for: snapshot) : nil
-                let external = owner.externalKeyboards.process(type: type, event: event, active: active,
-                    koreanAllowed: externalTarget != nil, hanjaAllowed: owner.hanjaEnabled)
-                if external.korean, let externalTarget {
-                    let selection = owner.switchInputSource(to: externalTarget, at: event.timestamp)
-                    DispatchQueue.main.async {
-                        owner.inputSource.refresh()
-                        if selection != 0 { NSLog("입력 소스 전환 실패: %d", selection) }
+                    guard owner.permissionGranted && !owner.updateRestricted else {
+                        owner.enabled = false
+                        DispatchQueue.main.async { owner.stopMapping() }
+                        return Unmanaged.passUnretained(event)
                     }
-                }
-                if external.hanja {
-                    owner.jamoRepair.request(allowHanja: snapshot.map {
-                        $0.isKorean && $0.id.hasPrefix("com.apple.inputmethod.Korean.")
-                    } == true)
-                }
-                if external.consume { return nil }
-                event.flags = external.flags
-                let legacyKey = external.handled ? Int64(-1) : key
-                let target = active && !external.handled && owner.koreanEnabled && type == .flagsChanged && key == 54
-                    ? KoreanEnglishSwitch.target(for: InputSourceSnapshot.read()) : nil
-                let result = owner.filter.process(type: type,
-                    key: legacyKey,
-                    flags: event.flags, acceptNewPress: active && target != nil)
-                if let edge = result.edge {
-                    if edge == "right-down" {
-                        if let target {
-                            let result = owner.switchInputSource(to: target, at: event.timestamp)
-                            DispatchQueue.main.async {
-                                owner.inputSource.refresh()
-                                if result != 0 { NSLog("입력 소스 전환 실패: %d", result) }
-                            }
+                    if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) {
+                        return Unmanaged.passUnretained(event)
+                    }
+                    let originalRecipient=owner.inputDeliveryOrigin?.take(type,event)
+                    func forwardOriginalIfMoved()->Bool {
+                        guard let routing=owner.inputDeliveryOrigin else{return false}
+                        let token=event.getIntegerValueField(.eventSourceUserData)
+                        guard routing.forwardIfMoved(event,origin:originalRecipient) else{return false}
+                        owner.onsetRecovery.engine?.cancelDeferredObservation()
+                        owner.mismatchRecovery.engine.discardEventOrigin(token)
+                        if owner.sourceSwitchBarrier.busy {owner.sourceSwitchBarrier.fail("recipient_changed")}
+                        else {owner.sourceSwitchBarrier.resetObservation()}
+                        if !owner.mismatchRecovery.busy {owner.mismatchRecovery.engine.cancelDetection()}
+                        InputDiagnostics.shared.record("input.original_recipient_preserved")
+                        return true
+                    }
+                    if forwardOriginalIfMoved(){return nil}
+                    switch owner.jamoRepair.receiveCandidates(type, event) {
+                    case .consumed: return nil
+                    case .panelMouse: return Unmanaged.passUnretained(event)
+                    case .normal: break
+                    }
+                    if !owner.sourceSwitchBarrier.busy {
+                        owner.onsetRecovery.engine?.observeDeferredBeforeInput(type,event)
+                    }else{owner.onsetRecovery.engine?.cancelDeferredObservation()}
+                    if owner.sourceSwitchBarrier.receive(type,event) { return nil }
+                    if [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
+                        owner.jamoRepair.inputDidChange(type: type, key: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
+                    }
+                    let active = owner.enabled && !IsSecureEventInputEnabled()
+                    let key = event.getIntegerValueField(.keyboardEventKeycode)
+                    let snapshot = owner.externalKeyboards.wantsInputSource(type: type, event: event)
+                        ? InputSourceSnapshot.read() : nil
+                    let externalTarget = active && owner.koreanEnabled && snapshot != nil ? KoreanEnglishSwitch.target(for: snapshot) : nil
+                    let external = owner.externalKeyboards.process(type: type, event: event, active: active,
+                        koreanAllowed: externalTarget != nil, hanjaAllowed: owner.hanjaEnabled)
+                    if external.korean, let externalTarget {
+                        let selection = owner.switchInputSource(to: externalTarget, at: event.timestamp)
+                        DispatchQueue.main.async {
+                            owner.inputSource.refresh()
+                            if selection != 0 { NSLog("입력 소스 전환 실패: %d", selection) }
                         }
                     }
-                    owner.refreshStatus()
+                    if external.hanja {
+                        owner.jamoRepair.request(allowHanja: snapshot.map {
+                            $0.isKorean && $0.id.hasPrefix("com.apple.inputmethod.Korean.")
+                        } == true)
+                    }
+                    if external.consume { return nil }
+                    event.flags = external.flags
+                    let legacyKey = external.handled ? Int64(-1) : key
+                    let target = active && !external.handled && owner.koreanEnabled && type == .flagsChanged && key == 54
+                        ? KoreanEnglishSwitch.target(for: InputSourceSnapshot.read()) : nil
+                    let result = owner.filter.process(type: type,
+                        key: legacyKey,
+                        flags: event.flags, acceptNewPress: active && target != nil)
+                    if let edge = result.edge {
+                        if edge == "right-down" {
+                            if let target {
+                                let result = owner.switchInputSource(to: target, at: event.timestamp)
+                                DispatchQueue.main.async {
+                                    owner.inputSource.refresh()
+                                    if result != 0 { NSLog("입력 소스 전환 실패: %d", result) }
+                                }
+                            }
+                        }
+                        owner.refreshStatus()
+                    }
+                    let isKorean = active && !external.handled && owner.hanjaEnabled && type == .flagsChanged && key == 61
+                        && InputSourceSnapshot.read().map { $0.isKorean && $0.id.hasPrefix("com.apple.inputmethod.Korean.") } == true
+                    let option = owner.optionFilter.process(type: type, key: legacyKey,
+                        flags: result.flags, acceptNewPress: active && !external.handled && owner.hanjaEnabled && result.flags.intersection([.maskCommand, .maskControl, .maskShift]).isEmpty)
+                    if option.edge == "right-up", active && owner.hanjaEnabled {
+                        owner.jamoRepair.request(allowHanja: isKorean)
+                    }
+                    if result.consume || option.consume { return nil }
+                    event.flags = option.flags
+                    owner.sourceSwitchBarrier.observeBeforeOnset(type,event,waiting:
+                        owner.onsetRecovery.engine?.gate?.hasActiveReplayHold() == true)
+                    if forwardOriginalIfMoved(){return nil}
+                    return Unmanaged.passUnretained(event)
                 }
-                let isKorean = active && !external.handled && owner.hanjaEnabled && type == .flagsChanged && key == 61
-                    && InputSourceSnapshot.read().map { $0.isKorean && $0.id.hasPrefix("com.apple.inputmethod.Korean.") } == true
-                let option = owner.optionFilter.process(type: type, key: legacyKey,
-                    flags: result.flags, acceptNewPress: active && !external.handled && owner.hanjaEnabled && result.flags.intersection([.maskCommand, .maskControl, .maskShift]).isEmpty)
-                if option.edge == "right-up", active && owner.hanjaEnabled {
-                    owner.jamoRepair.request(allowHanja: isKorean)
-                }
-                if result.consume || option.consume { return nil }
-                event.flags = option.flags
-                owner.sourceSwitchBarrier.observeBeforeOnset(type,event,waiting:
-                    owner.onsetRecovery.engine?.gate?.hasActiveReplayHold() == true)
-                if forwardOriginalIfMoved(){return nil}
-                return Unmanaged.passUnretained(event)
+                return KeyboardStateMirror.shared.preserve(type,event,process:process)
             }
             inputSafety.arm()
             InputDiagnostics.shared.record("tap.create.begin")
@@ -542,6 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 userInfo: Unmanaged.passUnretained(self).toOpaque())
             InputDiagnostics.shared.record("tap.create.end present=\(tap != nil)")
             guard let tap else {
+                KeyboardStateMirror.shared.stop()
                 inputSafety.disarm()
                 status.stringValue = "감지 시작 실패 — 손쉬운 사용 권한을 확인하세요."
                 return
@@ -593,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         optionFilter = CommandFilter(keyCode: 61, left: 0x20, right: 0x40, aggregate: .maskAlternate)
         jamoRepair.stop()
         externalKeyboards.stop()
+        KeyboardStateMirror.shared.stop()
         InputDiagnostics.shared.record("tap.stop.end")
     }
 
