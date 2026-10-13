@@ -7,7 +7,7 @@
 
 ### 다음 릴리스 문서 준비
 
-다음 후보는 `version.env`의 0.3.1-beta.1(빌드 185)이며 아직 미배포다. [릴리스 노트 초안](releases/0.3.1-beta.1.md)과 [업데이트 창용 HTML](../updates/site/release-notes/0.3.1-beta.1.html)은 같은 사용자 안내를 담는다. 후보 버전·빌드가 바뀌면 이 문단과 변경 이력을 함께 맞춘다.
+다음 후보는 `version.env`의 0.3.1-beta.1(빌드 199)이며 아직 미배포다. [릴리스 노트 초안](releases/0.3.1-beta.1.md)과 [업데이트 창용 HTML](../updates/site/release-notes/0.3.1-beta.1.html)은 같은 사용자 안내를 담는다. 후보 버전·빌드가 바뀌면 이 문단과 변경 이력을 함께 맞춘다.
 
 | 문서 | 준비 상태와 공개 시 갱신 항목 |
 | --- | --- |
