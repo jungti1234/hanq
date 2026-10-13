@@ -21,13 +21,13 @@ enum MismatchTextReader {
     }
     static func isBoundaryResponse(_ error:AXError)->Bool { error == .illegalArgument || error == .noValue }
     struct Content { let text:String;let selectedText:String? }
-    static func resolve(value:String,selection:NSRange,read:(NSRange)->String?)->String? {
+    static func resolve(value:String,selection:NSRange,unavailable:()->Bool={false},read:(NSRange)->String?)->String? {
         let upper=value.utf16.count
         guard selection.location>=0,selection.length>=0,selection.location<=upper,
               selection.length<=upper-selection.location else{return nil}
         var invalidLength=false
         func exact(_ range:NSRange)->String? {
-            guard let s=read(range) else{return nil}
+            guard !invalidLength,!unavailable(),let s=read(range),!unavailable() else{return nil}
             guard s.utf16.count==range.length else{invalidLength=true;return nil}
             return s
         }
@@ -53,7 +53,7 @@ enum MismatchTextReader {
     }
     static func read(_ element:AXUIElement,value:String,selection:NSRange)->Content? {
         var unsupported=false,failed=false
-        let text=resolve(value:value,selection:selection){ r in
+        let text=resolve(value:value,selection:selection,unavailable:{unsupported || failed}){ r in
             var cf=CFRange(location:r.location,length:r.length)
             guard let arg=AXValueCreate(.cfRange,&cf) else{return nil}
             var raw:CFTypeRef?

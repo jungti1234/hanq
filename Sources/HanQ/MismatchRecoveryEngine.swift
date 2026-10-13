@@ -46,6 +46,7 @@ final class MismatchRecoveryEngine:NSObject {
     var recoverySourceID=mismatchKoreanID
     var intendedSource=mismatchKoreanID
     var pendingSources:[Int64:String]=[:]
+    var pendingTimestamps:[Int64:CGEventTimestamp]=[:]
     // Queue identity must not depend on mutable CGEvent source user data.
     var bufferedIdentities:[ObjectIdentifier:Int64]=[:]
     func bufferedID(_ event:CGEvent)->Int64 { bufferedIdentities[ObjectIdentifier(event)] ?? event.getIntegerValueField(.eventSourceUserData) }
@@ -55,6 +56,7 @@ final class MismatchRecoveryEngine:NSObject {
     private var nextOrigin:Int64=0
     var willForwardEvent:(CGEventType,CGEvent)->Void = {_,_ in}
     @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent)->Int64? {
+        if recovering{observeRecoverySource(currentSource(),at:event.timestamp)}
         let incoming=event.getIntegerValueField(.eventSourceUserData)
         guard type == .keyDown || type == .keyUp,
               incoming==0 || InputDeliveryOrigin.isMarker(incoming) else{return nil}
@@ -82,11 +84,33 @@ final class MismatchRecoveryEngine:NSObject {
         guard timestamp>0,!recoverySourceBoundaries.isEmpty else{return intendedSource}
         return recoverySourceBoundaries.last(where:{$0.timestamp<=timestamp})?.source ?? recoverySourceID
     }
+    // Caps source acknowledgement can arrive after later physical keys have
+    // already been queued. Reassign only undelivered keys from the proved raw
+    // boundary, keeping releases paired with their original press.
+    func applyConfirmedCapsBoundary(at timestamp:CGEventTimestamp) {
+        guard timestamp>0 else{return}
+        for (token,value) in eventOrigins where value.type == .keyDown && value.timestamp>=timestamp {
+            eventOrigins[token]=EventOrigin(timestamp:value.timestamp,source:intendedSource(at:value.timestamp),code:value.code,type:value.type)
+        }
+        var presses:[Int64:String]=[:]
+        for event in pending {
+            let id=bufferedID(event),code=event.getIntegerValueField(.keyboardEventKeycode)
+            if event.type == .keyDown {
+                let time=pendingTimestamps[id] ?? 0
+                if time>=timestamp{pendingSources[id]=intendedSource(at:time)}
+                if let source=pendingSources[id] {
+                    presses[code]=source
+                    if keyDownSources[code] != nil{keyDownSources[code]=source}
+                }
+            }else if event.type == .keyUp,let source=presses.removeValue(forKey:code) {
+                pendingSources[id]=source
+            }
+        }
+    }
     func userToggleDuringRecovery(at timestamp:CGEventTimestamp=0){
         guard recovering else{return}
         noteUserSourceSwitch(at:timestamp)
-        intendedSource=intendedSource==recoverySourceID ? englishID:recoverySourceID
-        if timestamp>0{recoverySourceBoundaries.append((timestamp,intendedSource))}
+        setUserSourceIntent(toggledUserSource(intendedSource),at:timestamp)
         log("user_source_boundary",["source":intendedSource,"afterBufferedID":nextBufferedID,"origin":"right_command"])
     }
     var runSource:CFRunLoopSource?
@@ -126,6 +150,7 @@ final class MismatchRecoveryEngine:NSObject {
             let start=ProcessInfo.processInfo.systemUptime
             if self.traceLatency{self.log("callback_started",["id":id,"line":line,"scheduledUptime":scheduled,"dueUptime":scheduled+delay,"startUptime":start,"lateMs":max(0,(start-scheduled-delay)*1000),"cancelled":self.recoveryEpoch != epoch])}
             guard self.recoveryEpoch==epoch else{return}
+            if self.sourceWorkPaused{self.deferRecovery(action);return}
             action()
             if self.traceLatency{self.log("callback_finished",["id":id,"line":line,"durationMs":(ProcessInfo.processInfo.systemUptime-start)*1000])}
         }
@@ -156,24 +181,35 @@ final class MismatchRecoveryEngine:NSObject {
     var testPost:((CGEvent)->Void)?
     func currentSource()->String { testSource?() ?? InputSourceAccess.currentID() }
     let systemSwitch=MismatchSourceSwitch()
+    var capsSwitchEnabled:()->Bool = {false}
+    var observeSourcesForTests=false
+    var interactionNow:()->Double = {ProcessInfo.processInfo.systemUptime}
+    var capsSourceInteraction:(actual:String,intended:String,timestamp:CGEventTimestamp,until:Double)?
+    var sourceMenuPaused=false
+    var sourceMenuSawPopup=false
+    // A system menu can leave the editor PID on its closing key. Preserve the
+    // press/release pair even if recovery resumes between those two events.
+    var passedSourceMenuKeys=Set<Int64>()
+    var sourceMenuPopupVisible:()->Bool = {MismatchSwitchGate.menuPopupVisible()}
+    var testEventRecipient:((CGEvent)->pid_t?)?
+    var sourcePauseStarted:Double?
+    var pausedRecoveryActions:[()->Void]=[]
+    var sourceInteractionRevision=0
+    var lastIntendedKorean=mismatchKoreanID
+    var sourceWorkPaused:Bool {sourceMenuPaused || capsSourceInteraction != nil}
     var ledger:MismatchReplayLedger?
     var ledgerAfterRepair:MismatchReplayLedger?
     var snapshotWaitStarted:Double?
     func chooseSource(_ id:String)->OSStatus {
         guard !detectionOnly else{return -50}
-        if let testSelectSource{return testSelectSource(id)}
-        if currentSource()==id{return noErr}
-        guard id==recoverySourceID || id==englishID else{return -50}
-        let result=systemSwitch.request(marker:marker,valid:{[weak self] in
+        if testSelectSource == nil,currentSource()==id{return noErr}
+        guard supportsRecoverySource(id) else{return -50}
+        let result=systemSwitch.request(id,valid:{[weak self] in
             guard let self,self.recovering else{return false}
-            if let testSnapshot=self.testSnapshot{return testSnapshot() != nil}
-            return (!IsSecureEventInputEnabled() && self.focusAccess.currentPID()==self.target?.processIdentifier)
-        },posted:{[weak self] event in
-            guard let self else{return}
-            var row:[String:Any]=["eventType":event.type.rawValue];row["purpose"]="source_shortcut"
-            self.log("key_post_requested",row)
-        })
-        log("system_source_requested",["target":id,"result":result,"method":"configured_control_space"])
+            if self.testSelectSource != nil{return true}
+            return self.fastRecoveryContext()
+        },current:currentSource,select:testSelectSource ?? InputSourceAccess.select)
+        log("system_source_requested",["target":id,"result":result,"method":"explicit_source_api"])
         return result
     }
     // Preserve the baseline for same-build A/B tests.
@@ -186,12 +222,17 @@ final class MismatchRecoveryEngine:NSObject {
         return AXIsProcessTrusted() && !IsSecureEventInputEnabled() && target?.isTerminated==false &&
             NSWorkspace.shared.frontmostApplication?.processIdentifier==activationPID
     }
+    var detectionRevision=0
+    var idleSnapshotRequest:Int?
+    var idleSnapshotSequence=0
+    var testIdleRead:((@escaping (MismatchSnapshotResult)->Void)->Void)?
     let snapshotWorker=MismatchSnapshotWorker()
     var asyncRecoveryReads = true
     var asyncRequest:(id:Int,epoch:Int,stage:String)?
     var asyncReady:(epoch:Int,stage:String,result:MismatchSnapshotResult)?
     var testAsyncRead:((@escaping (MismatchSnapshotResult)->Void)->Void)?
     func requestRecoverySnapshot(_ stage:String,retry:@escaping ()->Void) {
+        if sourceWorkPaused{deferRecovery(retry);return}
         if let request=asyncRequest,request.epoch==recoveryEpoch{return}
         traceSequence+=1
         let id=traceSequence,epoch=recoveryEpoch,pid=target?.processIdentifier ?? 0
@@ -200,6 +241,7 @@ final class MismatchRecoveryEngine:NSObject {
         let completion:(MismatchSnapshotResult)->Void = {[weak self] result in
             guard let self,self.recovering,self.recoveryEpoch==epoch,self.asyncRequest?.id==id else{return}
             self.asyncRequest=nil
+            if self.sourceWorkPaused{self.asyncReady=nil;self.deferRecovery(retry);return}
             if self.traceLatency{self.log("async_snapshot_finished",["id":id,"stage":stage,"durationMs":result.durationMs,"focusMs":result.focusMs,"attributesMs":result.attributesMs,"deliveryDelayMs":(ProcessInfo.processInfo.systemUptime-result.completedAt)*1000,"reason":result.reason])}
             guard self.fastRecoveryContext() else{self.park(stage+"_unsafe_context");return}
             guard ProcessInfo.processInfo.systemUptime<self.recoveryDeadline else{self.park(stage+"_deadline");return}
@@ -214,6 +256,7 @@ final class MismatchRecoveryEngine:NSObject {
         if let testAsyncRead{testAsyncRead(completion)}else{snapshotWorker.request(pid:pid,completion:completion)}
     }
     func recoverySnapshot(_ stage:String,retry:@escaping ()->Void)->MismatchSnapshot? {
+        if sourceWorkPaused{deferRecovery(retry);return nil}
         let previousStage=snapshotStage;snapshotStage=stage
         defer{snapshotStage=previousStage}
         guard ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park(stage+"_deadline");return nil}
@@ -306,6 +349,8 @@ final class MismatchRecoveryEngine:NSObject {
     func observeAvailability(_ snap:MismatchSnapshot?){
         let availability=snap == nil ? unavailableReason : "tracking"
         if availability != lastAvailability {
+            let states=["tracking","target_not_frontmost","secure_input","secure_text_field","not_supported_text_field","accessibility_permission","focused_element_unreadable","attribute_batch_unreadable","role_unreadable","text_unreadable","selection_unreadable","selection_invalid","editor_coordinates_unverified","focus_changed_during_snapshot"]
+            InputDiagnostics.shared.record("mismatch.observation_state reasonCode=\(states.firstIndex(of:availability).map{$0+1} ?? 0)")
             log("tracking_state",["state":availability])
             lastAvailability=availability
         }
@@ -353,9 +398,16 @@ final class MismatchRecoveryEngine:NSObject {
         return true
     }
     private func processEvent(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
+        if type == .keyDown || type == .keyUp {log("key_received")}
+        detectionRevision+=1
+        if recovering{observeRecoverySource(currentSource(),at:event.timestamp)}
         let handlerStart=ProcessInfo.processInfo.systemUptime
         let beganRecovering=recovering
         defer{if traceLatency{log("event_handler_finished",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"beganRecovering":beganRecovering,"isProbeEvent":event.getIntegerValueField(.eventSourceUserData)==marker,"durationMs":(ProcessInfo.processInfo.systemUptime-handlerStart)*1000])}}
+        if !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),event.getIntegerValueField(.eventSourceUserData) != 0x454F5448 {
+            if type == .keyUp,passedSourceMenuKeys.remove(event.getIntegerValueField(.keyboardEventKeycode)) != nil{return Unmanaged.passUnretained(event)}
+            if type == .keyDown,passedSourceMenuKeys.contains(event.getIntegerValueField(.keyboardEventKeycode)){return Unmanaged.passUnretained(event)}
+        }
         if enabled,!suspended,type != .tapDisabledByTimeout,type != .tapDisabledByUserInput,
            !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
            event.getIntegerValueField(.eventSourceUserData) != 0x454F5448,skipRomanObservation(){
@@ -369,12 +421,14 @@ final class MismatchRecoveryEngine:NSObject {
         if enabled{followFrontmost()}
         if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==0x454F5448{return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            InputDiagnostics.shared.record("mismatch.tap_disabled kind=1 type=\(type.rawValue)")
             suspended=true
             DispatchQueue.main.async{[weak self] in self?.suspend("tap_disabled")}
             return Unmanaged.passUnretained(event)
         }
         guard enabled,!suspended else{return Unmanaged.passUnretained(event)}
         guard canObserve() else{
+            log("observation_blocked")
             if recovering{park("another_edit_started")}else{cancelDetection()}
             return Unmanaged.passUnretained(event)
         }
@@ -393,9 +447,37 @@ final class MismatchRecoveryEngine:NSObject {
         if !recovering,type == .keyDown,
            event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty,
            MismatchRecoveryPlan.character(UInt16(event.getIntegerValueField(.keyboardEventKeycode)),event.flags.contains(.maskShift)) != nil {
-            sample();sampled=lastSampleSnapshot
+            sample(synchronous:true);sampled=lastSampleSnapshot
         }
         if recovering{
+            if sourceMenuPaused {
+                let popup=sourceMenuPopupVisible()
+                if type == .keyDown || type == .keyUp {
+                    let code=event.getIntegerValueField(.keyboardEventKeycode)
+                    // Check menu ownership before interpreting a closed popup
+                    // or an editor recipient as permission to buffer this key.
+                    if popup || [36,53].contains(code) {
+                        if type == .keyDown {
+                            passedSourceMenuKeys.insert(code)
+                            if [36,53].contains(code){resumeMenuAfterSelection()}
+                        }
+                        return Unmanaged.passUnretained(event)
+                    }
+                }
+                if sourceMenuSawPopup,!popup{resumeSourceWork()}
+            }
+            if sourceMenuPaused {
+                if type == .keyDown || type == .keyUp {
+                    let recipient=testEventRecipient?(event) ?? pid_t(exactly:event.getIntegerValueField(.eventTargetUnixProcessID))
+                    if let recipient,recipient>0,recipient==target?.processIdentifier{resumeSourceWork()}
+                    else {
+                        if type == .keyDown,[36,53].contains(event.getIntegerValueField(.keyboardEventKeycode)){resumeMenuAfterSelection()}
+                        return Unmanaged.passUnretained(event)
+                    }
+                }else if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+                    return Unmanaged.passUnretained(event)
+                }
+            }
             // Modifier notifications are state changes, not text keys. Reposting
             // source-switch generated notifications can create a feedback loop.
             if type == .flagsChanged{return Unmanaged.passUnretained(event)}
@@ -429,7 +511,7 @@ final class MismatchRecoveryEngine:NSObject {
                     if type == .keyDown{keyDownSources[code]=original?.source ?? intendedSource(at:timestamp)}
                     let inputSource=keyDownSources[code] ?? intendedSource
                     if type == .keyUp{keyDownSources.removeValue(forKey:code)}
-                    nextBufferedID+=1;pendingSources[nextBufferedID]=inputSource
+                    nextBufferedID+=1;pendingSources[nextBufferedID]=inputSource;pendingTimestamps[nextBufferedID]=timestamp
                     bufferedIdentities[ObjectIdentifier(copy)]=nextBufferedID;pending.append(copy)
                     log("key_buffered",["id":nextBufferedID,"inputSource":inputSource,"eventType":type.rawValue,"eventTimestamp":String(event.timestamp),"code":event.getIntegerValueField(.keyboardEventKeycode),"flags":event.flags.rawValue])
                 }else{abort("buffer_allocation_failed");return Unmanaged.passUnretained(event)}
@@ -466,18 +548,33 @@ final class MismatchRecoveryEngine:NSObject {
                 plan=nil;log("candidate_cancelled",["reason":"non_korean_or_non_printable_or_selection"]);return Unmanaged.passUnretained(event)
             }
             plan=candidate;planElement=snap.element;planStart=ProcessInfo.processInfo.systemUptime
+            log("candidate_recorded")
 
             log("key",["code":event.getIntegerValueField(.keyboardEventKeycode),"roman":candidate.roman,"source":InputSourceAccess.currentID()])
         }else if !keyboard || (type == .flagsChanged && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty){plan=nil;log("candidate_cancelled",["reason":"navigation_or_modifier"])}
         return Unmanaged.passUnretained(event)
     }
-    func sample(){
+    func sample(synchronous:Bool=false){
+        if recovering {
+            observeRecoverySource(currentSource())
+            if sourceMenuPaused {
+                if sourceMenuPopupVisible(){sourceMenuSawPopup=true}
+                else if sourceMenuSawPopup{resumeSourceWork()}
+            }
+            if sourceWorkPaused,let start=sourcePauseStarted,interactionNow()-start>30{park("source_interaction_timeout")}
+        }
         lastSampleSnapshot=nil
         if enabled,!suspended,skipRomanObservation(){return}
         if enabled{followFrontmost()}
         guard enabled,!suspended,!recovering else{return}
         guard canObserve() else{cancelDetection();return}
-        let observed=snapshot();observeAvailability(observed)
+        if !synchronous,(testSnapshot==nil || testIdleRead != nil) {
+            requestIdleSnapshot();return
+        }
+        consumeIdleSnapshot(snapshot())
+    }
+    func consumeIdleSnapshot(_ observed:MismatchSnapshot?) {
+        observeAvailability(observed)
         guard let snap=observed else{return}
         lastSampleSnapshot=snap
         sourceChanged(currentSource(),snap)
@@ -509,31 +606,60 @@ final class MismatchRecoveryEngine:NSObject {
         willBeginRepair()
         recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;plan=nil;pending=[];nextBufferedID=0;postedBuffered=0
         deliveredHeldKeys=heldKeys
-        intendedSource=recoverySourceID;recoverySourceBoundaries=[];pendingSources=[:];bufferedIdentities=[:];keyDownSources=Dictionary(uniqueKeysWithValues:heldKeys.map{($0,recoverySourceID)})
+        intendedSource=recoverySourceID;recoverySourceBoundaries=[];pendingSources=[:];pendingTimestamps=[:];bufferedIdentities=[:];keyDownSources=Dictionary(uniqueKeysWithValues:heldKeys.map{($0,recoverySourceID)})
+        clearSourceInteraction();systemSwitch.reset(currentSource());lastIntendedKorean=recoverySourceID
         koreanRetries=0;interruptedSourceRestores=0;ledger=nil;ledgerAfterRepair=nil;snapshotWaitStarted=nil
         log("mismatch_confirmed",["roman":candidate.roman,"text":snap.text])
         cycleAndReplay(candidate,snap)
         reportMismatch(candidate,snap)
     }
-    func waitSource(_ id:String,remaining:Int=45,completion:@escaping ()->Void){
+    func waitSource(_ id:String,remaining:Int=45,knownBoundaries:Int?=nil,knownInteraction:Int?=nil,completion:@escaping ()->Void){
         guard recovering,!rollingBack else{return}
-        guard let _=recoverySnapshot("source_wait",retry:{[weak self] in self?.waitSource(id,remaining:remaining,completion:completion)}) else{return}
+        let boundaryCount=knownBoundaries ?? recoverySourceBoundaries.count
+        let interactionRevision=knownInteraction ?? sourceInteractionRevision
+        guard let _=recoverySnapshot("source_wait",retry:{[weak self] in self?.waitSource(id,remaining:remaining,knownBoundaries:boundaryCount,knownInteraction:interactionRevision,completion:completion)}) else{return}
         if !systemSwitch.busy,currentSource()==id{completion();return}
+        if !systemSwitch.busy,(recoverySourceBoundaries.count>boundaryCount || sourceInteractionRevision>interactionRevision) {
+            // A proved user switch superseded the temporary source while its
+            // AX reply was pending. Restore this known phase immediately; keep
+            // the user's intent for final delivery instead of burning the wait.
+            guard interruptedSourceRestores<2 else{park("source_wait_restore_exhausted");return}
+            interruptedSourceRestores+=1
+            guard chooseSource(id)==noErr else{park("source_wait_restore_failed");return}
+            waitSource(id,remaining:remaining,knownBoundaries:recoverySourceBoundaries.count,knownInteraction:sourceInteractionRevision,completion:completion)
+            return
+        }
         guard remaining>0 else{log("source_switch_timeout",["wanted":id,"actual":currentSource()]);abort("source_switch_timeout");return}
         if remaining==30,!systemSwitch.busy,currentSource() != id {
-            let result=testSelectSource?(id) ?? InputSourceAccess.select(id)
+            let result=chooseSource(id)
             log("source_wait_direct_fallback",["target":id,"result":result,"actual":currentSource()])
         }
-        later(0.01){[weak self] in self?.waitSource(id,remaining:remaining-1,completion:completion)}
+        later(0.01){[weak self] in self?.waitSource(id,remaining:remaining-1,knownBoundaries:boundaryCount,knownInteraction:interactionRevision,completion:completion)}
     }
     func cycleAndReplay(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot){
         let result=chooseSource(englishID);log("cycle_english",["result":result])
         guard result==noErr else{abort("english_selection_failed");return}
         waitSource(englishID){[weak self] in
             guard let self else{return}
+            let selectKorean:()->Void = {[weak self] in
+            guard let self,self.recovering,!self.rollingBack else{return}
             let result=self.chooseSource(recoverySourceID);self.log("cycle_korean",["result":result])
             guard result==noErr else{self.abort("korean_selection_failed");return}
-            self.waitSource(recoverySourceID){[weak self] in self?.replaceAndReplay(candidate,snap)}
+            self.waitSource(recoverySourceID){[weak self] in
+                guard let self else{return}
+                // TIS can report Korean before the editor's IME is ready. A
+                // first activation needs a bounded asynchronous settling interval,
+                // as does a confirmed Roman retry. A failed first activation
+                // can leave the client in Roman mode across later retries.
+                // replaceAndReplay rechecks field, text, caret and source after
+                // the wait; later also preserves source boundaries and teardown.
+                self.later(0.10*Double(max(1,self.koreanRetries))){[weak self] in self?.replaceAndReplay(candidate,snap)}
+            }
+            }
+            // Waiting only after selecting Korean cannot give the editor an
+            // opportunity to observe the intervening English activation. Keep
+            // both phases asynchronous from the first repair attempt.
+            self.later(0.10*Double(max(1,self.koreanRetries)),selectKorean)
         }
     }
     func replaceAndReplay(_ candidate:MismatchRecoveryPlan,_ before:MismatchSnapshot){
@@ -614,7 +740,7 @@ final class MismatchRecoveryEngine:NSObject {
         log("interrupted_source_restore",["stage":stage,"source":currentSource(),"targetSource":targetSource,"intendedSource":intendedSource,"attempt":interruptedSourceRestores,"pendingEvents":pending.count])
         // This is a known target restoration, not a toggle. Another Control-
         // Space can be lost among modifier transitions or toggle the wrong way.
-        let result=testSelectSource?(targetSource) ?? InputSourceAccess.select(targetSource)
+        let result=chooseSource(targetSource)
         log("interrupted_source_direct_selection",["target":targetSource,"result":result,"stage":stage])
         guard result==noErr else{park(stage+"_source_restore_failed");return}
         waitSource(targetSource,completion:resume)
@@ -749,7 +875,7 @@ final class MismatchRecoveryEngine:NSObject {
                 log("delivery_source_requested",["source":nextSource])
             }
             if sourceAttempts==30,!systemSwitch.busy {
-                let result=testSelectSource?(nextSource) ?? InputSourceAccess.select(nextSource)
+                let result=chooseSource(nextSource)
                 log("delivery_source_direct_fallback",["target":nextSource,"result":result])
             }
             later(0.01){[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts-1)};return
@@ -765,6 +891,15 @@ final class MismatchRecoveryEngine:NSObject {
             ledger=MismatchReplayLedger(before:"",caret:0)
             if pending.isEmpty {ledger=nil;finishDelivery(rollback:rollback,verifiedSnapshot:snap);return}
         }
+        if pending.isEmpty {
+            // A source-only user boundary commits the existing ledger; it does
+            // not create a new batch in its last (Korean) source. Reopening that
+            // segment here would undo the requested final English source.
+            if !rollback,let expected=ledger {
+                guard MismatchRecoveryPlan.sameEditorText(snap.text,expected.text),snap.selection==expected.selection else{park("final_source_context_changed");return}
+            }
+            finishDelivery(rollback:rollback,verifiedSnapshot:snap);return
+        }
         let count=pending.prefix{!Self.isSelectAll($0) && ($0.type == .keyUp || (pendingSources[bufferedID($0)] ?? recoverySourceID)==nextSource)}.count
         let group=Array(pending.prefix(count))
         var nextLedger=ledger
@@ -772,7 +907,8 @@ final class MismatchRecoveryEngine:NSObject {
         if !rollback,let _=nextLedger {
             var keys:[(UInt16,Bool)]=[]
             for event in group where event.type == .keyDown {
-                let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode)),shift=event.flags.contains(.maskShift)
+                let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+                let shift=MismatchReplayLedger.modelShift(code:code,flags:event.flags,source:nextSource)
                 guard event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty,MismatchRecoveryPlan.character(code,shift) != nil else{park("unsupported_buffered_edit");return}
                 keys.append((code,shift))
             }
@@ -792,14 +928,14 @@ final class MismatchRecoveryEngine:NSObject {
             let roman=nextSource==recoverySourceID ? deliveredKeys.compactMap{MismatchRecoveryPlan.character($0.0,$0.1)}.joined():""
             // Yield after posting: an immediate synchronous AX request can reach
             // the editor before its queued key events. Verify on the next turn.
-            later(0){[weak self] in self?.verifyBuffered(expected,before:snap,remaining:30,roman:roman)}
+            later(0){[weak self] in self?.verifyBuffered(expected,before:snap,remaining:30,roman:roman,sourceOnly:deliveredKeys.isEmpty)}
         }else{later(0.02){[weak self] in self?.finishDelivery(rollback:rollback)}}
     }
-    func verifyBuffered(_ expected:MismatchReplayLedger,before:MismatchSnapshot,remaining:Int,roman:String="",reopenComposition:Bool=false){
+    func verifyBuffered(_ expected:MismatchReplayLedger,before:MismatchSnapshot,remaining:Int,roman:String="",reopenComposition:Bool=false,sourceOnly:Bool=false){
         guard recovering,!rollingBack else{return}
-        guard let snap=recoverySnapshot("buffer_verification",retry:{[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining,roman:roman,reopenComposition:reopenComposition)}) else{return}
+        guard let snap=recoverySnapshot("buffer_verification",retry:{[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining,roman:roman,reopenComposition:reopenComposition,sourceOnly:sourceOnly)}) else{return}
         if traceLatency{log("buffer_verification_observed",["snapshotID":lastCompletedSnapshotID,"remaining":remaining,"postedEvents":postedBuffered,"actual":snap.text,"expected":expected.text,"selection":[snap.selection.location,snap.selection.length],"expectedSelection":[expected.selection.location,expected.selection.length],"textMatches":snap.text==expected.text,"selectionMatches":snap.selection==expected.selection])}
-        if let wanted=expected.segments.last?.source,currentSource() != wanted {
+        if !sourceOnly,let wanted=expected.segments.last?.source,currentSource() != wanted {
             restoreInterruptedSource("buffer_verification",targetSource:wanted){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining,roman:roman,reopenComposition:true)};return
         }
         if MismatchRecoveryPlan.sameEditorText(snap.text,expected.text),snap.selection==expected.selection {
@@ -849,7 +985,7 @@ final class MismatchRecoveryEngine:NSObject {
             log("buffer_text_failed",["expected":expected.text,"actual":snap.text,"selection":[snap.selection.location,snap.selection.length]])
             park("buffer_result_not_verified");return
         }
-        later(0.01){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining-1,roman:roman,reopenComposition:reopenComposition)}
+        later(0.01){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining-1,roman:roman,reopenComposition:reopenComposition,sourceOnly:sourceOnly)}
     }
     func repairBufferedRoman(_ expected:MismatchReplayLedger,_ snap:MismatchSnapshot){
         guard let segment=expected.segments.last,segment.source==recoverySourceID,currentSource()==recoverySourceID,
@@ -881,6 +1017,7 @@ final class MismatchRecoveryEngine:NSObject {
         if rollingBack{return}
         recoveryEpoch+=1;asyncReady=nil
         rollingBack=true;rollbackReason=reason;plan=nil
+        failureDiagnostic("abort",reason)
         log("rollback_started",["reason":reason,"originalRoman":currentPlan?.roman ?? "","pendingEvents":pending.count])
         attemptRollback(remaining:15,requested:false)
     }
@@ -910,6 +1047,8 @@ final class MismatchRecoveryEngine:NSObject {
         self.later(0.01){[weak self] in self?.attemptRollback(remaining:remaining-1,requested:true)}
     }
     func park(_ reason:String){
+        failureDiagnostic("park",reason)
+        clearSourceInteraction()
         // Focus/text changes cannot be undone safely. Keep the queue in memory and
         // expose it to the user, and never inject it into a different field.
         log("pending_retained",["reason":reason,"events":pending.map{["id":bufferedID($0),"eventType":Int($0.type.rawValue),"code":$0.getIntegerValueField(.keyboardEventKeycode),"flags":$0.flags.rawValue]}])
@@ -950,11 +1089,18 @@ final class MismatchRecoveryEngine:NSObject {
         guard let app,app.processIdentifier != ProcessInfo.processInfo.processIdentifier else{return false}
         return !app.isTerminated
     }
-    func cancelDetection(){plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[]}
+    func cancelDetection(){detectionRevision+=1;plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[]}
+    func failureDiagnostic(_ stage:String,_ reason:String) {
+        // Only ordinal codes from fixed product reasons, never arbitrary strings.
+        let reasons=["pre_edit_mismatch","selection_failed","selection_not_applied","selected_text_not_verified","english_selection_failed","korean_selection_failed","source_switch_timeout","delete_not_verified","rollback_context_not_intact","buffer_result_not_verified","delivery_source_timeout","delivery_source_selection_failed","buffer_roman_retry_unavailable","source_menu_focus_changed","menu_source_restore_failed","caps_during_unsettled_source","menu_during_unsettled_source","final_source_context_changed","korean_retry_exhausted"]
+        let code=reason.hasSuffix("_deadline") ? 20:(reasons.firstIndex(of:reason).map{$0+1} ?? 0)
+        if stage=="abort"{InputDiagnostics.shared.record("mismatch.abort reasonCode=\(code)")}
+        else if stage=="park"{InputDiagnostics.shared.record("mismatch.park reasonCode=\(code)")}
+    }
     func log(_ kind:String,_ fields:@autoclosure ()->[String:Any]=[:]) {
         // Deliberately never evaluate fields: they can contain typed text, keys,
         // editor identifiers or clipboard content copied from the experiment.
-        if ["user_source_boundary","mismatch_confirmed","korean_result_verified","recovery_finished","pending_retained","rollback_finished","start_failed"].contains(kind) {
+        if ["key_received","candidate_recorded","candidate_cancelled","field_changed","source_change","observation_blocked","user_source_boundary","mismatch_confirmed","korean_result_verified","recovery_finished","pending_retained","rollback_finished","start_failed","caps_source_wait","caps_source_confirmed","caps_source_unchanged","source_menu_paused","source_work_resumed","cycle_english","cycle_korean","selection_requested","replay_started"].contains(kind) {
             InputDiagnostics.shared.record("mismatch."+kind)
         }
     }
@@ -978,16 +1124,27 @@ final class MismatchRecoveryEngine:NSObject {
         // Capture intent in the same HID stream as the user's switch. Quartz
         // may retimestamp a delayed event before the downstream session tap.
         switchGate?.forwarded = { [weak self] type,event in self?.captureEventOrigin(type,event) }
+        switchGate?.acceptsExternalSource = { [weak self] in
+            guard let self else{return false}
+            return self.enabled && !self.suspended && self.recovering && self.fastRecoveryContext()
+        }
+        switchGate?.capsChanged = { [weak self] timestamp in self?.potentialCapsSourceSwitch(at:timestamp) }
+        switchGate?.menuBegan = { [weak self] timestamp in self?.beginSourceMenu(at:timestamp) }
         switchGate?.failed = { [weak self] in self?.suspended=true;self?.suspend("switch_gate_disabled") }
         guard switchGate!.start() else{closeSession();log("start_failed");return}
         timer=Timer.scheduledTimer(withTimeInterval:0.02,repeats:true){[weak self] _ in self?.sample()}
         followFrontmost();didStart()
     }
     func suspend(_ reason:String){
+        let reasons=["tap_disabled","switch_gate_disabled","input_unavailable","hanq_input_stopped"]
+        InputDiagnostics.shared.record("mismatch.suspend reasonCode=\(reasons.firstIndex(of:reason).map{$0+1} ?? 0)")
         if recovering || !pending.isEmpty{park(reason)}
         closeSession()
     }
     func closeSession(){
+        clearSourceInteraction()
+        passedSourceMenuKeys=[]
+        idleSnapshotRequest=nil;detectionRevision+=1
         eventOrigins.removeAll()
         if !pending.isEmpty{retained.append(contentsOf:pending);pending=[];suspended=true;didRetainInput()}
         recoveryEpoch+=1;asyncReady=nil;asyncRequest=nil

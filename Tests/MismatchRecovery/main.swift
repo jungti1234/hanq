@@ -7,6 +7,9 @@ func probeTestCheck(_ condition:@autoclosure ()->Bool,_ message:@autoclosure ()-
         exit(1)
     }
 }
+guard CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:false) != nil else{
+    fputs("FAIL: keyboard event allocation unavailable in this execution environment\n",stderr);exit(2)
+}
 let app=NSApplication.shared;let owner=MismatchRecoveryEngine(detectionOnly: ProcessInfo.processInfo.arguments.contains("--detect-only"));app.setActivationPolicy(.regular)
 if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     runLayoutTests()
@@ -16,6 +19,8 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     runDeliveredKeyReleaseTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-shortcut-source-state") {
     runShortcutSourceStateTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-source-interactions") {
+    runSourceInteractionTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-select-all-boundary") {
     runSelectAllBoundaryTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-source-timestamps") {
@@ -168,6 +173,35 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     probeTestCheck(beganImmediately && probe.detectionCount==1)
     probe.enabled=false;probe.recoveryEpoch+=1
     print("PASS: exact Roman starts retry immediately; absent/partial/unrelated output waits; pending keys preserved; recovery starts immediately")
+} else if ProcessInfo.processInfo.arguments.contains("--test-retry-settle") {
+    let field=AXUIElementCreateApplication(12345)
+    for firstAttempt in [false,true] {
+    for mode in ["stable","changed","cancelled"] {
+        let p=MismatchRecoveryEngine();var source=mismatchKoreanID
+        var candidate=MismatchRecoveryPlan(before:"앞🙂뒤",caret:3)
+        _ = candidate.append(code:15,shift:false)
+        let original=MismatchSnapshot(element:field,text:candidate.expected!,selection:NSRange(location:4,length:0))
+        var snapshot=original,writes=0,reads=0,selections:[String]=[]
+        p.enabled=true;p.recovering=true;p.planElement=field;p.currentPlan=candidate
+        p.recoverySourceID=mismatchKoreanID;p.recoveryDeadline=ProcessInfo.processInfo.systemUptime+2.5
+        p.testSource={source};p.testSelectSource={source=$0;selections.append($0);return noErr}
+        p.testSnapshot={reads+=1;return snapshot};p.testSetRange={_,_ in writes+=1;return .success}
+        p.testPost={_ in}
+        if firstAttempt{p.testSelectionWritable={_ in true};p.beginRecovery(candidate,original)}
+        else{p.retryKorean(candidate,original)}
+        RunLoop.current.run(until:Date().addingTimeInterval(0.05))
+        probeTestCheck(writes==0 && p.koreanRetries==(firstAttempt ? 0:1) && selections==[p.englishID],"retry did not preserve English activation phase")
+        let before=reads
+        if mode=="changed" {snapshot=MismatchSnapshot(element:field,text:"바뀐 본문",selection:NSRange(location:5,length:0))}
+        if mode=="cancelled" {p.recoveryEpoch+=1;p.recovering=false}
+        RunLoop.current.run(until:Date().addingTimeInterval(0.17))
+        probeTestCheck(writes==(mode=="stable" ? 1:0),"settled retry failed to recheck context")
+        probeTestCheck(mode=="cancelled" ? reads==before:reads>before,"stale callback survived teardown")
+        probeTestCheck(selections==(mode=="cancelled" ? [p.englishID]:[p.englishID,mismatchKoreanID]),"cancelled retry reselected a source")
+        p.recoveryEpoch+=1;p.recovering=false
+    }
+    }
+    print("PASS: first repair and retry settle both phases asynchronously; fresh context before edit; changed text and cancelled callbacks never edit")
 } else if ProcessInfo.processInfo.arguments.contains("--test-detection-only") {
     let probe=MismatchRecoveryEngine(detectionOnly:true)
     let field=AXUIElementCreateApplication(12345)
@@ -319,6 +353,8 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     scenario(newField:true)
     scenario(stopDuring:true)
     print("PASS \(checks) rollback checks: ignored deletion, delayed caret, new input, ignored caret, changed context, stop during rollback")
+} else if ProcessInfo.processInfo.arguments.contains("--test-idle-observation") {
+    runIdleObservationTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-async-snapshot") {
     runAsyncSnapshotTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-fast-overwrite") {

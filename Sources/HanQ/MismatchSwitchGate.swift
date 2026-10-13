@@ -11,14 +11,36 @@ final class MismatchSwitchGate {
     var failed:()->Void = {}
     var switched:(CGEventTimestamp)->Void
     var forwarded:(CGEventType,CGEvent)->Void = {_,_ in}
+    var acceptsExternalSource:()->Bool = {false}
+    var capsChanged:(CGEventTimestamp)->Void = {_ in}
+    var menuBegan:(CGEventTimestamp)->Void = {_ in}
+    static func menuPopupVisible()->Bool {
+        // Numeric window metadata only; do not read titles or capture images.
+        guard let windows=CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] else{return false}
+        let level=CGWindowLevelForKey(.popUpMenuWindow)
+        return windows.contains{($0[kCGWindowLayer as String] as? NSNumber)?.intValue == Int(level)}
+    }
+    static func isMenuBarClick(_ type:CGEventType,_ event:CGEvent)->Bool {
+        guard type == .leftMouseDown || type == .rightMouseDown else{return false}
+        return NSScreen.screens.contains { screen in
+            guard let number=screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else{return false}
+            let bounds=CGDisplayBounds(number.uint32Value),point=event.location
+            return point.x>=bounds.minX && point.x<bounds.maxX && point.y>=bounds.minY && point.y<bounds.minY+NSStatusBar.system.thickness
+        }
+    }
     init(accepts:@escaping ()->Bool,switched:@escaping (CGEventTimestamp)->Void){self.accepts=accepts;self.switched=switched}
     func receive(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            InputDiagnostics.shared.record("mismatch.tap_disabled kind=2 type=\(type.rawValue)")
             DispatchQueue.main.async{[weak self] in self?.stop();self?.failed()}
             return Unmanaged.passUnretained(event)
         }
         let tag=event.getIntegerValueField(.eventSourceUserData)
         guard tag==0 || InputDeliveryOrigin.isMarker(tag) else{return Unmanaged.passUnretained(event)}
+        if acceptsExternalSource() {
+            if event.getIntegerValueField(.keyboardEventKeycode)==57,(type == .flagsChanged || type == .keyDown) {capsChanged(event.timestamp)}
+            if Self.isMenuBarClick(type,event){menuBegan(event.timestamp)}
+        }
         let result=filter.process(type:type,key:event.getIntegerValueField(.keyboardEventKeycode),flags:event.flags,acceptNewPress:accepts())
         event.flags=result.flags
         if result.edge=="right-down"{switched(event.timestamp)}
@@ -27,7 +49,7 @@ final class MismatchSwitchGate {
     }
     func start()->Bool {
         guard KeyboardStateMirror.shared.start() else{return false}
-        let mask:CGEventMask=[CGEventType.flagsChanged,.keyDown,.keyUp].reduce(0){$0 | (1 << $1.rawValue)}
+        let mask:CGEventMask=[CGEventType.flagsChanged,.keyDown,.keyUp,.leftMouseDown,.rightMouseDown].reduce(0){$0 | (1 << $1.rawValue)}
         tap=CGEvent.tapCreate(tap:.cghidEventTap,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
             KeyboardStateMirror.shared.preserve(type,event) { Unmanaged<MismatchSwitchGate>.fromOpaque(ref!).takeUnretainedValue().receive(type,event) }
         },userInfo:Unmanaged.passUnretained(self).toOpaque())

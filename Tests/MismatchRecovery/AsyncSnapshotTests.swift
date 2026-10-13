@@ -153,6 +153,14 @@ func runEditorCoordinateTests(){
     var calls=0
     probeTestCheck(MismatchTextReader.resolve(value:"abc",selection:NSRange(location:1,length:0),read:{r in calls+=1;return calls==1 ? "abc":"xyz"})==nil)
     probeTestCheck(MismatchTextReader.resolve(value:"abc",selection:NSRange(location:1,length:0),read:{_ in "a"})==nil)
+    var unavailable=false,rangeReads=0
+    let stopped=MismatchTextReader.resolve(value:String(repeating:"x",count:4096),selection:NSRange(location:1,length:0),unavailable:{unavailable}){range in
+        rangeReads+=1
+        if rangeReads==1{return nil} // Valid domain boundary, so prefix probing is allowed.
+        if rangeReads==2{return "x"}
+        unavailable=true;return nil // Transport failure: no more AX messages.
+    }
+    probeTestCheck(stopped==nil && rangeReads==3,"range search continued AX requests after a transport failure")
     // A native selection and a browser selection retain their own offsets.
     let read:(NSRange)->String?={r in guard NSMaxRange(r)<=web.utf16.count else{return nil};return (web as NSString).substring(with:r)}
     probeTestCheck(MismatchTextReader.resolve(value:native,selection:NSRange(location:4,length:2),read:read)==web)

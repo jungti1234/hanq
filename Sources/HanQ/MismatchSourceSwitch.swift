@@ -1,68 +1,46 @@
 import AppKit
 import Carbon
 
-// Use the user's enabled previous-input-source shortcut. Never change preferences.
+// Select an explicit source. No keyboard synthesis or shortcut preferences.
 final class MismatchSourceSwitch {
     var busy=false
-    private var generation=0
-    private var release:(()->Void)?
-    // All down/up events in the shortcut must share one retained private
-    // state table. Creating a source for each event splits press and release
-    // across unrelated Quartz keyboard states.
-    private lazy var eventSource=CGEventSource(stateID:.privateState)
-    func shortcutEvents(marker:Int64)->[CGEvent]? {
-        guard let eventSource else{return nil}
-        func event(_ key:CGKeyCode,_ down:Bool,_ type:CGEventType,_ flags:CGEventFlags)->CGEvent? {
-            guard let e=CGEvent(keyboardEventSource:eventSource,virtualKey:key,keyDown:down) else{return nil}
-            e.type=type;e.flags=flags;e.setIntegerValueField(.eventSourceUserData,value:marker);return e
-        }
-        guard let controlDown=event(59,true,.flagsChanged,.maskControl),let controlUp=event(59,false,.flagsChanged,[]),
-              let down=event(49,true,.keyDown,.maskControl),let up=event(49,false,.keyUp,.maskControl) else{return nil}
-        return [controlDown,down,up,controlUp]
+    private(set) var observed=""
+    private var expected:String?
+    private var expectedUntil=0.0
+    var now:()->Double = {ProcessInfo.processInfo.systemUptime}
+    var didSelect:(String,OSStatus)->Void = {_,_ in}
+    func reset(_ source:String){observed=source;expected=nil;busy=false}
+    func cancel(){expected=nil;busy=false}
+    var unsettled:Bool {expected != nil && now()<expectedUntil}
+    /// Returns true only for a source change not owned by this selector.
+    func observe(_ source:String)->Bool {
+        guard source != observed else{return false}
+        observed=source
+        if source==expected,(busy || now()<expectedUntil){expected=nil;return false}
+        return true
     }
-    deinit{cancel()}
-    func cancel(){generation+=1;release?();release=nil;busy=false}
-    func request(marker:Int64,valid:@escaping ()->Bool,posted:@escaping (CGEvent)->Void={_ in})->OSStatus {
-        guard !busy,valid(),CGPreflightPostEventAccess() else{return -50}
-        let prefs=UserDefaults(suiteName:"com.apple.symbolichotkeys")
-        guard let keys=prefs?.dictionary(forKey:"AppleSymbolicHotKeys"),
-              let item=keys["60"] as? [String:Any],(item["enabled"] as? NSNumber)?.boolValue==true,
-              let value=item["value"] as? [String:Any],let params=value["parameters"] as? [NSNumber],params.count==3 else{return -50}
-        let code=CGKeyCode(params[1].uint16Value),flags=CGEventFlags(rawValue:params[2].uint64Value)
-        // Tested configuration. Unsupported shortcuts fail visibly rather than use a different path.
-        guard code==49,flags == .maskControl else{return -50}
-        guard let events=shortcutEvents(marker:marker) else{return -50}
-        let controlDown=events[0],down=events[1],up=events[2],controlUp=events[3]
-        func send(_ event:CGEvent){posted(event);event.post(tap:.cghidEventTap)}
-        busy=true;generation+=1;let token=generation
-        var spaceDown=false
-        release={if spaceDown{send(up)};send(controlUp)}
-        // Allow each modifier phase to reach the input manager before the next
-        // source cycle. A TIS ID change can precede actual IME activation.
-        send(controlDown)
-        DispatchQueue.main.asyncAfter(deadline:.now()+0.05){[weak self] in
-            guard let self,self.generation==token else{return}
-            guard valid() else{self.cancel();return}
-            spaceDown=true;send(down)
-            DispatchQueue.main.asyncAfter(deadline:.now()+0.03){[weak self] in
-                guard let self,self.generation==token else{return}
-                send(up);spaceDown=false
-                DispatchQueue.main.asyncAfter(deadline:.now()+0.03){[weak self] in
-                    guard let self,self.generation==token else{return}
-                    send(controlUp);self.release=nil
-                }
-                DispatchQueue.main.asyncAfter(deadline:.now()+0.08){[weak self] in
-                    guard let self,self.generation==token else{return};self.busy=false
-                }
-            }
-        }
-        return noErr
+    func request(_ target:String,valid:()->Bool,current:()->String,
+                 select:(String)->OSStatus=InputSourceAccess.select)->OSStatus {
+        guard !busy,!target.isEmpty,valid() else{return -50}
+        busy=true;expected=target;expectedUntil=now()+0.5
+        let result=select(target)
+        busy=false
+        if result != noErr{expected=nil;didSelect(target,result);return result}
+        let actual=current();observed=actual
+        if actual==target{expected=nil}
+        didSelect(target,result)
+        return result
     }
 }
 
 // A replay ledger models composition across batches, but commits a segment at
 // every source boundary. Key-up events never create a boundary or a character.
 struct MismatchReplayLedger {
+    static func modelShift(code:UInt16,flags:CGEventFlags,source:String)->Bool {
+        let shift=flags.contains(.maskShift)
+        guard !MismatchKeyboardLayout.supports(source),PhysicalLetterKeys.letters[code] != nil else{return shift}
+        return shift || flags.contains(.maskAlphaShift)
+    }
     let before:String
     let caret:Int
     var segments:[(source:String,keys:[(UInt16,Bool)])]=[]

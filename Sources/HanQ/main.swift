@@ -231,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         buildPermissionView()
         inputSource.onChange = { [weak self] snapshot in
             guard let self else { return }
+            if let snapshot{self.mismatchRecovery.engine.observeRecoverySource(snapshot.id)}
             self.jamoRepair.inputSourceDidChange()
             self.sourceObservations += 1
             if self.permissionGranted && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name) }
@@ -240,11 +241,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.mismatchRecovery.prepareManualEdit() && self.onsetRecovery.prepareManualEdit()
         }
         inputSource.start()
+        mismatchRecovery.engine.capsSwitchEnabled = { (try? RomanSwitchController.isEnabled()) == true }
         window.center()
         let pulse = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.inputSafety.pulse()
-            InputDiagnostics.shared.record("main.pulse tap=\(self.tap != nil) enabled=\(self.enabled) cachedAX=\(self.permissionGranted) events=\(self.diagnosticEventCount)")
+            InputDiagnostics.shared.record("main.pulse tap=\(self.tap != nil) enabled=\(self.enabled) cachedAX=\(self.permissionGranted) events=\(self.diagnosticEventCount) mismatchEnabled=\(self.mismatchRecovery.engine.enabled) mismatchSuspended=\(self.mismatchRecovery.engine.suspended) mismatchRecovering=\(self.mismatchRecovery.engine.recovering) mismatchTap=\(self.mismatchRecovery.engine.tap != nil) mismatchSwitchTap=\(self.mismatchRecovery.engine.switchGate?.tap != nil) sourceKind=\(KoreanKeyboardLayout.supportedIDs.firstIndex(of:InputSourceAccess.currentID()).map{$0+1} ?? 0)")
         }
         safetyPulseTimer = pulse
         RunLoop.main.add(pulse, forMode: .common)
