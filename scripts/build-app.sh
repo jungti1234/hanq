@@ -89,6 +89,7 @@ bash scripts/test-onset-recovery.sh
 bash scripts/test-mismatch-recovery.sh
 bash scripts/test-diagnostics.sh
 bash scripts/test-lifecycle.sh
+bash scripts/test-status-item.sh
 bash scripts/test-watchdog.sh
 bash scripts/test-permission-monitor.sh
 bash scripts/test-recovery.sh

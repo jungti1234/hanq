@@ -146,7 +146,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var enabled = false
     var koreanEnabled = false
     var hanjaEnabled = false
-    var statusItem: NSStatusItem!
+    let statusIcon = StatusItemController()
+    lazy var statusReopenNotice = MenuBarRecoveryNotice { [weak self] in self?.openFeedback() }
     let toggleItem = NSMenuItem(title: "한영키 사용", action: #selector(toggleKorean), keyEquivalent: "")
     let hanjaItem = NSMenuItem(title: "한자키 사용", action: #selector(toggleHanja), keyEquivalent: "")
     let capsItem = NSMenuItem(title: "한/A (Caps Lock) 키로 입력 소스 전환", action: #selector(toggleCaps), keyEquivalent: "")
@@ -178,8 +179,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for key in ["koreanKeyEnabled", "hanjaKeyEnabled"] where UserDefaults.standard.object(forKey:key) == nil {
             UserDefaults.standard.set(true, forKey:key)
         }
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        configureStatusIcon()
         let statusMenu = NSMenu()
         statusMenu.autoenablesItems = false
         statusMenu.delegate = self
@@ -208,7 +207,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.addItem(makeFeedbackItem())
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "한Q 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
-        statusItem.menu = statusMenu
+        statusIcon.onRepeatedUserLaunch = { [weak self] in self?.statusReopenNotice.show() }
+        statusIcon.start(menu: statusMenu)
         let menu = NSMenu()
         let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
@@ -261,22 +261,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         #if HANQ_DEVELOPMENT
         showDevelopmentTestPanels()
         #endif
-    }
-
-    private func configureStatusIcon() {
-        guard let button = statusItem.button,
-              let iconURL = Bundle.main.url(forResource: "HanQ-MenuBar-Template", withExtension: "pdf"),
-              let icon = NSImage(contentsOf: iconURL) else {
-            statusItem.button?.title = "한Q"
-            return
-        }
-        icon.isTemplate = true
-        icon.size = NSSize(width: 144.0 / 112.0 * 18.0, height: 18.0)
-        button.image = icon
-        button.imagePosition = .imageOnly
-        button.title = ""
-        button.toolTip = "한Q"
-        button.setAccessibilityLabel("한Q")
     }
 
     func buildPermissionView() {
@@ -612,6 +596,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshLaunchAtLogin()
         externalKeyboards.updateMenu()
     }
+    func menuWillOpen(_ menu: NSMenu) { statusIcon.setMenuOpen(true) }
+    func menuDidClose(_ menu: NSMenu) { statusIcon.setMenuOpen(false) }
     private func refreshLaunchAtLogin() {
         switch SMAppService.mainApp.status {
         case .enabled:
@@ -668,7 +654,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hudItem.isEnabled = permissionGranted && !updateRestricted
         menuStatus.title = permissionGranted ? status.stringValue : "손쉬운 사용 권한을 기다리고 있어요"
         if updateRestricted { menuStatus.title = "업데이트가 필요해요 · 한Q 기능 중단" }
-        statusItem.button?.appearsDisabled = !koreanEnabled && !hanjaEnabled
+        statusIcon.setDisabled(!koreanEnabled && !hanjaEnabled)
     }
     @objc func toggleKorean() {
         guard !updateRestricted else { return }
@@ -754,6 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        statusIcon.requestUserRepair()
         updatePermission()
         showWindow()
         updater.showRequiredUpdate()
@@ -761,6 +748,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
+        statusIcon.stop()
         updater.stop()
         permissionTimer?.invalidate()
         safetyPulseTimer?.invalidate()
@@ -775,7 +763,10 @@ PermissionRelauncher.runIfRequested()
 let app = NSApplication.shared
 PermissionProbe.runIfRequested()
 app.setActivationPolicy(.accessory)
-guard let instanceLock = AppInstanceLock() else { exit(0) }
+guard let instanceLock = AppInstanceLock() else {
+    StatusItemController.requestRunningInstanceRepair()
+    exit(0)
+}
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
