@@ -221,7 +221,6 @@ final class MismatchRecoveryEngine:NSObject {
         return result
     }
     // Preserve the baseline for same-build A/B tests.
-    var selectionOverwrite = true
     var perKeyAX = false
     var testFastContext:(()->Bool)?
     func fastRecoveryContext()->Bool {
@@ -745,17 +744,8 @@ final class MismatchRecoveryEngine:NSObject {
         if testSnapshot==nil && testAsyncRead==nil {
             guard selected.selectedText==candidate.roman else{abort("selected_text_not_verified");return}
         }
-        if selectionOverwrite {
-            log("selection_overwrite_started",["range":[range.location,range.length]])
-            replayCandidate(candidate);return
-        }
-        // Some editors report AXSelectedText success without changing the text.
-        // Delete only the range we have just observed, through the editor's key path.
-        guard let down=CGEvent(keyboardEventSource:nil,virtualKey:51,keyDown:true),
-              let up=CGEvent(keyboardEventSource:nil,virtualKey:51,keyDown:false) else{abort("delete_event_allocation_failed");return}
-        for event in [down,up]{event.flags=[];event.setIntegerValueField(.eventSourceUserData,value:marker);post(event)}
-        log("delete_requested",["method":"backspace","range":[range.location,range.length]])
-        awaitDeletion(candidate,before.element,remaining:15)
+        log("selection_overwrite_started",["range":[range.location,range.length]])
+        replayCandidate(candidate)
     }
     // A source notification may arrive after the first successful observation.
     // Keep the transaction and queue intact; never repeat an edit just because
@@ -773,22 +763,6 @@ final class MismatchRecoveryEngine:NSObject {
         log("interrupted_source_direct_selection",["target":targetSource,"result":result,"stage":stage])
         guard result==noErr else{park(stage+"_source_restore_failed");return}
         waitSource(targetSource,completion:resume)
-    }
-    func awaitDeletion(_ candidate:MismatchRecoveryPlan,_ element:AXUIElement,remaining:Int){
-        guard recovering,!rollingBack else{return}
-        guard let deleted=recoverySnapshot("deletion",retry:{[weak self] in self?.awaitDeletion(candidate,element,remaining:remaining)}) else{return}
-        guard CFEqual(deleted.element,element) else{abort("delete_context_changed");return}
-        if currentSource() != recoverySourceID {
-            restoreInterruptedSource("deletion"){[weak self] in self?.awaitDeletion(candidate,element,remaining:remaining)};return
-        }
-        let verified=deleted.text==candidate.before && deleted.selection==NSRange(location:candidate.caret,length:0)
-        log("deletion_observed",["verified":verified,"text":deleted.text,"selection":[deleted.selection.location,deleted.selection.length],"remaining":remaining])
-        guard verified else{
-            if remaining>0{self.later(0.01){[weak self] in self?.awaitDeletion(candidate,element,remaining:remaining-1)}}
-            else{abort("delete_not_verified")}
-            return
-        }
-        replayCandidate(candidate)
     }
     func replayCandidate(_ candidate:MismatchRecoveryPlan){
         if koreanRetries==2 {
@@ -821,8 +795,8 @@ final class MismatchRecoveryEngine:NSObject {
             if ledger==nil{ledger=MismatchReplayLedger(before:candidate.before,caret:candidate.caret);ledger?.append(source:recoverySourceID,keys:candidate.codes)}
             drain(verifiedSnapshot:snap);return
         }
-        // Deletion was already observed before replay. A complete reappearance
-        // of exactly those Roman keys is a failed replay, not missing AX output.
+        // Selection was verified before overwrite. A complete result containing
+        // exactly those Roman keys is a failed replay, not missing AX output.
         // retryKorean takes a fresh snapshot again before authorizing any edit.
         var romanCandidate=candidate
         romanCandidate.roman=candidate.replayRoman;romanCandidate.verifiedReplacement=nil
@@ -1164,6 +1138,7 @@ final class MismatchRecoveryEngine:NSObject {
     func cancelDetection(){detectionRevision+=1;plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[]}
     func failureDiagnostic(_ stage:String,_ reason:String) {
         // Only ordinal codes from fixed product reasons, never arbitrary strings.
+        // Keep retired reason slots stable for existing diagnostic codes.
         let reasons=["pre_edit_mismatch","selection_failed","selection_not_applied","selected_text_not_verified","english_selection_failed","korean_selection_failed","source_switch_timeout","delete_not_verified","rollback_context_not_intact","buffer_result_not_verified","delivery_source_timeout","delivery_source_selection_failed","buffer_roman_retry_unavailable","source_menu_focus_changed","menu_source_restore_failed","caps_during_unsettled_source","menu_during_unsettled_source","final_source_context_changed","korean_retry_exhausted","recovery_deadline","paced_replay_unsafe_context","paced_replay_source_changed","paced_replay_allocation_failed","activation_context_changed","activation_boundary_changed","partial_replay_retry_exhausted"]
         let code=reason.hasSuffix("_deadline") ? 20:(reasons.firstIndex(of:reason).map{$0+1} ?? 0)
         // A recurrence can be inspected without restarting into diagnostic

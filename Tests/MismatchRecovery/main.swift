@@ -340,7 +340,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         let original:[(UInt16,Bool)]=[(40,true),(2,true),(2,false),(40,false),(2,true),(40,true),(2,false)]
         for (i,pair) in original.enumerated(){let event=CGEvent(keyboardEventSource:nil,virtualKey:pair.0,keyDown:pair.1)!;event.setIntegerValueField(.eventSourceUserData,value:Int64(i+1));probe.pending.append(event)}
         probe.nextBufferedID=7
-        probe.abort("delete_not_verified")
+        probe.abort("selection_not_applied")
         if extraKey{DispatchQueue.main.asyncAfter(deadline:.now()+0.015){let event=CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:false)!;event.setIntegerValueField(.eventSourceUserData,value:8);probe.pending.append(event);probe.nextBufferedID=8}}
         if stopDuring{probe.stop()}
         let deadline=Date().addingTimeInterval(1)
@@ -365,14 +365,14 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     scenario(changedText:true)
     scenario(newField:true)
     scenario(stopDuring:true)
-    print("PASS \(checks) rollback checks: ignored deletion, delayed caret, new input, ignored caret, changed context, stop during rollback")
+    print("PASS \(checks) rollback checks: ignored selection, delayed caret, new input, ignored caret, changed context, stop during rollback")
 } else if ProcessInfo.processInfo.arguments.contains("--test-idle-observation") {
     runIdleObservationTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-async-snapshot") {
     runAsyncSnapshotTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-fast-overwrite") {
     let field=AXUIElementCreateApplication(12345),other=AXUIElementCreateApplication(12346)
-    let probe=MismatchRecoveryEngine();probe.selectionOverwrite=true;probe.perKeyAX=false
+    let probe=MismatchRecoveryEngine();probe.perKeyAX=false
     var text="앞d뒤",selection=NSRange(location:1,length:1),reads=0,posts:[Int64]=[]
     var candidate=MismatchRecoveryPlan(before:"앞뒤",caret:1);_ = candidate.append(code:2,shift:false)
     probe.enabled=true;probe.recovering=true;probe.planElement=field;probe.currentPlan=candidate
@@ -408,36 +408,42 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     print("PASS: selection overwrite posts no Backspace; queued vowel composes once; key callback makes zero AX reads; changed field receives no replay")
 } else if ProcessInfo.processInfo.arguments.contains("--test-snapshot-retry") {
     let field=AXUIElementCreateApplication(12345),other=AXUIElementCreateApplication(12346)
-    for mode in ["resume","changed","timeout","secure"] {
-        let probe=MismatchRecoveryEngine();let began=ProcessInfo.processInfo.systemUptime
-        var text="",selection=NSRange(location:0,length:0),posts:[Int64]=[]
-        var candidate=MismatchRecoveryPlan(before:"",caret:0);_ = candidate.append(code:2,shift:false)
-        probe.enabled=true;probe.recovering=true;probe.planElement=field;probe.currentPlan=candidate
-        probe.recoveryDeadline=began+1.2;probe.testSource={mismatchKoreanID}
-        probe.testSnapshot={
-            if mode=="secure" {probe.unavailableReason="secure_input";return nil}
-            if mode=="timeout" || ProcessInfo.processInfo.systemUptime-began<0.4 {
-                probe.unavailableReason="focused_element_unreadable";return nil
+    for stage in ["pre_edit", "selection"] {
+        for mode in ["resume","changed","timeout","secure"] {
+            let probe=MismatchRecoveryEngine();let began=ProcessInfo.processInfo.systemUptime
+            var text="d",selection=NSRange(location:stage=="selection" ? 0:1,length:stage=="selection" ? 1:0),posts:[Int64]=[]
+            var candidate=MismatchRecoveryPlan(before:"",caret:0);_ = candidate.append(code:2,shift:false)
+            probe.enabled=true;probe.recovering=true;probe.planElement=field;probe.currentPlan=candidate
+            probe.recoveryDeadline=began+1.2;probe.testSource={mismatchKoreanID}
+            probe.testSnapshot={
+                if mode=="secure" {probe.unavailableReason="secure_input";return nil}
+                if mode=="timeout" || ProcessInfo.processInfo.systemUptime-began<0.4 {
+                    probe.unavailableReason="focused_element_unreadable";return nil
+                }
+                return MismatchSnapshot(element:mode=="changed" ? other:field,text:text,selection:selection)
             }
-            return MismatchSnapshot(element:mode=="changed" ? other:field,text:text,selection:selection)
+            probe.testSetRange={_,range in selection=range;return .success}
+            probe.testPost={event in
+                posts.append(event.getIntegerValueField(.keyboardEventKeycode))
+                if event.type == .keyDown {text=posts.count==1 ? "ㅇ":"아";selection=NSRange(location:1,length:0)}
+            }
+            for (i,down) in [true,false].enumerated(){
+                let event=CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:down)!;event.flags=[]
+                let id=Int64(i+1);probe.bufferedIdentities[ObjectIdentifier(event)]=id;probe.pendingSources[id]=mismatchKoreanID;probe.pending.append(event)
+            }
+            probe.nextBufferedID=2
+            let before=MismatchSnapshot(element:field,text:"d",selection:NSRange(location:1,length:0))
+            if stage=="pre_edit" {probe.replaceAndReplay(candidate,before)}
+            else {probe.awaitSelection(candidate,before,NSRange(location:0,length:1),remaining:15)}
+            while probe.recovering && ProcessInfo.processInfo.systemUptime-began<1.5{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
+            probeTestCheck(!probe.recovering)
+            if mode=="resume" {probeTestCheck(text=="아" && posts==[2,2,40,40] && probe.retained.isEmpty && probe.postedBuffered==2)}
+            else {probeTestCheck(posts.isEmpty && probe.retained.count==2)}
+            if mode=="timeout" {probeTestCheck(ProcessInfo.processInfo.systemUptime-began<1.1)}
+            if mode=="secure" {probeTestCheck(ProcessInfo.processInfo.systemUptime-began<0.1)}
         }
-        probe.testPost={event in
-            posts.append(event.getIntegerValueField(.keyboardEventKeycode))
-            if event.type == .keyDown {text=posts.count==1 ? "ㅇ":"아";selection=NSRange(location:1,length:0)}
-        }
-        for (i,down) in [true,false].enumerated(){
-            let event=CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:down)!;event.flags=[]
-            let id=Int64(i+1);probe.bufferedIdentities[ObjectIdentifier(event)]=id;probe.pendingSources[id]=mismatchKoreanID;probe.pending.append(event)
-        }
-        probe.nextBufferedID=2;probe.awaitDeletion(candidate,field,remaining:15)
-        while probe.recovering && ProcessInfo.processInfo.systemUptime-began<1.5{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
-        probeTestCheck(!probe.recovering)
-        if mode=="resume" {probeTestCheck(text=="아" && posts==[2,2,40,40] && probe.retained.isEmpty && probe.postedBuffered==2)}
-        else {probeTestCheck(posts.isEmpty && probe.retained.count==2)}
-        if mode=="timeout" {probeTestCheck(ProcessInfo.processInfo.systemUptime-began<1.1)}
-        if mode=="secure" {probeTestCheck(ProcessInfo.processInfo.systemUptime-began<0.1)}
     }
-    print("PASS: 400ms AX outage resumes original queue exactly once; changed field, persistent outage and secure input never receive keys")
+    print("PASS: pre-edit and selection 400ms AX outage resumes original queue exactly once; changed field, persistent outage and secure input never receive keys")
 } else if ProcessInfo.processInfo.arguments.contains("--test-source-interruption") {
     for stage in ["pre_edit","selection","selection_ignored"] {
         let p=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(12345)
@@ -499,7 +505,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         print("PASS: delayed source interruption before editing restores exact target and revalidates before one replay")
     }
     let probe=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(12345)
-    var source=probe.englishID,text="",selection=NSRange(location:0,length:0)
+    var source=probe.englishID,text="d",selection=NSRange(location:0,length:1)
     var selections=0;var posts:[Int64]=[]
     var candidate=MismatchRecoveryPlan(before:"",caret:0);_ = candidate.append(code:2,shift:false)
     probe.enabled=true;probe.recovering=true;probe.planElement=field;probe.currentPlan=candidate
@@ -514,13 +520,13 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         let id=Int64(i+1);probe.bufferedIdentities[ObjectIdentifier(event)]=id;probe.pendingSources[id]=mismatchKoreanID;probe.pending.append(event)
     }
     probe.nextBufferedID=2
-    probe.awaitDeletion(candidate,field,remaining:15)
+    probe.awaitSelection(candidate,MismatchSnapshot(element:field,text:"d",selection:NSRange(location:1,length:0)),NSRange(location:0,length:1),remaining:15)
     let end=Date().addingTimeInterval(0.3)
     while probe.recovering && Date()<end{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
     probeTestCheck(!probe.recovering && probe.retained.isEmpty && probe.pending.isEmpty)
     probeTestCheck(selections==1 && posts==[2,2,40,40] && text=="아")
     probeTestCheck(probe.postedBuffered==2 && probe.ledger?.text=="아")
-    print("PASS: source interruption after deletion resumes without deleting twice; original d and queued k form 아 exactly once")
+    print("PASS: source interruption during selection restores and overwrites exactly once without Backspace; original d and queued k form 아 exactly once")
     let stalled=MismatchRecoveryEngine();var stalledSource=mismatchKoreanID,requests=0;var completed=false
     stalled.recovering=true;stalled.planElement=field
     stalled.testSource={stalledSource};stalled.testSelectSource={stalledSource=$0;requests+=1;return noErr}
