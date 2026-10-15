@@ -13,6 +13,18 @@ guard CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:false) != nil else{
 let app=NSApplication.shared;let owner=MismatchRecoveryEngine(detectionOnly: ProcessInfo.processInfo.arguments.contains("--detect-only"));app.setActivationPolicy(.regular)
 if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     runLayoutTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-buffered-jamo") {
+    runBufferedJamoTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-source-settlement") {
+    runSourceSettlementTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-composition-continuation") {
+    runCompositionContinuationTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-paced-replay") {
+    runPacedReplayTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-monitor-lifecycle") {
+    runMonitorLifecycleTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-activation-shortcut") {
+    runActivationShortcutTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-mixed-transition") {
     runMixedTransitionTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-delivered-key-release") {
@@ -232,6 +244,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
         let snap=MismatchSnapshot(element:field,text:changed ? "앞🙂other":candidate.expected!,selection:NSRange(location:5,length:0))
         probe.enabled=true;probe.recovering=true;probe.replayStarted=true;probe.koreanRetries=2
         probe.currentPlan=candidate;probe.planElement=field;probe.testSource={mismatchKoreanID};probe.testSnapshot={snap}
+        probe.activationShortcut.configuration={nil}
         var delivered:[Int64]=[];probe.testPost={delivered.append($0.getIntegerValueField(.keyboardEventKeycode))}
         for (code,down) in [(5,true),(4,true),(5,false),(4,false)]{
             let event=CGEvent(keyboardEventSource:nil,virtualKey:CGKeyCode(code),keyDown:down)!

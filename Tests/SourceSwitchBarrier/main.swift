@@ -439,4 +439,35 @@ do {
  b.observe(.keyDown,key(2));check(b.expected?.0=="ㅇ","typing after select-all replaces selected Korean body once")
  b.fail("test_cleanup")
 }
+for reason in ["current","pre_key","pending_key","adopted","ascii","mixed","jamo","partial","wrong-key","text","caret","selection","field","source","expiry","boundary","busy","repair","permission","limit","reset"] {
+ let b=SourceSwitchBarrier();var source=ko,time=1.0
+ b.now={time};b.source={source};b.read={.init(field:field,text:"앞🙂뒤",selection:NSRange(location:3,length:0))}
+ for code:UInt16 in [15,40,1]{let event=key(code);event.timestamp=100;b.observe(.keyDown,event)}
+ let verified=MismatchSnapshot(element:field,text:"앞🙂간뒤",selection:NSRange(location:4,length:0))
+ if reason=="adopted"{
+  var replay=MismatchReplayLedger(before:"앞🙂뒤",caret:3);replay.append(source:ko,keys:[(15,false),(40,false),(1,false)])
+  b.noteExternalEdit();b.adoptVerifiedReplay(replay,snapshot:verified)
+ }
+ if ["pre_key","pending_key"].contains(reason){b.observe(.keyDown,key(40))}
+ if reason=="source"{source=en}
+ if reason=="expiry"{time=6.01}
+ if reason=="busy"{_ = b.request(en)}
+ if reason=="repair"{b.noteExternalEdit()}
+ if reason=="permission"{b.ready={false}}
+ if reason=="reset"{b.resetObservation()}
+ var snap=verified
+ let failures=["ascii":"rks","mixed":"rㅏㄴ","jamo":"ㄱㅏㄴ","partial":"가s","wrong-key":"rㅓㄴ"]
+ if let value=failures[reason]{snap = .init(element:field,text:"앞🙂"+value+"뒤",selection:NSRange(location:3+value.utf16.count,length:0))}
+ if reason=="text"{snap = .init(element:field,text:"다🙂간뒤",selection:verified.selection)}
+ if reason=="caret"{snap = .init(element:field,text:verified.text,selection:NSRange(location:3,length:0))}
+ if reason=="selection"{snap = .init(element:field,text:verified.text,selection:NSRange(location:4,length:1))}
+ if reason=="field"{snap = .init(element:other,text:verified.text,selection:verified.selection)}
+ if reason=="limit"{
+  var long=MismatchReplayLedger(before:"앞🙂뒤",caret:3);long.append(source:ko,keys:Array(repeating:(15,false),count:65))
+  snap = .init(element:field,text:long.text,selection:long.selection);b.adoptVerifiedReplay(long,snapshot:snap)
+ }
+ let result=b.verifiedTwoSetHistory(snap,after:reason=="boundary" ? UInt64.max:0,allowPrior:reason=="pre_key")
+ check((result?.plan.replayRoman=="rks") == ["current","pre_key","adopted","ascii","mixed","jamo","partial"].contains(reason),"verified delivery-history \(reason) proof")
+ b.fail("test_cleanup")
+}
 print("Source switch barrier:",checks,"checks passed")

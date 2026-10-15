@@ -40,6 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
         }
         controller.engine.didStart = { [weak self] in self?.refreshInputDeliveryOrigin() }
+        controller.engine.verifiedDeliveryHistory = { [weak self] snap,allowPrior in
+            guard let self else{return nil}
+            return self.sourceSwitchBarrier.verifiedTwoSetHistory(snap,after:self.mismatchRecovery.engine.lastUserSourceSwitchTimestamp,allowPrior:allowPrior)
+        }
         controller.engine.canToggleRightCommand = { [weak self] in
             guard let self else{return false}
             return self.koreanEnabled && !self.sourceSwitchBarrier.busy

@@ -83,7 +83,16 @@ class MacOS:
             except ProcessLookupError:
                 return None
             raise PreflightError(f'프로세스 {pid}의 실행 경로를 확인할 수 없습니다.')
-        started = run(['/bin/ps', '-p', str(pid), '-o', 'lstart=']).stdout.strip()
+        try:
+            started = run(['/bin/ps', '-p', str(pid), '-o', 'lstart=']).stdout.strip()
+        except PreflightError:
+            # Permission probes can exit between proc_pidpath and ps. Only a
+            # confirmed exit is skippable; a live process/query error is not.
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return None
+            raise
         return (str(pathlib.Path(buffer.value.decode()).resolve()), started)
 
     def processes(self):
@@ -106,7 +115,14 @@ class MacOS:
                 raise PreflightError(f'실행 중인 앱의 번들을 확인할 수 없습니다: {app}') from error
             if info.get('CFBundleIdentifier') != BUNDLE_ID:
                 continue
-            command = run(['/bin/ps', '-p', str(pid), '-o', 'command=']).stdout
+            try:
+                command = run(['/bin/ps', '-p', str(pid), '-o', 'command=']).stdout
+            except PreflightError:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                raise
             helper = any(flag in command for flag in ('--permission-probe', '--permission-relauncher', '--hanja-candidate-probe', '--hanja-candidates-list-probe'))
             processes.append({'pid': pid, 'identity': identity, 'app': str(app), 'helper': helper})
         return processes

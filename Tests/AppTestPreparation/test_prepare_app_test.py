@@ -285,6 +285,37 @@ class PreparationTests(unittest.TestCase):
                 self.assertEqual([item['pid'] for item in processes], [100])
                 self.assertTrue(processes[0]['helper'])
 
+    def test_inventory_ps_failure_skips_only_confirmed_exited_process(self):
+        operations = preflight.MacOS.__new__(preflight.MacOS)
+        operations.process_identity = lambda pid: (str(self.app / 'Contents/MacOS/HanQ'), 'start')
+        for gone in (True, False):
+            with self.subTest(gone=gone), mock.patch.object(
+                    preflight.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '100\n', '')):
+                with mock.patch.object(preflight, 'run', side_effect=preflight.PreflightError('ps failed')):
+                    with mock.patch.object(preflight.os, 'kill', side_effect=ProcessLookupError() if gone else None):
+                        if gone:
+                            self.assertEqual(operations.processes(), [])
+                        else:
+                            with self.assertRaises(preflight.PreflightError):
+                                operations.processes()
+
+    def test_identity_ps_failure_skips_only_confirmed_exit(self):
+        operations = preflight.MacOS.__new__(preflight.MacOS)
+        operations.libproc = mock.Mock()
+        def path(pid, buffer, length):
+            buffer.value = str(self.app / 'Contents/MacOS/HanQ').encode()
+            return len(buffer.value)
+        operations.libproc.proc_pidpath.side_effect = path
+        for gone in (True, False):
+            with self.subTest(gone=gone), mock.patch.object(
+                    preflight, 'run', side_effect=preflight.PreflightError('ps failed')):
+                with mock.patch.object(preflight.os, 'kill', side_effect=ProcessLookupError() if gone else None):
+                    if gone:
+                        self.assertIsNone(operations.process_identity(100))
+                    else:
+                        with self.assertRaises(preflight.PreflightError):
+                            operations.process_identity(100)
+
     def reuse_fixture(self):
         self.prepare()
         self.check()

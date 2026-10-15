@@ -57,4 +57,23 @@ struct MismatchReplayLedger {
     var insertion:String{segments.map{Self.render($0)}.joined()}
     var text:String{(before as NSString).replacingCharacters(in:NSRange(location:caret,length:0),with:insertion)}
     var selection:NSRange{NSRange(location:caret+insertion.utf16.count,length:0)}
+    // Prove the entire latest Korean interval, including keys whose first
+    // consonant was already acknowledged before the buffered batch arrived.
+    func lastTwoSetPlan()->MismatchRecoveryPlan? {
+        guard let segment=segments.last,segment.source==KoreanKeyboardLayout.twoSetID,
+              caret>=0,caret<=before.utf16.count else{return nil}
+        let committed=segments.dropLast().map{Self.render($0)}.joined()
+        let base=(before as NSString).replacingCharacters(in:NSRange(location:caret,length:0),with:committed)
+        var candidate=MismatchRecoveryPlan(before:base,caret:caret+committed.utf16.count,sourceID:segment.source)
+        candidate.codes=segment.keys
+        guard !candidate.codes.isEmpty,candidate.codes.count<=64 else{return nil}
+        candidate.roman=candidate.replayRoman
+        return candidate
+    }
+    func decomposedPlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
+        lastTwoSetPlan()?.decomposedPlan(text:text,selection:selection)
+    }
+    func interruptedCompositionPlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
+        lastTwoSetPlan()?.interruptedCompositionPlan(text:text,selection:selection)
+    }
 }

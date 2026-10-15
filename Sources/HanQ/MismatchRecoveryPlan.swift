@@ -247,11 +247,58 @@ extension MismatchRecoveryPlan {
         }
         return result
     }
+    private func interruptedTwoSet(_ keys:[(UInt16,Bool)],insertion:String)->Bool {
+        guard keys.count>1 else{return false}
+        for split in 1..<keys.count {
+            let prefixKeys=Array(keys.prefix(split))
+            guard let prefix=MismatchKeyboardLayout.render(keys:prefixKeys,sourceID:sourceID),
+                  let detachedPrefix=detachedTwoSet(prefixKeys),prefix != detachedPrefix,
+                  let suffix=detachedTwoSet(Array(keys.dropFirst(split))) else{continue}
+            // Late activation loss can produce ASCII instead of loose jamo.
+            // Both suffixes must account for every observed physical key.
+            let roman=keys.dropFirst(split).compactMap{Self.character($0.0,$0.1)}.joined()
+            if prefix+suffix==insertion || prefix+roman==insertion{return true}
+        }
+        return false
+    }
+    // Source processing can change between any two delivered keys. Match only
+    // complete contiguous physical-key segments, rendered normally, detached,
+    // or as their literal Roman keys. Memoization bounds repeated partitions.
+    private func fragmentedTwoSet(_ keys:[(UInt16,Bool)],insertion:String)->Bool {
+        let target=Array(insertion.utf16)
+        var failed=Set<Int>()
+        func prove(_ start:Int,_ offset:Int)->Bool {
+            if start==keys.count{return offset==target.count}
+            guard offset<target.count else{return false}
+            let state=start*(target.count+1)+offset
+            if failed.contains(state){return false}
+            for end in (start+1)...keys.count {
+                let part=Array(keys[start..<end])
+                let outputs:[String?]=[MismatchKeyboardLayout.render(keys:part,sourceID:sourceID),
+                             detachedTwoSet(part),part.compactMap{Self.character($0.0,$0.1)}.joined()]
+                for output in Set(outputs.compactMap{$0}) {
+                    let units=Array(output.utf16),next=offset+units.count
+                    if !units.isEmpty,next<=target.count,Array(target[offset..<next])==units,
+                       prove(end,next){return true}
+                }
+            }
+            failed.insert(state);return false
+        }
+        return prove(0,0)
+    }
+    func fragmentedCompositionPlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
+        guard hasLetters,let insertion=twoSetInsertion(text:text,selection:selection),
+              let composed=MismatchKeyboardLayout.render(keys:codes,sourceID:sourceID),
+              composed != insertion,
+              insertion.unicodeScalars.contains(where:{(0x3131...0x318e).contains($0.value) || (0xac00...0xd7a3).contains($0.value)}),
+              fragmentedTwoSet(codes,insertion:insertion) else{return nil}
+        var result=self;result.roman=insertion;result.verifiedReplacement=insertion;return result
+    }
     func observedTwoSetPrefix(text:String,selection:NSRange)->Bool {
         guard let insertion=twoSetInsertion(text:text,selection:selection) else{return false}
         for count in (1...codes.count).reversed() {
             let prefix=Array(codes.prefix(count))
-            if MismatchKeyboardLayout.render(keys:prefix,sourceID:sourceID)==insertion || detachedTwoSet(prefix)==insertion{return true}
+            if MismatchKeyboardLayout.render(keys:prefix,sourceID:sourceID)==insertion || detachedTwoSet(prefix)==insertion || interruptedTwoSet(prefix,insertion:insertion) || fragmentedTwoSet(prefix,insertion:insertion){return true}
         }
         return false
     }
@@ -261,5 +308,18 @@ extension MismatchRecoveryPlan {
               let composed=MismatchKeyboardLayout.render(keys:codes,sourceID:sourceID),
               composed != insertion else{return nil}
         var result=self;result.roman=insertion;result.verifiedReplacement=insertion;return result
+    }
+    // A late source transition can commit a correctly replayed syllable. Only
+    // the complete known prefix + detached/ASCII suffix may reopen composition.
+    func interruptedCompositionPlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
+        guard hasLetters,let insertion=twoSetInsertion(text:text,selection:selection),
+              let composed=MismatchKeyboardLayout.render(keys:codes,sourceID:sourceID),
+              composed != insertion,interruptedTwoSet(codes,insertion:insertion) else{return nil}
+        var result=self;result.roman=insertion;result.verifiedReplacement=insertion;return result
+    }
+    func partialFailurePlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
+        mixedPlan(text:text,selection:selection) ?? decomposedPlan(text:text,selection:selection) ??
+            interruptedCompositionPlan(text:text,selection:selection) ??
+            fragmentedCompositionPlan(text:text,selection:selection)
     }
 }

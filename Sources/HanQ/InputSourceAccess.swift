@@ -2,6 +2,12 @@ import Carbon
 
 // TIS operations only. Target selection and fallback policies belong to callers.
 enum InputSourceAccess {
+    private static func id(_ source:TISInputSource?)->String? {
+        guard let source,let pointer=TISGetInputSourceProperty(source,kTISPropertyInputSourceID) else{return nil}
+        return Unmanaged<CFString>.fromOpaque(pointer).takeUnretainedValue() as String
+    }
+    static func currentLayoutID()->String {id(TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue()) ?? "unknown"}
+    static func currentOverrideID()->String? {id(TISCopyInputMethodKeyboardLayoutOverride()?.takeRetainedValue())}
     static func currentID() -> String {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
               let pointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return "unknown" }

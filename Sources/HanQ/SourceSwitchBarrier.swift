@@ -24,6 +24,10 @@ final class SourceSwitchBarrier {
     private var field:AXUIElement?
     private var transactionField:AXUIElement?
     private var ledger:MismatchReplayLedger?
+    private var priorKeyLedger:MismatchReplayLedger?
+    private var lastKeyAt=0.0
+    private var priorKeyAt=0.0
+    private var historyStarted:CGEventTimestamp=0
     private var selectedRange:NSRange?
     private var pendingSelectAll=false
     private var selectionCommitPending=false
@@ -120,7 +124,24 @@ final class SourceSwitchBarrier {
         selectedRange=NSRange(location:0,length:snap.text.utf16.count)
         trace("select_all_initial_body_removed")
     }
-    func resetObservation(){field=nil;ledger=nil;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){field=nil;ledger=nil;priorKeyLedger=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    // The main tap records accepted keys before the mismatch tap reads their
+    // pre-insertion snapshot. Offer either complete ledger, never inferred text.
+    func verifiedTwoSetHistory(_ snap:MismatchSnapshot,after boundary:CGEventTimestamp,allowPrior:Bool=false)->(plan:MismatchRecoveryPlan,lastKeyAt:Double)? {
+        guard !busy,ready(),!externalEditPending,selectedRange==nil,
+              let field,CFEqual(field,snap.element),source()==mismatchKoreanID,
+              historyStarted>boundary else{return nil}
+        let histories=allowPrior ? [(ledger,lastKeyAt),(priorKeyLedger,priorKeyAt)]:[(ledger,lastKeyAt)]
+        for (candidate,at) in histories {
+            guard let candidate,now()-at>=0,now()-at<=5,
+                  let plan=candidate.lastTwoSetPlan() else{continue}
+            let normal=candidate.text==snap.text && candidate.selection==snap.selection
+            guard normal || plan.matches(text:snap.text,selection:snap.selection) ||
+                plan.partialFailurePlan(text:snap.text,selection:snap.selection) != nil else{continue}
+            return (plan,at)
+        }
+        return nil
+    }
     /// The onset engine has selected its exact replacement on this field.
     /// Seed prediction before posting, then observe each posted event once.
     /// This is not editor acknowledgment: selection/switch still requires the
@@ -159,6 +180,7 @@ final class SourceSwitchBarrier {
         guard replay.text==snapshot.text,replay.selection==snapshot.selection else{return}
         guard transactionField == nil || CFEqual(transactionField!,snapshot.element) else{return}
         field=snapshot.element;ledger=replay;selectedRange=nil;externalEditPending=false
+        priorKeyLedger=nil;lastKeyAt=now();historyStarted=MismatchRecoveryEngine.sourceEventTime()
         trace("repair_history_adopted")
     }
     func observe(_ type:CGEventType,_ event:CGEvent) {
@@ -198,9 +220,11 @@ final class SourceSwitchBarrier {
                   NSMaxRange(snap.selection)<=snap.text.utf16.count else{return}
             field=snap.field
             ledger=MismatchReplayLedger(before:(snap.text as NSString).replacingCharacters(in:snap.selection,with:""),caret:snap.selection.location)
+            historyStarted=event.timestamp
         }
         if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil}
         guard (ledger?.segments.reduce(0,{$0+$1.keys.count}) ?? 0)<128 else{resetObservation();return}
+        priorKeyLedger=ledger;priorKeyAt=lastKeyAt;lastKeyAt=now()
         ledger?.append(source:id,keys:[(code,event.flags.contains(.maskShift))])
 
     }

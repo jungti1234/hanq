@@ -6,7 +6,8 @@ extension MismatchRecoveryEngine {
         MismatchKeyboardLayout.supports(id) || id==englishID || id=="com.apple.keylayout.ABC" || id=="com.apple.keylayout.US"
     }
     static func sourceEventTime()->CGEventTimestamp {
-        CGEvent(source:nil)?.timestamp ?? CGEventTimestamp(ProcessInfo.processInfo.systemUptime*1_000_000_000)
+        if let timestamp=CGEvent(source:nil)?.timestamp,timestamp>0{return timestamp}
+        return CGEventTimestamp(ProcessInfo.processInfo.systemUptime*1_000_000_000)
     }
     func setUserSourceIntent(_ source:String,at timestamp:CGEventTimestamp) {
         guard recovering else{return}
@@ -44,7 +45,9 @@ extension MismatchRecoveryEngine {
             }
         }else if external {
             setUserSourceIntent(source,at:time>0 ? time:Self.sourceEventTime())
+            guard recovering else{return}
             if sourceMenuPaused{resumeMenuAfterSelection()}
+            else{settleExternalSource()}
         }
     }
     func pauseSourceWork() {
@@ -62,17 +65,18 @@ extension MismatchRecoveryEngine {
         sourceMenuPaused=false;sourceMenuSawPopup=false;capsSourceInteraction=nil;sourceInteractionRevision+=1
         if let start=sourcePauseStarted{recoveryDeadline+=max(0,interactionNow()-start)}
         sourcePauseStarted=nil;asyncReady=nil
-        let actions=pausedRecoveryActions;pausedRecoveryActions=[]
-        for action in actions{later(0,action)}
+        resumeDeferredSourceWork()
     }
     func clearSourceInteraction() {
         sourceMenuPaused=false;sourceMenuSawPopup=false;capsSourceInteraction=nil;sourcePauseStarted=nil;pausedRecoveryActions=[];sourceInteractionRevision+=1
+        cancelExternalSourceSettlement()
     }
     func potentialCapsSourceSwitch(at timestamp:CGEventTimestamp) {
         guard recovering,!rollingBack,capsSwitchEnabled(),!sourceMenuPaused,capsSourceInteraction==nil else{return}
         guard !systemSwitch.unsettled else{park("caps_during_unsettled_source");return}
         observeRecoverySource(currentSource(),at:timestamp)
         guard recovering else{return}
+        cancelExternalSourceSettlement()
         pauseSourceWork();log("caps_source_wait")
         // A busy target editor can delay the system's actual Caps source
         // acknowledgement beyond 350ms. Wait a bounded second, require a real
@@ -84,6 +88,7 @@ extension MismatchRecoveryEngine {
         guard !systemSwitch.unsettled,capsSourceInteraction==nil else{park("menu_during_unsettled_source");return}
         observeRecoverySource(currentSource(),at:timestamp)
         guard recovering else{return}
+        cancelExternalSourceSettlement()
         sourceMenuPaused=true;sourceMenuSawPopup=false;pauseSourceWork();log("source_menu_paused")
         // The menu must display user intent, not recovery's temporary English.
         // Restore before the original mouse-down reaches the menu owner.
