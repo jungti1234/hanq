@@ -1110,8 +1110,9 @@ final class MismatchRecoveryEngine:NSObject {
     @objc func copyPending(){
         let text=(retained+pending).filter{$0.type == .keyDown}.map{event -> String in
             let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            guard let key=PhysicalLetterKeys.letters[code],event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{return "[keyCode:\(code)]"}
-            return event.flags.contains(.maskShift) ? key.uppercased():key
+            guard event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty,
+                  let text=MismatchRecoveryPlan.character(code,event.flags.contains(.maskShift)) else{return "[keyCode:\(code)]"}
+            return text
         }.joined()
         guard !text.isEmpty else{retained=[];pending=[];suspended=false;return}
         NSPasteboard.general.clearContents();NSPasteboard.general.setString(text,forType:.string)
