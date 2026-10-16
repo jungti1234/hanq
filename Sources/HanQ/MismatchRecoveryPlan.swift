@@ -264,7 +264,37 @@ extension MismatchRecoveryPlan {
     // Source processing can change between any two delivered keys. Match only
     // complete contiguous physical-key segments, rendered normally, detached,
     // or as their literal Roman keys. Memoization bounds repeated partitions.
+    // Every allowed segment preserves these elementary jamo in order. A
+    // normal AX snapshot can lag the observed keys; it cannot account for all
+    // keys if the components differ. Reject that impossible proof before the
+    // partition search, without accepting any new replacement.
+    private func twoSetComponents(_ text:String,layout:KoreanKeyboardLayout)->String {
+        let initials=Array("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
+        let vowels=Array("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ")
+        let finals=Array("ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ")
+        let expanded:[Character:String]=["ㄲ":"ㄱㄱ","ㄸ":"ㄷㄷ","ㅃ":"ㅂㅂ","ㅆ":"ㅅㅅ","ㅉ":"ㅈㅈ",
+            "ㅘ":"ㅗㅏ","ㅙ":"ㅗㅐ","ㅚ":"ㅗㅣ","ㅝ":"ㅜㅓ","ㅞ":"ㅜㅔ","ㅟ":"ㅜㅣ","ㅢ":"ㅡㅣ",
+            "ㄳ":"ㄱㅅ","ㄵ":"ㄴㅈ","ㄶ":"ㄴㅎ","ㄺ":"ㄹㄱ","ㄻ":"ㄹㅁ","ㄼ":"ㄹㅂ","ㄽ":"ㄹㅅ","ㄾ":"ㄹㅌ","ㄿ":"ㄹㅍ","ㅀ":"ㄹㅎ","ㅄ":"ㅂㅅ"]
+        var result=""
+        for char in text {
+            // Literal Roman segments represent the same observed physical key.
+            let value=layout.keys[char] ?? char
+            for scalar in String(value).decomposedStringWithCompatibilityMapping.unicodeScalars {
+                let jamo:Character
+                switch scalar.value {
+                case 0x1100...0x1112:jamo=initials[Int(scalar.value-0x1100)]
+                case 0x1161...0x1175:jamo=vowels[Int(scalar.value-0x1161)]
+                case 0x11a8...0x11c2:jamo=finals[Int(scalar.value-0x11a8)]
+                default:jamo=Character(String(scalar))
+                }
+                result.append(expanded[jamo] ?? String(jamo))
+            }
+        }
+        return result
+    }
     private func fragmentedTwoSet(_ keys:[(UInt16,Bool)],insertion:String)->Bool {
+        guard let layout=MismatchKeyboardLayout.load(sourceID),let detached=detachedTwoSet(keys),
+              twoSetComponents(detached,layout:layout)==twoSetComponents(insertion,layout:layout) else{return false}
         let target=Array(insertion.utf16)
         var failed=Set<Int>()
         func prove(_ start:Int,_ offset:Int)->Bool {

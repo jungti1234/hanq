@@ -127,7 +127,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     }
     testCheck(!OnsetEditableRole.supports(kAXPopUpButtonRole),"popup menu remains outside editor roles")
     // Entire product path with no previous focused-editor observation.
-    let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true};p.testSource={onsetKoreanID}
+    let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};p.enabled=true;p.testCanSelect={true};p.testSource={onsetKoreanID}
     let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
     p.outsideObservation.entries=[.init(snapshot:.init(element:field,text:"abc",selection:NSRange(location:NSNotFound,length:0)),completed:ProcessInfo.processInfo.systemUptime-0.05)]
     func key(_ code:UInt16,_ down:Bool=true)->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;e.flags=[];return e}
@@ -152,7 +152,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     print("PASS: app-independent transitions, never-focused discovery, pre-key timestamps, expiry, window/field identity and full no-prior-focus recovery")
 } else if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     do {
-        let p=OnsetRecoveryEngine();p.enabled=true
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};p.enabled=true
         var source="com.apple.keylayout.ABC",reads=0
         let field=AXUIElementCreateApplication(12345)
         p.testSource={source};p.testSnapshot={reads+=1;return .init(element:field,text:"",selection:NSRange(location:0,length:0))}
@@ -171,7 +171,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
             for code in (shift ? layout.shifted:layout.normal).keys.sorted() {
                 let variants=layout.variants(code:code,shift:shift)
                 for original in variants {
-                    let p=OnsetRecoveryEngine();p.enabled=true;p.testSource={id};p.testCanSelect={true}
+                    let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};p.enabled=true;p.testSource={id};p.testCanSelect={true}
                     let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g
                     p.unavailableReason="not_supported_text_field";p.sampleEarly(nil)
                     testCheck(g.receive(.keyDown,key(code,true,shift)) != nil && g.reservation()?.sourceID==id,"reserve actual layout initial")
@@ -202,7 +202,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     }
     testCheck(OnsetKeyboardLayout.load(sourceID:"custom.korean")==nil && OnsetKeyboardLayout.load(sourceID:"com.apple.keylayout.ABC")==nil,"no guessed two-set fallback")
     for phase in [0,1,2] {
-        let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true};let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};p.enabled=true;p.testCanSelect={true};let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g
         var source=KoreanKeyboardLayout.threeSetID;var sent=0
         p.testSource={source};p.unavailableReason="not_supported_text_field";p.sampleEarly(nil)
         _=g.receive(.keyDown,key(40));g.held=[key(3)] // Inject an in-flight buffered vowel to verify source-change fencing.
@@ -221,7 +221,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     func key(_ marker:Int64=0)->CGEvent{let e=CGEvent(keyboardEventSource:nil,virtualKey:15,keyDown:true)!;e.flags=[];e.setIntegerValueField(.eventSourceUserData,value:marker);return e}
     let field=AXUIElementCreateApplication(12345)
     for scenario in 0..<3 {
-        let p=OnsetRecoveryEngine();let g=OnsetInputGate(marker:p.marker);g.beat();_ = g.begin();p.gate=g
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};let g=OnsetInputGate(marker:p.marker);g.beat();_ = g.begin();p.gate=g
         p.enabled=true;p.recovering=true;p.postedToGate=2
         var posts=0;var stops=0;var stale=false
         p.testPost={_ in posts+=1};p.didStop={stops+=1}
@@ -237,13 +237,13 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
         p.emergencyStop("late_failure");testCheck(stops==1,"late failure cannot extend restart backoff")
         RunLoop.current.run(until:Date().addingTimeInterval(0.005));testCheck(!stale,"old recovery task invalidated")
     }
-    let p=OnsetRecoveryEngine();let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;p.enabled=true;p.waitingForContext=true;p.postedToGate=1
+    let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;p.enabled=true;p.waitingForContext=true;p.postedToGate=1
     p.testSource={onsetKoreanID};p.testSnapshot={OnsetSnapshot(element:field,text:"ㄱ",selection:NSRange(location:1,length:0))}
     p.resumeIfReady(now:20);_ = g.receive(.keyDown,key(p.marker))
     p.resumeIfReady(now:20.2);p.resumeIfReady(now:20.301)
     testCheck(p.enabled && !p.waitingForContext && p.acknowledgmentWaitBegan==nil,"delayed acknowledgment permits normal resume")
     p.closeSession()
-    let d=OnsetRecoveryEngine();let dg=OnsetInputGate(marker:d.marker);dg.beat();_ = dg.begin();d.gate=dg
+    let d=OnsetRecoveryEngine();d.testCommitComposition={_ in true};let dg=OnsetInputGate(marker:d.marker);dg.beat();_ = dg.begin();d.gate=dg
     var clock=0.0;d.acknowledgmentClock={clock};d.enabled=true;d.recovering=true;d.postedToGate=1;d.planElement=field
     d.testSource={onsetKoreanID};d.testSnapshot={OnsetSnapshot(element:field,text:"ㄱ",selection:NSRange(location:1,length:0))};d.testPost={_ in testCheck(false,"empty drain must not repost")}
     d.drain([]);RunLoop.current.run(until:Date().addingTimeInterval(0.01));clock=0.251
@@ -267,7 +267,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     }
     for shiftCode:CGKeyCode in [56,60] {
         for (code,jamo,syllable):(CGKeyCode,String,String) in [(15,"ㄲ","까"),(14,"ㄸ","따"),(12,"ㅃ","빠"),(17,"ㅆ","싸"),(13,"ㅉ","짜")] {
-            let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true}
+            let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};p.enabled=true;p.testCanSelect={true}
             let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
             let shiftDown=key(shiftCode,true,.maskShift);shiftDown.type = .flagsChanged
             testCheck(g.receive(.flagsChanged,shiftDown) != nil)
@@ -313,7 +313,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
 } else if ProcessInfo.processInfo.arguments.contains("--test-early-capture") {
     func key(_ code:CGKeyCode,_ down:Bool=true)->CGEvent{let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;e.flags=[];return e}
     for alreadyCollected in [false,true] {
-        let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true}
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};p.enabled=true;p.testCanSelect={true}
         let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
         testCheck(g.receive(.keyDown,key(15)) != nil)
         testCheck(g.receive(.keyUp,key(15,false)) != nil,"release of original first down passes")
@@ -337,7 +337,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
         p.closeSession()
     }
     for prefix in [false,true] {
-        let p=OnsetRecoveryEngine();let g=OnsetInputGate(marker:p.marker);g.beat();_ = g.begin();p.gate=g
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};let g=OnsetInputGate(marker:p.marker);g.beat();_ = g.begin();p.gate=g
         let field=AXUIElementCreateApplication(12345);p.planElement=field;p.enabled=true;p.recovering=true;p.testSource={onsetKoreanID}
         p.currentPlan=OnsetRecoveryPlan(before:"",caret:0,allowSingle:true,roman:"ㄱ",codes:[(15,false)])
         p.testSnapshot={g.stop();return OnsetSnapshot(element:field,text:"ㄱ",selection:NSRange(location:1,length:0))}
@@ -350,14 +350,14 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     let productGate=OnsetInputGate(marker:99);productGate.beat();productGate.configureEarly(true)
     let synthetic=key(15);synthetic.setIntegerValueField(.eventSourceUserData,value:0x454F5448)
     testCheck(productGate.receive(.keyDown,synthetic) != nil && productGate.reservation()==nil,"HanQ synthetic keys cannot reserve onset input")
-    let busy=OnsetRecoveryEngine();busy.enabled=true;busy.canBeginRepair={false};busy.gate=productGate
+    let busy=OnsetRecoveryEngine();busy.testCommitComposition={_ in true};busy.enabled=true;busy.canBeginRepair={false};busy.gate=productGate
     busy.unavailableReason="not_supported_text_field";busy.testSource={onsetKoreanID};busy.sampleEarly(nil)
     testCheck(productGate.receive(.keyDown,key(15)) != nil && productGate.reservation()==nil,"manual edits disarm early capture")
     print("PASS: actual early gate + sample + selection + drain composes gan; precollected keys preserved; clipboard unused; rejected physical/prefix posts retained; stale hints skipped")
 } else if ProcessInfo.processInfo.arguments.contains("--test-early-publication") {
     func key(_ code:CGKeyCode)->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!;e.flags=[];return e}
     for scenario in ["text", "caret", "existing", "timeout", "field", "changed", "source", "selection"] {
-        let p=OnsetRecoveryEngine();p.enabled=true;p.testCanSelect={true}
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};p.enabled=true;p.testCanSelect={true}
         let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
         _=g.receive(.keyDown,key(15))
         let began=g.reservation()!.time
@@ -439,7 +439,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     testCheck(!OnsetRecoveryController.supports(pid:0))
     testCheck(OnsetRecoveryController.needsRebind(currentPID:42,frontPID:43))
     testCheck(!OnsetRecoveryController.needsRebind(currentPID:42,frontPID:42))
-    let controller=OnsetRecoveryController();let engine=OnsetRecoveryEngine()
+    let controller=OnsetRecoveryController();let engine=OnsetRecoveryEngine();engine.testCommitComposition={_ in true}
     let gate=OnsetInputGate(marker:123);gate.beat();testCheck(gate.begin())
     engine.gate=gate;engine.enabled=true;engine.recovering=true
     engine.pending=[CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:true)!]
@@ -453,7 +453,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     engine.log("privacy_check",["text":"PRIVATE_ONSET_PAYLOAD","code":40,"events":["PRIVATE_ONSET_PAYLOAD"]])
     print("PASS: product teardown stops gate, retains unsent input, prevents manual edit overlap")
 } else if ProcessInfo.processInfo.arguments.contains("--test-field-tracking") {
-    let owner=OnsetRecoveryEngine()
+    let owner=OnsetRecoveryEngine();owner.testCommitComposition={_ in true}
     let first=AXUIElementCreateApplication(12345)
     let second=AXUIElementCreateApplication(12346)
     let a=OnsetSnapshot(element:first,text:"draft",selection:NSRange(location:5,length:0))
@@ -473,7 +473,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     testCheck(owner.lastAvailability=="tracking")
     print("PASS: initial binding, stable field, recreated field cancellation, unavailable state, resumed tracking")
 } else if ProcessInfo.processInfo.arguments.contains("--test-recovery") || ProcessInfo.processInfo.arguments.contains("--test-selection-retry") {
-    let probe=OnsetRecoveryEngine();let element=AXUIElementCreateApplication(12345)
+    let probe=OnsetRecoveryEngine();probe.testCommitComposition={_ in true};let element=AXUIElementCreateApplication(12345)
     var candidate=OnsetRecoveryPlan(before:"",caret:0);candidate.allowSingle=true;candidate.roman="ㅈ";candidate.codes=[(13,false)]
     var text="ㅈ";var selection=NSRange(location:1,length:0);var codes:[Int64]=[]
     probe.testSource={onsetKoreanID}
@@ -508,7 +508,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     print("PASS: single consonant replay followed by buffered vowel and final consonant; simulated editor, no source switching or actual key posting")
 } else if ProcessInfo.processInfo.arguments.contains("--test-selected-replacement") {
     for applied in [true,false] {
-        let probe=OnsetRecoveryEngine();let field=AXUIElementCreateApplication(12345)
+        let probe=OnsetRecoveryEngine();probe.testCommitComposition={_ in true};let field=AXUIElementCreateApplication(12345)
         var text="ㅈ";var selection=NSRange(location:0,length:1);var codes:[Int64]=[]
         var candidate=OnsetRecoveryPlan(before:"",caret:0);candidate.allowSingle=true;candidate.roman="ㅈ";candidate.codes=[(13,false)]
         probe.recovering=true;probe.enabled=true;probe.currentPlan=candidate;probe.planElement=field
@@ -532,7 +532,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     print("PASS: selected replacement waits for selection collapse despite identical text; no cut/delete; buffered vowel/final order; unhandled replacement retains keys")
 } else if ProcessInfo.processInfo.arguments.contains("--test-superseded") {
     for scenario in [0,1,2,3,4,6,7] {
-        let p=OnsetRecoveryEngine();let field=AXUIElementCreateApplication(12345)
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};let field=AXUIElementCreateApplication(12345)
         let candidate=OnsetRecoveryPlan(before:"앞뒤",caret:1,allowSingle:true,roman:"ㅈ",codes:[(13,false)])
         var text="앞ㅈ오뒤";var selection=NSRange(location:3,length:0)
         var codes:[Int64]=[];var ranges=0
@@ -564,7 +564,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     print("PASS: superseded repair before selection/during selection drains input without disabling; changed prefix/selection/field/source and started edits rejected")
 } else if ProcessInfo.processInfo.arguments.contains("--test-selection-read") {
     for scenario in 0..<4 {
-        let p=OnsetRecoveryEngine();let field=AXUIElementCreateApplication(12345)
+        let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};let field=AXUIElementCreateApplication(12345)
         let c=OnsetRecoveryPlan(before:"ㅎㅎ",caret:2,allowSingle:true,roman:"ㅎ",codes:[(5,false)])
         var text="ㅎㅎㅎ";var range=NSRange(location:2,length:1);var reads=0;var codes:[Int64]=[]
         p.enabled=true;p.recovering=true;p.currentPlan=c;p.planElement=field
@@ -596,7 +596,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     }
     print("PASS: transient selection read recovers and delivers hong; persistent failure, changed field and app stop without replay")
 } else if ProcessInfo.processInfo.arguments.contains("--test-auto-resume") {
-    let p=OnsetRecoveryEngine();let field=AXUIElementCreateApplication(12345)
+    let p=OnsetRecoveryEngine();p.testCommitComposition={_ in true};let field=AXUIElementCreateApplication(12345)
     let gate=OnsetInputGate(marker:p.marker);gate.beat();testCheck(gate.begin());p.gate=gate
     p.enabled=true;p.recovering=true;p.testSource={onsetKoreanID}
     var readable=false;var range=NSRange(location:1,length:0);var posts=0;var stale=false
@@ -618,7 +618,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     print("PASS: unavailable field pauses; normal keys pass; stable collapsed field resumes; retained input is not replayed; stale work and explicit stop cannot resume")
 } else if ProcessInfo.processInfo.arguments.contains("--test-prefix-delay") {
     for visible in [true,false] {
-        let probe=OnsetRecoveryEngine();let field=AXUIElementCreateApplication(12345)
+        let probe=OnsetRecoveryEngine();probe.testCommitComposition={_ in true};let field=AXUIElementCreateApplication(12345)
         var text="";var codes:[Int64]=[]
         probe.recovering=true;probe.enabled=true;probe.planElement=field
         var candidate=OnsetRecoveryPlan(before:"",caret:0);candidate.allowSingle=true;candidate.roman="ㅈ";candidate.codes=[(13,false)]
@@ -640,7 +640,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     }
     print("PASS: delayed prefix blocks vowel until visible; missing prefix retains queued keys without replay")
 } else if ProcessInfo.processInfo.arguments.contains("--test-drain") {
-    let probe=OnsetRecoveryEngine();let field=AXUIElementCreateApplication(12345)
+    let probe=OnsetRecoveryEngine();probe.testCommitComposition={_ in true};let field=AXUIElementCreateApplication(12345)
     probe.recovering=true;probe.enabled=true;probe.planElement=field
     probe.testSource={onsetKoreanID}
     probe.currentPlan=OnsetRecoveryPlan(before:"",caret:0,allowSingle:true,roman:"ㅈ",codes:[(13,false)])
@@ -666,7 +666,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     var checks=0
     func check(_ ok:Bool,_ name:String){testCheck(ok,name);checks+=1}
     func scenario(ignoredCaret:Bool=false,changedText:Bool=false,newField:Bool=false,extraKey:Bool=false,stopDuring:Bool=false){
-        let probe=OnsetRecoveryEngine()
+        let probe=OnsetRecoveryEngine();probe.testCommitComposition={_ in true}
         let element=AXUIElementCreateApplication(12345)
         let other=AXUIElementCreateApplication(12346)
         let candidate=OnsetRecoveryPlan(before:"dkdkdkdkdkdkddkdkd",caret:18,allowSingle:true,roman:"ㅈ",codes:[(13,false)])

@@ -11,7 +11,9 @@ guard CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:false) != nil else{
     fputs("FAIL: keyboard event allocation unavailable in this execution environment\n",stderr);exit(2)
 }
 let app=NSApplication.shared;let owner=MismatchRecoveryEngine(detectionOnly: ProcessInfo.processInfo.arguments.contains("--detect-only"));app.setActivationPolicy(.regular)
-if ProcessInfo.processInfo.arguments.contains("--test-event-target-following") {
+if ProcessInfo.processInfo.arguments.contains("--test-fragmented-proof") {
+    runFragmentedProofTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-event-target-following") {
     runEventTargetFollowingTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-layouts") {
     runLayoutTests()

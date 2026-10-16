@@ -372,6 +372,10 @@ final class OnsetRecoveryEngine:NSObject {
     var testReplaceText:((AXUIElement,String)->AXError)?
     var testOriginalSnapshot:((AXUIElement)->OnsetSnapshot?)?
     var testSetRange:((AXUIElement,NSRange)->AXError)?
+    // Detached-text test doubles have no IME composition to commit. Real clients
+    // use the cursor-key path and must acknowledge it through their text/caret.
+    var testCommitComposition:((AXUIElement)->Bool)?
+    var testPostCompositionCommit:((AXUIElement,CGEvent)->Bool)?
     var testSource:(()->String)?
     var testPost:((CGEvent)->Void)?
     func currentSource()->String { testSource?() ?? InputSourceAccess.currentID() }
@@ -611,6 +615,13 @@ final class OnsetRecoveryEngine:NSObject {
             if skipSupersededRepair(candidate,current){return}
             abort("pre_edit_mismatch");return
         }
+        if candidate.supportsReplay {
+            commitConsonantComposition(candidate,current)
+            return
+        }
+        requestRepairSelection(candidate,current)
+    }
+    func requestRepairSelection(_ candidate:OnsetRecoveryPlan,_ current:OnsetSnapshot){
         let range=NSRange(location:candidate.caret,length:candidate.roman.utf16.count)
         selectionRequestAt=ProcessInfo.processInfo.systemUptime;selectionRetried=false
         guard setRange(current.element,range) == .success else{abort("selection_failed");return}

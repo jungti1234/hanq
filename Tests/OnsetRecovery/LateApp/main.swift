@@ -42,6 +42,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
         }
     }
     var firstAt=0.0
+    var verificationDeadline=0.0
     var physicalHint=""
     func later(_ seconds:Double=0.05,_ action:@escaping ()->Void){DispatchQueue.main.asyncAfter(deadline:.now()+seconds,execute:action)}
     func applicationDidFinishLaunching(_ n:Notification){
@@ -80,7 +81,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
     func next(){
         progress("next")
         guard index<samples.count else{finish(true,normal ? "all 10 normal physical words confirmed in five IMEs; no forced split":"all 27 delayed first words repaired with original key count, surroundings, caret and selected source");return}
-        item=samples[index];index+=1;receivedFirst=0;firstDown=nil;progress("prepare")
+        item=samples[index];index+=1;receivedFirst=0;firstDown=nil;verificationDeadline=0;progress("prepare")
         let item=item!,query=[kTISPropertyInputSourceID as String:item.sourceID] as CFDictionary
         guard let list=TISCreateInputSourceList(query,true)?.takeRetainedValue() as? [TISInputSource],let source=list.first else{finish(false,"source unavailable");return}
         if let raw=TISGetInputSourceProperty(source,kTISPropertyInputSourceIsEnabled),!CFBooleanGetValue(Unmanaged<CFBoolean>.fromOpaque(raw).takeUnretainedValue()){
@@ -130,6 +131,16 @@ final class Fixture:NSObject,NSApplicationDelegate {
             index-=1;later(0.5){self.next()};return
         }
         let expected="앞🙂"+item.joined+"뒤",caret=NSRange(location:3+item.joined.utf16.count,length:0)
+        // Posting completion plus a fixed delay is not the editor's repair
+        // acknowledgment. Keep the same field/source alive until the final
+        // body/caret arrives, or record a bounded failure without moving it.
+        if !physical {
+            guard NSApp.isActive,window.isKeyWindow else{finish(false,"fixture focus lost during verification");return}
+            if verificationDeadline==0{verificationDeadline=ProcessInfo.processInfo.systemUptime+3}
+            if (field.string != expected || field.selectedRange() != caret),ProcessInfo.processInfo.systemUptime<verificationDeadline {
+                later(0.02){self.verify(item)};return
+            }
+        }
         // Human releases may overlap later downs and cross responder changes.
         // Audit the whole window, with prescribed downs and balanced releases.
         let edges=item.keys.flatMap{[($0.0,NSEvent.EventType.keyDown),($0.0,NSEvent.EventType.keyUp)]}

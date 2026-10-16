@@ -87,3 +87,7 @@ hanq_test_run "$stage/paused-passed-baseline"
 # Closing confirmed empty delivery never requires the old current focus.
 swiftc Sources/HanQ/KeyboardStateMirror.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Sources/HanQ/JamoComposer.swift Tests/OnsetRecovery/QuietCompletion/main.swift -o "$stage/quiet-completion"
 hanq_test_run "$stage/quiet-completion"
+
+# Native composition must commit through the editor before selecting its onset.
+swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/CompositionCommit/main.swift -o "$stage/composition-commit"
+hanq_test_run "$stage/composition-commit"

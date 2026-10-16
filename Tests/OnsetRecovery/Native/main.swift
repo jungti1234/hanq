@@ -57,7 +57,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
         }
         if let suffix=item.suffix{keys=[keys[0]]+suffix}
         let p=OnsetRecoveryEngine(),field=AXUIElementCreateApplication(getpid())
-        owner=p;p.enabled=true;p.testCanSelect={true}
+        owner=p;p.testCommitComposition={_ in true};p.enabled=true;p.testCanSelect={true}
         let gate=OnsetInputGate(marker:p.marker);gate.beat();p.gate=gate
         p.testSnapshot={ [weak self] in
             guard let self,NSApp.isActive,self.window.firstResponder === self.view else{return nil}

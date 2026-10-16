@@ -6,7 +6,7 @@ final class Case {
  let e=OnsetRecoveryEngine();let field=AXUIElementCreateApplication(1234)
  var text="ㄱ";var selection=NSRange(location:1,length:0);var source=onsetKoreanID;var posts=0;var edits=0
  init(age:Double=0.8){
-  e.enabled=true;e.testSource={self.source};e.testCanSelect={true}
+  e.enabled=true;e.testCommitComposition={_ in true};e.testSource={self.source};e.testCanSelect={true}
   e.testSnapshot={OnsetSnapshot(element:self.field,text:self.text,selection:self.selection)}
   e.testSetRange={_,range in self.edits+=1;self.selection=range;return .success}
   e.testPost={event in self.posts+=1;_ = self.e.gate!.receive(event.type,event);self.selection=NSRange(location:1,length:0)}

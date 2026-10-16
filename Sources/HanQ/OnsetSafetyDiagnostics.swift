@@ -13,7 +13,9 @@ enum OnsetSafetyDiagnostics {
         "event_tap_disabled", "unsafe_delete_payload_blocked", "prefix_confirmation_context_lost",
         "prefix_not_visible", "prefix_post_rejected", "buffer_post_rejected", "rollback_context_not_intact",
         "rollback_delivery_context_changed", "rollback_unexpected_selection", "rollback_source_changed",
-        "rollback_caret_rejected", "rollback_caret_timeout", "event_allocation_failed", "replay_target_changed"
+        "rollback_caret_rejected", "rollback_caret_timeout", "event_allocation_failed", "replay_target_changed",
+        "composition_commit_rejected", "composition_commit_context_changed",
+        "composition_commit_source_changed", "composition_commit_deadline"
     ]
     static let readFailures:Set<String> = [
         "accessibility_permission", "secure_input", "target_not_frontmost", "focused_element_unreadable",

@@ -219,6 +219,10 @@ KeyboardStateMirror는 소비한 키를 별도 표식의 새 상태 전용 이�
 
 `bash scripts/test-onset-native-layouts.sh`는 별도 NSTextView에서 실제 다섯 IME의 첫 자음 대체·보관 모음/종성 조합을 확인한다. 로마자의 Shift 쌍자음과 배열별 복합 모음도 검사한다. 본문 조회·선택 변경·게이트 통과는 시험 대역을 사용하고 키는 해당 시험 프로세스에만 전송한다. 시험 후 입력 소스 선택·활성 상태를 복원한다. 설치본 전역 AX·물리 키 검증을 대신하지 않는다. 첫 예약의 빈 만료·키 놓음 통과·재예약과 엔진으로 이동한 미전달 키의 보존은 게이트 및 초기 조회 실패 회귀 검사에서 구분한다.
 
+`OnsetCompositionCommit.swift`는 단일 자음을 선택하기 전 원래 프로세스의 방향키 처리로 조합을 확정하고 본문·커서 반영을 기다린다. 확정용 방향키는 문자 재입력과 다른 식별자를 사용하며 문자 전달 확인으로 계산하지 않는다. 첫 자음 회귀의 `CompositionCommit` 검사는 지연·미반영·대상/본문/커서/소스 변경·권한/보안 실패와 원래 입력 보존을 검사한다. 이미 분리된 자음을 표현하는 대역은 조합 확정 완료를 명시하며, 실제 편집기의 확정 경로 검증과 구분한다.
+
+`bash scripts/test-onset-active-app.sh <권한-record.json> <새-결과-디렉터리>`는 실행 중인 후보와 소유 NSTextView에서 정상 조합 및 AX 편집 가능 상태가 늦게 공개되는 조건을 대조한다. 실제 IME 조합은 유지하고 AX 역할만 첫 키까지 지연시키며, 다섯 배열의 정상·Shift·종성·복합 모음과 긴 문장, 보정용 방향키/대체 키를 제외한 원래 키 순서·주변 본문·UTF-16 커서를 확인한다. 긴 문장 조건은 조합 확정 경로의 실제 실행도 요구한다. 대상 PID·전경·보안 입력·전송 권한·상태 감시가 바뀌면 송신을 중단한다. 입력 소스 선택과 선택 가능한 키보드 소스의 활성 목록을 복원하며 실제 앱·물리 키 검증과 구분한다.
+
 `OnsetLateSequenceDetector.swift`는 다섯 한국어 입력기의 배열별 통과 이력과 본문·커서의 정확 일치를 검사하고, `OnsetCommittedReplacement.swift`는 공백으로 확정된 입력만 원래 AX 요소에서 한 번 치환한다. 쓰기 미지원·실제 대상 변경·소스 변경·추가 입력 경합에서는 편집을 강행하지 않는다. 보정 전 미확인 입력의 통과, 전송별 확인 기한, 일시 조회 실패, 재개 상태·기준 갱신과 확인된 빈 전달의 비동기 완료를 각각 회귀 검사한다. 접두부 직후 비동기로 추가되는 100개 입력의 개수·순서 검사는 유지한다.
 
 `bash scripts/test-onset-late-native-layouts.sh`는 별도 NSTextView에서 다섯 실제 IME의 정상 입력과 첫 자음만 확정한 분리 입력을 각각 27건 대조한다. 배열별 Shift·종성·복합 모음과 세벌식 숫자·문장부호 키, 기존 본문·UTF-16 커서·소스 유지·단일 치환을 확인한다. 본문 조회·선택·치환은 시험 대역이며 설치본의 전역 AX 경로와 물리 키 검증을 대신하지 않는다.
@@ -233,7 +237,9 @@ KeyboardStateMirror는 소비한 키를 별도 표식의 새 상태 전용 이�
 
 `MismatchRecoveryController.swift`는 제품 수명·설정, `MismatchRecoveryEngine.swift`는 감지·선택 덮어쓰기·결과 확인, `MismatchTextReader.swift`와 `MismatchSnapshotWorker.swift`는 본문 좌표와 비동기 조회를, `MismatchIdleObservation.swift`는 입력 대기 중 비동기 관측과 늦은 응답 배제를 담당한다. 앱별 예외 목록은 두지 않는다. `MismatchSourceSwitch.swift`는 직접 소스 선택과 내부 변경 알림의 소유권을, `MismatchSourceInteraction.swift`와 `MismatchSwitchGate.swift`는 복구 중 사용자 전환·메뉴 대기를 처리한다. 시험 도구의 원문 로그·장치 감시는 제품에 포함하지 않는다.
 
-`bash scripts/test-mismatch-recovery.sh`는 제품 소스로 30개 회귀 모드와 제품 수명·진단 비밀값 제외 검사를 실행한다. 실제 키 전송은 테스트 대역을 사용한다. 통합 빌드는 이 검사와 기존 첫 자음·앱 수명 검사를 함께 수행한다. 이전에 설치한 독립 AutoRecoveryProbe가 있다면 실제 앱 시험 전에 종료한다. 제품 진단은 복구 상태만 기록하므로 실제 문자 대조에는 별도 시험 driver의 기대값·결과를 사용한다. `--disable-mismatch-recovery`로 해당 실행에서만 복구를 끄고 비교할 수 있다. 일반 실행에서는 저장된 켜기/끄기 설정을 사용하지 않으며, 이전 `mismatchRecoveryEnabled` 값은 시작 시 제거한다. 독립 자동 복구 실험 앱 실행 중에는 제품 감시를 시작하지 않는다.
+`bash scripts/test-mismatch-recovery.sh`는 제품 소스로 회귀 모드와 제품 수명·진단 비밀값 제외 검사를 실행한다. 실제 키 전송은 테스트 대역을 사용한다. 통합 빌드는 이 검사와 기존 첫 자음·앱 수명 검사를 함께 수행한다. 이전에 설치한 독립 AutoRecoveryProbe가 있다면 실제 앱 시험 전에 종료한다. 제품 진단은 복구 상태만 기록하므로 실제 문자 대조에는 별도 시험 driver의 기대값·결과를 사용한다. `--disable-mismatch-recovery`로 해당 실행에서만 복구를 끄고 비교할 수 있다. 일반 실행에서는 저장된 켜기/끄기 설정을 사용하지 않으며, 이전 `mismatchRecoveryEnabled` 값은 시작 시 제거한다. 독립 자동 복구 실험 앱 실행 중에는 제품 감시를 시작하지 않는다.
+
+`--test-fragmented-proof`는 정상 조합·분리 자모·영문 구간의 기존 완전 분할 판정을 작은 입력의 참조 모델과 대조한다. Shift·복합 모음/종성·주변 본문/선택 변경과 관측 키보다 늦게 반영된 정상 본문의 긴 입력을 포함한다. 자모 성분 대조는 불가능한 후보를 빠르게 거절하기 위한 조건이며, 성분이 같아도 기존 구간·본문·커서 전체 일치를 통과해야 한다. OS 키 전송·AX·입력 소스 변경 없는 검사이며 실제 설치 앱의 중첩 입력·최종 수신 검사를 대신하지 않는다.
 
 `MismatchKeyboardLayout.swift`는 Apple 한국어 다섯 배열의 물리 키 대응과 복구 결과 조합을 담당한다. `Tests/MismatchRecovery/NativeLayoutExpectations.json`에는 실제 IME에서 관측한 결과 중 중복을 제외한 349개 사례를 보존한다. 모든 키 조합을 검증한 자료는 아니다. 배열 검사에서는 이 결과와 소스 ID 유지·숫자 자모·정상 영문 제외를 확인한다. 공유 조합기의 기존 기본 동작은 유지한다.
 
