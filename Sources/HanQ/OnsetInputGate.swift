@@ -192,9 +192,12 @@ final class OnsetInputGate {
     }
     func healthy()->Bool{lock.lock();defer{lock.unlock()};return !stopped}
     func fail(_ reason:String){diagnosticFailure=reason;stopped=true;holdUntil=0;early=nil;deferred=nil;passedInput=nil;hintUntil=0;DispatchQueue.main.async{self.failed?(reason)}}
+    var diagnosticEvent:((CGEventType,CGEvent,Bool,Double)->Void)?
     var didProcessPhysicalKey:((CGEvent,Bool)->Void)?
     func receive(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
+        let began=diagnosticEvent == nil ? nil:ProcessInfo.processInfo.systemUptime
         let result=processEvent(type,event)
+        if let began{diagnosticEvent?(type,event,result==nil,ProcessInfo.processInfo.systemUptime-began)}
         if type == .keyDown,!Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
            didProcessPhysicalKey != nil,let copy=event.copy() {
             let passed=result != nil

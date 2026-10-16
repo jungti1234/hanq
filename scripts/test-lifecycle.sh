@@ -15,3 +15,4 @@ for source in Sources/HanQ/*.swift; do
 done
 swiftc "${link[@]}" -module-cache-path .build/hanq/module-cache "${sources[@]}" "$stage/AppDelegate.swift" Tests/Lifecycle/main.swift -o "$stage/lifecycle-tests"
 hanq_test_run "$stage/lifecycle-tests"
+hanq_test_run "$stage/lifecycle-tests" --diagnose-input-incidents "$stage/incidents"

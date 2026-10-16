@@ -473,6 +473,8 @@ final class OnsetRecoveryEngine:NSObject {
         sample();gate?.beat()
     }
     func snapshot()->OnsetSnapshot?{
+        let incidentRead=InputIncidentTrace.shared.beginRead(.onsetAX)
+        defer{InputIncidentTrace.shared.endRead(.onsetAX,incidentRead)}
         if let testSnapshot{return testSnapshot()}
         unavailableReason=""
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
@@ -496,6 +498,9 @@ final class OnsetRecoveryEngine:NSObject {
         guard let raw=attr(element,kAXSelectedTextRangeAttribute),CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
         var range=CFRange();guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.location>=0,range.length>=0,range.location+range.length<=text.utf16.count else{unavailableReason="selection_invalid";return nil}
         guard let after=focusedElement(ax,pid:target.processIdentifier),CFEqual(element,after) else{unavailableReason="focus_changed_during_snapshot";return nil}
+        if InputIncidentTrace.shared.enabled {
+            InputIncidentTrace.shared.shape(.onsetAX,identity:CFHash(element),count:text.utf16.count,selected:range.length>0,editing:recovering)
+        }
         return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length))
     }
     func observeAvailability(_ snap:OnsetSnapshot?){
@@ -517,6 +522,9 @@ final class OnsetRecoveryEngine:NSObject {
     // Deliberately discard all probe payloads: they can contain user text and keys.
     func log(_ kind:String,_ fields:@autoclosure ()->[String:Any]=[:]) {
         InputDiagnostics.shared.record("onset.\(kind)")
+        if InputIncidentTrace.shared.enabled {
+            if let state=InputIncidentTrace.State.event(kind){InputIncidentTrace.shared.state(.onset,state,pending:pending.count+retainedInput.count)}
+        }
     }
     @objc func start(){
         guard !enabled else{return}
@@ -526,6 +534,9 @@ final class OnsetRecoveryEngine:NSObject {
         ax=AXUIElementCreateApplication(target.processIdentifier);AXUIElementSetMessagingTimeout(ax!,0.05)
         AXUIElementSetMessagingTimeout(systemAX,0.05);accessibilityRequested=false;lastFocusRoute="";lastAXFailure=""
         let gate=OnsetInputGate(marker:marker);if InputDiagnostics.shared.isEnabled{gate.enableReentryTrace()};self.gate=gate;postedToGate=0;unacknowledgedPosts=[];acknowledgmentWaitBegan=nil
+        if InputIncidentTrace.shared.enabled {
+            gate.diagnosticEvent={type,event,consumed,duration in InputIncidentTrace.shared.event(.onset,type,event,consumed:consumed,duration:duration)}
+        }
         gate.didProcessPhysicalKey = { [weak self] event,passed in self?.didProcessPhysicalKey(event,passed) }
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}

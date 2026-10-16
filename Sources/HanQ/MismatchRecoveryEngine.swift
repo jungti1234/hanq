@@ -17,7 +17,7 @@ final class MismatchRecoveryEngine:NSObject {
     var target:NSRunningApplication?
     var followsFrontmost=false
     var activationPID:pid_t?
-    func followFrontmost(){
+    func followFrontmost(event:CGEvent?=nil){
         guard followsFrontmost else{return}
         // Recovery callbacks must not perform synchronous AX requests. The
         // worker verifies actual panel/field focus before each edit and replay.
@@ -25,7 +25,22 @@ final class MismatchRecoveryEngine:NSObject {
             if !fastRecoveryContext(){park("frontmost_app_changed")}
             return
         }
-        let front=focusAccess.currentApplication()
+        let front:NSRunningApplication?
+        if let event {
+            // Quartz already chose this event's recipient, including a
+            // nonactivating panel. Discovering it again with synchronous AX
+            // can stall the very input the client needs before answering AX.
+            // This selects an observation target only: snapshots still prove
+            // actual focus, body and selection before detection/edit/replay.
+            let raw=event.getIntegerValueField(.eventTargetUnixProcessID)
+            if let pid=pid_t(exactly:raw),pid>0 {
+                front=NSRunningApplication(processIdentifier:pid)
+            }else{
+                // Some producers omit the recipient. Preserve actual-focus
+                // discovery there so the first key in a new app is observable.
+                front=focusAccess.currentApplication()
+            }
+        }else{front=focusAccess.currentApplication()}
         let next=Self.supports(front) ? front:nil
         switchTarget(to:next)
     }
@@ -326,6 +341,8 @@ final class MismatchRecoveryEngine:NSObject {
         ["AXTextArea","AXTextField"].contains(role) || (allowComboBox && includeContent && role=="AXComboBox")
     }
     func snapshot(includeContent:Bool=true,allowComboBox:Bool=false)->MismatchSnapshot?{
+        let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
+        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead)}
         let queryStart=ProcessInfo.processInfo.systemUptime,previousID=activeSnapshotID
         traceSequence+=1;let id=traceSequence;activeSnapshotID=id
         if traceLatency{log("snapshot_started",["id":id,"stage":snapshotStage,"includeContent":includeContent,"uptime":queryStart])}
@@ -400,7 +417,10 @@ final class MismatchRecoveryEngine:NSObject {
         let token=event.getIntegerValueField(.eventSourceUserData),tracked=origin(type,event) != nil
         let result=processEvent(type,event)
         didProcessEvent(type,event,result != nil)
-        if tracked {eventOrigins.removeValue(forKey:token);event.setIntegerValueField(.eventSourceUserData,value:0)}
+        // Consume source intent once, but keep the original-input identity for
+        // a downstream onset receipt. Quartz may retimestamp between taps.
+        // Tag cleanup is deferred until the final annotated boundary.
+        if tracked {eventOrigins.removeValue(forKey:token)}
         return result
     }
     // This engine repairs Korean input only. Avoid AX work for ordinary Roman
@@ -435,7 +455,7 @@ final class MismatchRecoveryEngine:NSObject {
             if type == .keyUp{heldKeys.remove(code)}
             return Unmanaged.passUnretained(event)
         }
-        if enabled{followFrontmost()}
+        if enabled{followFrontmost(event:event)}
         if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==0x454F5448{return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             InputDiagnostics.shared.record("mismatch.tap_disabled kind=1 type=\(type.rawValue)")
@@ -463,7 +483,7 @@ final class MismatchRecoveryEngine:NSObject {
         if !recovering,type == .keyDown,
            event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty,
            MismatchRecoveryPlan.character(UInt16(event.getIntegerValueField(.keyboardEventKeycode)),event.flags.contains(.maskShift)) != nil {
-            sample(synchronous:true,beforeKey:true);sampled=lastSampleSnapshot
+            sample(synchronous:true,beforeKey:true,followingEvent:event);sampled=lastSampleSnapshot
         }
         if recovering{
             if sourceMenuPaused {
@@ -570,7 +590,7 @@ final class MismatchRecoveryEngine:NSObject {
         }else if !keyboard || (type == .flagsChanged && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty){plan=nil;log("candidate_cancelled",["reason":"navigation_or_modifier"])}
         return Unmanaged.passUnretained(event)
     }
-    func sample(synchronous:Bool=false,beforeKey:Bool=false){
+    func sample(synchronous:Bool=false,beforeKey:Bool=false,followingEvent:CGEvent?=nil){
         if recovering {
             observeRecoverySource(currentSource())
             if sourceMenuPaused {
@@ -581,7 +601,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         lastSampleSnapshot=nil
         if enabled,!suspended,skipRomanObservation(){return}
-        if enabled{followFrontmost()}
+        if enabled{followFrontmost(event:followingEvent)}
         guard enabled,!suspended,!recovering else{return}
         guard canObserve() else{cancelDetection();return}
         if !synchronous,(testSnapshot==nil || testIdleRead != nil) {
@@ -594,6 +614,9 @@ final class MismatchRecoveryEngine:NSObject {
         guard let snap=observed else{return}
         lastSampleSnapshot=snap
         sourceChanged(currentSource(),snap)
+        if InputIncidentTrace.shared.enabled {
+            InputIncidentTrace.shared.shape(.mismatchAX,identity:CFHash(snap.element),count:snap.text.utf16.count,selected:snap.selection.length>0,editing:recovering)
+        }
         if let known=verifiedDeliveryHistory?(snap,allowPrior),known.plan.sourceID==currentSource(),
            known.plan.codes.count>(plan?.codes.count ?? 0),
            ProcessInfo.processInfo.systemUptime-known.lastKeyAt>=0,
@@ -1149,6 +1172,9 @@ final class MismatchRecoveryEngine:NSObject {
         else if stage=="park"{InputDiagnostics.shared.record("mismatch.park reasonCode=\(code)")}
     }
     func log(_ kind:String,_ fields:@autoclosure ()->[String:Any]=[:]) {
+        if InputIncidentTrace.shared.enabled {
+            if let state=InputIncidentTrace.State.event(kind){InputIncidentTrace.shared.state(.mismatch,state,pending:pending.count+retained.count)}
+        }
         // Deliberately never evaluate fields: they can contain typed text, keys,
         // editor identifiers or clipboard content copied from the experiment.
         if ["key_received","candidate_recorded","candidate_cancelled","field_changed","source_change","observation_blocked","user_source_boundary","mismatch_confirmed","korean_result_verified","recovery_finished","pending_retained","rollback_finished","start_failed","caps_source_wait","caps_source_confirmed","caps_source_unchanged","source_menu_paused","source_work_resumed","cycle_english","cycle_korean","selection_requested","replay_started"].contains(kind) {
@@ -1162,7 +1188,12 @@ final class MismatchRecoveryEngine:NSObject {
         let mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}
         tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.tailAppendEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
             let owner=Unmanaged<MismatchRecoveryEngine>.fromOpaque(ref!).takeUnretainedValue()
-            return KeyboardStateMirror.shared.preserve(type,event) {owner.event(type,event)}
+            return KeyboardStateMirror.shared.preserve(type,event) {
+                let began=InputIncidentTrace.shared.enabled ? ProcessInfo.processInfo.systemUptime:nil
+                let result=owner.event(type,event)
+                if let began{InputIncidentTrace.shared.event(.mismatch,type,event,consumed:result==nil,duration:ProcessInfo.processInfo.systemUptime-began)}
+                return result
+            }
         },userInfo:Unmanaged.passUnretained(self).toOpaque())
         guard let tap else{log("start_failed");return}
         runSource=CFMachPortCreateRunLoopSource(kCFAllocatorDefault,tap,0)

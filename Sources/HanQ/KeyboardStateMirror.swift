@@ -7,6 +7,12 @@ final class KeyboardStateMirror {
     static let shared = KeyboardStateMirror()
     let marker = Int64(bitPattern: 0x48414B5300000000 | UInt64(UInt32.random(in: 1...UInt32.max)))
     static func isMarker(_ value: Int64) -> Bool { UInt64(bitPattern: value) >> 32 == 0x48414B53 }
+    /// Original-input identities must survive every consumer, including a
+    /// restarted onset gate placed after mismatch. Remove them only here.
+    static func isDeliveryOrigin(_ value:Int64)->Bool {
+        let raw=UInt64(bitPattern:value)
+        return raw>>48 == 0x4852 || raw>>32 == 0x48514556
+    }
     private let lock = NSLock()
     private var accepting = false
     private var pending = 0
@@ -14,6 +20,7 @@ final class KeyboardStateMirror {
     private var port: CFMachPort?
     private var stopAt = 0.0
     private let stateSource = CGEventSource(stateID: .privateState)
+    var diagnosticBoundary:((CGEventType,CGEvent,Bool)->Void)?
     var failed: (() -> Void)?
 
     init() { stateSource?.userData = marker }
@@ -36,7 +43,7 @@ final class KeyboardStateMirror {
                     owner.stop(); DispatchQueue.main.async { owner.failed?() }
                     return Unmanaged.passUnretained(event)
                 }
-                return owner.receive(type, event)
+                return owner.receive(type,event)
             }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
         let worker = Thread { [self] in
             let source = CFMachPortCreateRunLoopSource(nil, tap, 0)!
@@ -85,10 +92,15 @@ final class KeyboardStateMirror {
         return Unmanaged.passRetained(state)
     }
     func receive(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
-        guard Self.keyboard(type), event.getIntegerValueField(.eventSourceUserData) == marker else {
-            return Unmanaged.passUnretained(event)
+        guard Self.keyboard(type) else{return Unmanaged.passUnretained(event)}
+        let tag=event.getIntegerValueField(.eventSourceUserData)
+        let consumed=tag==marker
+        diagnosticBoundary?(type,event,consumed)
+        if consumed {complete();return nil}
+        if Self.isDeliveryOrigin(tag) {
+            event.setIntegerValueField(.eventSourceUserData,value:0)
         }
-        complete(); return nil
+        return Unmanaged.passUnretained(event)
     }
     private func complete() { lock.lock(); pending = max(0, pending - 1); lock.unlock() }
     /// Cleanup only edges a test producer actually posted. The targeted release

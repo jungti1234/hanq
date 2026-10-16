@@ -18,6 +18,7 @@ final class SourceSwitchBarrier {
     var didSelect:(CGEventTimestamp)->Void = {_ in}
     var send:(CGEvent)->Void = {$0.post(tap:.cgSessionEventTap)}
     var retained:([CGEvent])->Void = {_ in}
+    var cancelledModifiers:([CGEvent])->Void = {_ in}
     var trace:(String)->Void = {_ in}
     var now:()->Double = {ProcessInfo.processInfo.systemUptime}
     private(set) var busy=false
@@ -25,6 +26,7 @@ final class SourceSwitchBarrier {
     private var transactionField:AXUIElement?
     private var ledger:MismatchReplayLedger?
     private var priorKeyLedger:MismatchReplayLedger?
+    private var deletionHistory:(field:AXUIElement,ledger:MismatchReplayLedger,started:CGEventTimestamp)?
     private var lastKeyAt=0.0
     private var priorKeyAt=0.0
     private var historyStarted:CGEventTimestamp=0
@@ -57,29 +59,49 @@ final class SourceSwitchBarrier {
     }
     private var repairInFlight:Set<DeliveryKey>=[]
     private struct OnsetDeliveryKey:Hashable {
-        let timestamp:CGEventTimestamp
+        let identity:UInt64
+        let tagged:Bool
         let code:Int64
-        init(_ event:CGEvent){timestamp=event.timestamp;code=event.getIntegerValueField(.keyboardEventKeycode)}
+        init(_ event:CGEvent){
+            let raw=event.getIntegerValueField(.eventSourceUserData)
+            tagged=KeyboardStateMirror.isDeliveryOrigin(raw)
+            identity=tagged ? UInt64(bitPattern:raw):event.timestamp
+            code=event.getIntegerValueField(.keyboardEventKeycode)
+        }
     }
-    private var onsetInFlight:[OnsetDeliveryKey:CGEvent]=[:]
+    private var onsetInFlight:[OnsetDeliveryKey:[CGEvent]]=[:]
+    private var onsetPendingCount=0
+    var diagnosticCounts:(queued:Int,awaitingOnset:Int) {(queued.count,onsetPendingCount)}
     /// The main tap precedes the onset gate. A key seen here may be held there,
     /// so do not predict it until that gate reports its actual delivery decision.
     func observeBeforeOnset(_ type:CGEventType,_ event:CGEvent,waiting:Bool) {
         if type == .keyDown,(waiting || !onsetInFlight.isEmpty) {
-            guard onsetInFlight.count<256,let copy=event.copy() else{fail("delivery_limit");return}
-            onsetInFlight[OnsetDeliveryKey(event)]=copy
+            guard onsetPendingCount<256,let copy=event.copy() else{fail("delivery_limit");return}
+            onsetInFlight[OnsetDeliveryKey(event),default:[]].append(copy)
+            onsetPendingCount+=1
+            trace("onset_delivery_waiting")
             return
         }
         observe(type,event)
     }
     func confirmOnsetDelivery(_ event:CGEvent,passed:Bool) {
-        guard let original=onsetInFlight.removeValue(forKey:OnsetDeliveryKey(event)) else{return}
+        let key=OnsetDeliveryKey(event)
+        guard var occurrences=onsetInFlight[key],!occurrences.isEmpty else{return}
+        // The onset gate queues receipts in event order. Autorepeat can reuse
+        // the press token, so keep each occurrence until its own receipt.
+        let original=occurrences.removeFirst()
+        onsetInFlight[key]=occurrences.isEmpty ? nil:occurrences
+        onsetPendingCount-=1
+        trace(original.timestamp==event.timestamp ? "onset_delivery_confirmed":"onset_delivery_retimed")
         if passed {observe(.keyDown,original)}
     }
     private var deadline=0.0
     private var repairWaitStarted:Double?
     private var generation=0
     private var scheduled=false
+    private var waitReason:String?
+    private var mismatchedSnapshot:Snapshot?
+    private var lastTextMatch:TextMatch?
     private var replaySource=CGEventSource(stateID:.privateState)
 
     var expected:(String,NSRange)? {
@@ -90,22 +112,59 @@ final class SourceSwitchBarrier {
         guard let expected,snap.selection==expected.1 else{return false}
         return matchesText(snap)
     }
-    func matchesText(_ snap:Snapshot)->Bool {
-        guard let expected else{return false}
-        if snap.text==expected.0{return true}
-        // Editors may capitalize the text just typed. Accept ASCII case changes
-        // only inside that tracked insertion, never changes to surrounding text,
-        // a missing character, or a Korean/English layout mismatch. Do not edit it.
-        guard let ledger,!ledger.segments.isEmpty,
-              snap.text.utf16.count==expected.0.utf16.count else{return false}
-        let insertion=NSRange(location:ledger.caret,length:ledger.insertion.utf16.count)
-        let actual=snap.text as NSString, wanted=expected.0 as NSString
-        guard actual.substring(to:insertion.location)==wanted.substring(to:insertion.location),
-              actual.substring(from:NSMaxRange(insertion))==wanted.substring(from:NSMaxRange(insertion)) else{return false}
-        func fold(_ value:String)->[UInt32] {
-            value.unicodeScalars.map{(65...90).contains($0.value) ? $0.value+32:$0.value}
+    private enum TextMatch {case exact,style,terminalLF,terminalLFStyle}
+    private func textMatch(_ snap:Snapshot,_ ledger:MismatchReplayLedger,allowEmptyInsertion:Bool=false)->TextMatch? {
+        let predicted=ledger.text
+        if snap.text==predicted{return .exact}
+        guard !ledger.segments.isEmpty,allowEmptyInsertion || !ledger.insertion.isEmpty else{return nil}
+        var wanted=predicted as NSString
+        var removedLF=false
+        // An empty final web paragraph can expose one AX-only LF, then omit it
+        // on typing. Only that original suffix after the insertion may disappear.
+        let before=ledger.before as NSString
+        if snap.text.utf16.count+1==wanted.length,ledger.caret==before.length-1,
+           ledger.caret>=0,before.substring(from:ledger.caret)=="\n" {
+            wanted=wanted.substring(to:wanted.length-1) as NSString;removedLF=true
         }
-        return fold(actual.substring(with:insertion))==fold(wanted.substring(with:insertion))
+        guard snap.text.utf16.count==wanted.length else{return nil}
+        let insertion=NSRange(location:ledger.caret,length:ledger.insertion.utf16.count)
+        let actual=snap.text as NSString
+        guard NSMaxRange(insertion)<=wanted.length else{return nil}
+        guard actual.substring(to:insertion.location)==wanted.substring(to:insertion.location),
+              actual.substring(from:NSMaxRange(insertion))==wanted.substring(from:NSMaxRange(insertion)) else{return nil}
+        func fold(_ value:String)->[UInt32] {
+            value.unicodeScalars.map{(65...90).contains($0.value) ? $0.value+32:($0.value==160 ? 32:$0.value)}
+        }
+        let actualInsertion=actual.substring(with:insertion),wantedInsertion=wanted.substring(with:insertion)
+        guard fold(actualInsertion)==fold(wantedInsertion) else{return nil}
+        if removedLF{return actualInsertion==wantedInsertion ? .terminalLF:.terminalLFStyle}
+        return .style
+    }
+    func matchesText(_ snap:Snapshot)->Bool {
+        guard let ledger else{return false};return textMatch(snap,ledger) != nil
+    }
+    private func noteTextMatch(_ snap:Snapshot) {
+        guard let ledger,let match=textMatch(snap,ledger) else{return}
+        mismatchedSnapshot=nil
+        if pendingSelectAll,(match == .terminalLF || match == .terminalLFStyle),
+           selectedRange==NSRange(location:0,length:ledger.text.utf16.count) {
+            selectedRange=NSRange(location:0,length:snap.text.utf16.count)
+        }
+        guard lastTextMatch != match else{return};lastTextMatch=match
+        switch match {
+        case .exact:break
+        case .style:trace("editor_insertion_style_matched")
+        case .terminalLF:trace("editor_terminal_lf_matched")
+        case .terminalLFStyle:trace("editor_terminal_lf_style_matched")
+        }
+    }
+    private func isPendingTextPrefix(_ snap:Snapshot)->Bool {
+        guard var candidate=ledger,let last=candidate.segments.last else{return false}
+        for count in stride(from:last.keys.count,through:0,by:-1) {
+            candidate.segments[candidate.segments.count-1].keys=Array(last.keys.prefix(count))
+            if textMatch(snap,candidate,allowEmptyInsertion:true) != nil{return true}
+        }
+        return false
     }
     /// Select-all is an explicit request for the current editor body. Some
     /// editors expose an initial prompt as AXValue and remove it on typing.
@@ -124,7 +183,47 @@ final class SourceSwitchBarrier {
         selectedRange=NSRange(location:0,length:snap.text.utf16.count)
         trace("select_all_initial_body_removed")
     }
-    func resetObservation(){field=nil;ledger=nil;priorKeyLedger=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    /// A source request also provides an explicit boundary. Only accept an
+    /// initial body disappearing at offset zero when all observed keys account
+    /// for the complete current text and its end caret. This proves delivery
+    /// without treating arbitrary editor changes as a new baseline.
+    private func acknowledgeSourceInitialBodyRemoval(_ snap:Snapshot) {
+        guard target != nil,switchSnapshot == nil,!pendingSelectAll,
+              !awaitingSelection,!selectionCommitPending,
+              let field,CFEqual(field,snap.field),let previous=ledger,
+              previous.caret==0,!previous.before.isEmpty,!previous.insertion.isEmpty else{return}
+        var acknowledged=MismatchReplayLedger(before:"",caret:0)
+        acknowledged.segments=previous.segments
+        guard textMatch(snap,acknowledged) != nil,
+              snap.selection==acknowledged.selection,!isPendingTextPrefix(snap) else{return}
+        ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil
+        trace("source_initial_body_removed")
+    }
+    func resetObservation(){field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    // Backspace can remove one component of live Hangul rather than commit the
+    // remaining syllable. Reuse only our observed key prefix, after the editor
+    // proves its entire text and caret. Never decompose existing editor text.
+    private func restoreDeletionHistory(_ snap:Snapshot) {
+        guard let saved=deletionHistory else{return}
+        deletionHistory=nil
+        guard CFEqual(saved.field,snap.field),
+              let last=saved.ledger.segments.last,last.source==source() else{return}
+        func adopt(_ candidate:MismatchReplayLedger)->Bool {
+            guard textMatch(snap,candidate) != nil,candidate.selection==snap.selection else{return false}
+            field=snap.field;ledger=candidate;historyStarted=saved.started;return true
+        }
+        if adopt(saved.ledger){return}
+        // Deleting the last medial can leave the initial detached from the
+        // preceding committed syllable (이거 -> 이ㄱ, never 익). Try boundaries
+        // only between keys we observed; accept solely the exact editor result.
+        guard last.keys.count>1 else{return}
+        for split in stride(from:last.keys.count-1,through:1,by:-1) {
+            var candidate=saved.ledger
+            candidate.segments[candidate.segments.count-1].keys=Array(last.keys.prefix(split))
+            candidate.segments.append((source:last.source,keys:Array(last.keys.dropFirst(split))))
+            if adopt(candidate){return}
+        }
+    }
     // The main tap records accepted keys before the mismatch tap reads their
     // pre-insertion snapshot. Offer either complete ledger, never inferred text.
     func verifiedTwoSetHistory(_ snap:MismatchSnapshot,after boundary:CGEventTimestamp,allowPrior:Bool=false)->(plan:MismatchRecoveryPlan,lastKeyAt:Double)? {
@@ -197,6 +296,19 @@ final class SourceSwitchBarrier {
             externalEditPending=false
         }
         let flags=event.flags.intersection([.maskCommand,.maskControl,.maskAlternate])
+        if heldCode==51,flags.isEmpty,!event.flags.contains(.maskShift) {
+            let snap=read()
+            if let snap {restoreDeletionHistory(snap)}
+            var saved:(field:AXUIElement,ledger:MismatchReplayLedger,started:CGEventTimestamp)?
+            if let snap,let field,CFEqual(field,snap.field),selectedRange==nil,
+               matches(snap),var previous=ledger,let last=previous.segments.last,
+               last.source==source(),!last.keys.isEmpty {
+                previous.segments[previous.segments.count-1].keys.removeLast()
+                saved=(field,previous,historyStarted)
+            }
+            resetObservation();deletionHistory=saved
+            return
+        }
         if event.getIntegerValueField(.keyboardEventKeycode)==0,flags == .maskCommand,!event.flags.contains(.maskShift) {
             refreshIdleField()
             if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)}
@@ -218,9 +330,12 @@ final class SourceSwitchBarrier {
         if ledger == nil {
             guard let snap=read(),snap.selection.location>=0,snap.selection.length>=0,
                   NSMaxRange(snap.selection)<=snap.text.utf16.count else{return}
-            field=snap.field
-            ledger=MismatchReplayLedger(before:(snap.text as NSString).replacingCharacters(in:snap.selection,with:""),caret:snap.selection.location)
-            historyStarted=event.timestamp
+            restoreDeletionHistory(snap)
+            if ledger == nil {
+                field=snap.field
+                ledger=MismatchReplayLedger(before:(snap.text as NSString).replacingCharacters(in:snap.selection,with:""),caret:snap.selection.location)
+                historyStarted=event.timestamp
+            }
         }
         if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil}
         guard (ledger?.segments.reduce(0,{$0+$1.keys.count}) ?? 0)<128 else{resetObservation();return}
@@ -250,19 +365,44 @@ final class SourceSwitchBarrier {
         }
         beginRepairBoundary(type,event)
         guard busy else{return false}
+        if type == .keyDown,target != nil,switchSnapshot == nil,
+           !pendingSelectAll,!awaitingSelection,!selectionCommitPending,
+           ready(),repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,
+           queued.allSatisfy({$0.type == .flagsChanged && $0.getIntegerValueField(.keyboardEventKeycode)==54}),
+           let snap=mismatchedSnapshot {
+            if isPendingTextPrefix(snap) {
+                trace("editor_text_prefix_pending")
+            }else{
+                // The editor contradicts every pending prefix. Cancel the switch
+                // before taking this physical key; do not replay unverified text.
+                let modifiers=queued;queued=[]
+                fail("editor_diverged_input_resumed")
+                cancelledModifiers(modifiers)
+                return false
+            }
+        }
         guard [.keyDown,.keyUp,.flagsChanged].contains(type) else{fail("context_interrupted");return false}
         let code=event.getIntegerValueField(.keyboardEventKeycode)
         let releaseDelivered = type == .keyUp && deliveredHeld.remove(code) != nil
         if releaseDelivered && !queued.contains(where:{$0.type == .keyDown && $0.getIntegerValueField(.keyboardEventKeycode)==code}) {return false}
         guard queued.count<256,let copy=event.copy() else{fail("buffer_limit");return false}
-        queued.append(copy);schedule();return !releaseDelivered
+        queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0)->Bool {
         refreshIdleField()
         if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection}
         guard field != nil,ledger != nil else{return false}
         if !busy { transactionField=field }
-        busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1.0;trace("waiting_for_editor");schedule();return true
+        busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1.0;waitReason=nil;lastTextMatch=nil;trace("waiting_for_editor");schedule();return true
+    }
+    private func wait(_ reason:String) {
+        if waitReason != reason {waitReason=reason;trace(reason)}
+        schedule()
+    }
+    private func waitForMatch(_ snap:Snapshot) {
+        let textMatches=matchesText(snap)
+        mismatchedSnapshot=textMatches ? nil:snap
+        wait(textMatches ? "waiting_for_caret":"waiting_for_text")
     }
     private func schedule(){
         guard busy,!scheduled else{return};scheduled=true
@@ -279,15 +419,15 @@ final class SourceSwitchBarrier {
         if !ready() {
             if repairWaitStarted == nil {repairWaitStarted=now()}
             guard now()-repairWaitStarted!<3 else{fail("repair_deadline");return}
-            schedule();return
+            wait("waiting_for_repair");return
         }
         if repairWaitStarted != nil {repairWaitStarted=nil;deadline=now()+1}
         guard now()<deadline else{fail("deadline");return}
-        guard repairInFlight.isEmpty else{schedule();return}
-        guard onsetInFlight.isEmpty else{schedule();return}
+        guard repairInFlight.isEmpty else{wait("waiting_for_repair_receipt");return}
+        guard onsetInFlight.isEmpty else{wait("waiting_for_onset_receipt");return}
         // The next replay cannot advance until the previous event reaches the
         // main tap. AX work here only delays that acknowledgment.
-        guard !awaitingReplay else{schedule();return}
+        guard !awaitingReplay else{wait("waiting_for_replay_receipt");return}
         if waitingForRepairBoundary {
             guard !externalEditPending,let field,ledger != nil else{fail("repair_not_verified");return}
             if transactionField == nil {transactionField=field}
@@ -303,24 +443,26 @@ final class SourceSwitchBarrier {
             }
             let focused:AXUIElement?
             if let readFocus {focused=readFocus()} else{focused=read()?.field}
-            guard let focused else{schedule();return}
+            guard let focused else{wait("waiting_for_focus");return}
             guard let transactionField,CFEqual(transactionField,focused) else{fail("focus_changed");return}
             replayNext();return
         }
         // A missing AX reply is not evidence that another field owns focus.
         // Keep later keys queued and retry within the existing deadline.
-        guard let snap=read() else{schedule();return}
+        guard let snap=read() else{wait("waiting_for_snapshot");return}
         guard let transactionField,CFEqual(transactionField,snap.field) else{fail("focus_changed");return}
         if externalEditPending {
-            guard ready() else{schedule();return}
+            guard ready() else{wait("waiting_for_repair");return}
             ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)
             selectedRange=snap.selection;field=snap.field;externalEditPending=false
             trace("repair_acknowledged")
         }
+        if !matchesText(snap) {acknowledgeSourceInitialBodyRemoval(snap)}
+        noteTextMatch(snap)
         if pendingSelectAll {
-            guard ready() else{schedule();return}
+            guard ready() else{wait("waiting_for_repair");return}
             if !matchesText(snap) {acknowledgeInitialBodyRemoval(snap)}
-            guard matchesText(snap) else{schedule();return}
+            guard matchesText(snap) else{waitForMatch(snap);return}
             guard let selectedRange else{schedule();return}
             if snap.selection != selectedRange {
                 guard applySelection(snap.field,selectedRange) else{fail("select_all_failed");return}
@@ -340,17 +482,17 @@ final class SourceSwitchBarrier {
                     guard applySelection(snap.field,selectedRange) else{fail("select_all_failed");return}
                     selectionAttempts+=1;selectionRetryAt=now()+0.01;trace("select_all_retried")
                 }
-                schedule();return
+                waitForMatch(snap);return
             }
             awaitingSelection=false
         }
         if selectionCommitPending {
             if selectionCommitSnapshot == nil {
-                guard matches(snap) else{schedule();return}
+                guard matches(snap) else{waitForMatch(snap);return}
                 selectionCommitSnapshot=snap
             }
             let result=commitSelection(selectionCommitSnapshot!)
-            if result==AXError.cannotComplete.rawValue {schedule();return}
+            if result==AXError.cannotComplete.rawValue {wait("waiting_for_selection_commit");return}
             guard result==noErr else{fail("select_all_commit_failed");return}
             selectionCommitSnapshot=nil
             selectionCommitPending=false;awaitingSelection=true
@@ -358,13 +500,13 @@ final class SourceSwitchBarrier {
             trace("select_all_committed");schedule();return
         }
         if let target {
-            guard ready() else{schedule();return}
+            guard ready() else{wait("waiting_for_repair");return}
             if switchSnapshot == nil {
-                guard matches(snap) else{schedule();return}
+                guard matches(snap) else{waitForMatch(snap);return}
                 switchSnapshot=snap
             }
             let result=select(target)
-            if selectionPending(){schedule();return}
+            if selectionPending(){wait("waiting_for_source_commit");return}
             guard result==noErr,source()==target else{fail("switch_failed");return}
             let snap=switchSnapshot!;switchSnapshot=nil
             didSelect(targetTimestamp);targetTimestamp=0
@@ -385,16 +527,18 @@ final class SourceSwitchBarrier {
             }
             awaitingSelection=true
             selectionAttempts=1;selectionRetryAt=now()+0.01
-            deadline=now()+1.0;trace("editor_confirmed_switch");schedule();return
+            deadline=now()+1.0;waitReason=nil;trace("editor_confirmed_switch");schedule();return
         }
         if !queued.isEmpty {
             replayNext();return
         }
-        if ready(),expected == nil || matches(snap) {
+        guard ready() else{wait("waiting_for_repair");return}
+        if expected == nil || matches(snap) {
             busy=false;self.transactionField=nil;trace("finished")
-        }else{schedule()}
+        }else{waitForMatch(snap)}
     }
     private func replayNext(){
+        waitReason=nil
         let saved=queued.removeFirst()
         replaySource?.userData=Self.marker
         guard let replaySource,let event=CGEvent(keyboardEventSource:replaySource,
@@ -409,8 +553,8 @@ final class SourceSwitchBarrier {
 
         cancelSelection();switchSnapshot=nil;selectionCommitSnapshot=nil
         repairInFlight.removeAll()
-        onsetInFlight.removeAll()
-        repairWaitStarted=nil
+        onsetInFlight.removeAll();onsetPendingCount=0
+        repairWaitStarted=nil;waitReason=nil
         waitingForRepairBoundary=false
         generation+=1;scheduled=false;busy=false;transactionField=nil;target=nil;targetTimestamp=0;awaitingReplay=false;externalEditPending=false
         let pending=queued;queued=[];resetObservation()

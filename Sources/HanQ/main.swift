@@ -120,12 +120,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         barrier.retained = { [weak self] events in
             guard let self else{return}
+            InputIncidentTrace.shared.sourceBoundary(.retained,queued:events.count,awaitingOnset:0)
+            self.settleRetainedModifierState(events)
             self.mismatchRecovery.engine.retained.append(contentsOf:events)
             self.refreshStatus()
         }
-        barrier.trace = { stage in InputDiagnostics.shared.record("switch.barrier."+stage) }
+        barrier.cancelledModifiers = { [weak self] events in
+            self?.settleRetainedModifierState(events)
+        }
+        barrier.trace = { [weak barrier] stage in
+            InputDiagnostics.shared.record("switch.barrier."+stage)
+            if InputIncidentTrace.shared.enabled,let kind=InputIncidentTrace.BoundaryStage.event(stage),let counts=barrier?.diagnosticCounts {
+                InputIncidentTrace.shared.sourceBoundary(kind,queued:counts.queued,awaitingOnset:counts.awaitingOnset)
+            }
+        }
         return barrier
     }()
+    // The failed queue will not be replayed. Settle only state from edges we
+    // actually observed, with actions disabled, so a queued release cannot
+    // leave the default or per-device key filter owning the next press.
+    func settleRetainedModifierState(_ events:[CGEvent]) {
+        for event in events {
+            let external=externalKeyboards.process(type:event.type,event:event,active:false,
+                koreanAllowed:false,hanjaAllowed:false)
+            let key=external.handled ? Int64(-1):event.getIntegerValueField(.keyboardEventKeycode)
+            let command=filter.process(type:event.type,key:key,flags:external.flags,acceptNewPress:false)
+            _=optionFilter.process(type:event.type,key:key,flags:command.flags,acceptNewPress:false)
+        }
+    }
     var sourceObservations = 0
     var diagnosticEventCount = 0
     var window: NSWindow!
@@ -162,6 +184,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         InputDiagnostics.shared.start()
+        if InputIncidentTrace.shared.enabled {
+            InputIncidentTrace.shared.start()
+            KeyboardStateMirror.shared.diagnosticBoundary={type,event,consumed in
+                InputIncidentTrace.shared.event(.boundary,type,event,consumed:consumed)
+            }
+        }
         permissionRecovery.prepare()
         let preferences = UserDefaults.standard
         // Only initialize once, so disabling in macOS Settings is respected too.
@@ -209,6 +237,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.addItem(aboutItem)
         statusMenu.addItem(updater.checkItem)
         statusMenu.addItem(makeFeedbackItem())
+        if InputIncidentTrace.shared.enabled {
+            let incident=NSMenuItem(title:"방금 입력 누락 기록",action:#selector(markInputIncident),keyEquivalent:"")
+            incident.target=self
+            incident.toolTip="최근 입력 처리 상태를 로컬에 저장합니다. 입력 본문·키 값·클립보드는 저장하지 않습니다."
+            statusMenu.addItem(incident)
+        }
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "한Q 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         statusIcon.onRepeatedUserLaunch = { [weak self] in self?.statusReopenNotice.show() }
@@ -530,7 +564,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if forwardOriginalIfMoved(){return nil}
                     return Unmanaged.passUnretained(event)
                 }
-                return KeyboardStateMirror.shared.preserve(type,event,process:process)
+                return KeyboardStateMirror.shared.preserve(type,event) {
+                    let began=InputIncidentTrace.shared.enabled ? ProcessInfo.processInfo.systemUptime:nil
+                    let result=process()
+                    if let began{InputIncidentTrace.shared.event(.main,type,event,consumed:result==nil,duration:ProcessInfo.processInfo.systemUptime-began)}
+                    return result
+                }
             }
             inputSafety.arm()
             InputDiagnostics.shared.record("tap.create.begin")
@@ -562,7 +601,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // A restarted mismatch gate inserts a HID head tap. Install provenance
         // after it so capture remains ahead of all main-run-loop input work.
         inputDeliveryOrigin?.stop()
-        let routing=InputDeliveryOrigin();inputDeliveryOrigin=routing;routing.start()
+        let routing=InputDeliveryOrigin()
+        if InputIncidentTrace.shared.enabled {
+            routing.diagnosticEvent={type,event,consumed in InputIncidentTrace.shared.event(.hid,type,event,consumed:consumed)}
+        }
+        inputDeliveryOrigin=routing;routing.start()
     }
 
     /// Fail open: remove the system hook, not just the feature flags.
@@ -636,6 +679,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         refreshLaunchAtLogin()
     }
+    @objc func markInputIncident(){InputIncidentTrace.shared.mark()}
     @objc func copyMismatchInput(){mismatchRecovery.copyRetained();refreshStatus()}
     func refreshStatus() {
         retainedMismatchItem.isHidden=mismatchRecovery.engine.retained.isEmpty

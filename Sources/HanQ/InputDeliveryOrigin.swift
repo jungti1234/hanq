@@ -21,6 +21,7 @@ final class InputDeliveryOrigin {
     static func isMarker(_ value:Int64)->Bool {
         UInt64(bitPattern:value) >> 48 == 0x4852
     }
+    var diagnosticEvent:((CGEventType,CGEvent,Bool)->Void)?
     private let lock=NSLock()
     private var entries:[Int64:Origin]=[:]
     private var next:UInt64=0
@@ -157,7 +158,11 @@ final class InputDeliveryOrigin {
                     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {owner.stop()}
                     else {
                         owner.forgetMirroredRelease(type,event)
-                        return KeyboardStateMirror.shared.preserve(type,event) {owner.receive(type,event)}
+                        return KeyboardStateMirror.shared.preserve(type,event) {
+                            let result=owner.receive(type,event)
+                            owner.diagnosticEvent?(type,event,result==nil)
+                            return result
+                        }
                     }
                     return Unmanaged.passUnretained(event)
                 },userInfo:Unmanaged.passUnretained(self).toOpaque()) else{stop();return}

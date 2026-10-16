@@ -426,6 +426,67 @@ for scenario in 0..<8 {
  }
  b.fail("test_cleanup")
 }
+// A source boundary also needs to acknowledge removal of an initial AX body.
+// Every observed key must account for the entire body, at the exact final caret.
+for scenario in 0..<9 {
+ let b=SourceSwitchBarrier();var text="initial prompt",range=NSRange(location:0,length:0),focused=field,source=en,switches=0
+ var traces:[String]=[]
+ b.source={source};b.read={.init(field:focused,text:text,selection:range)};b.trace={traces.append($0)}
+ b.select={source=$0;switches+=1;return noErr}
+ if scenario==8 {range=NSRange(location:3,length:0)}
+ b.observe(.keyDown,key(0));b.observe(.keyDown,key(11))
+ text="ab";range=NSRange(location:2,length:0)
+ switch scenario {
+ case 1:text="a";range=NSRange(location:1,length:0)
+ case 2:text="ac"
+ case 3:text="ab?";range=NSRange(location:3,length:0)
+ case 4:range=NSRange(location:1,length:0)
+ case 5:range=NSRange(location:0,length:2)
+ case 6:break
+ case 7:text="Ab"
+ default:break
+ }
+ check(b.request(ko),"initial AX body boundary requested")
+ if scenario==6 {focused=other}
+ b.step()
+ if scenario==0 || scenario==7 {
+  check(switches==1 && source==ko,"all observed text acknowledges initial body removal before source switch")
+  check(traces.contains("source_initial_body_removed"),"initial body outcome is content-free diagnosis")
+  b.step();check(!b.busy,"initial-body switch finishes without key cancellation")
+ } else {
+  check(switches==0,"partial, changed, extra, selected, moved or noninitial body cannot authorize switch")
+ }
+ b.fail("test_cleanup")
+}
+// The same apparent full body may still be an old baseline or partial delivery.
+// Never infer initial-body removal from either ambiguity.
+for (before,keys,actual) in [("ab",[UInt16(0),11],"ab"),("b",[UInt16(0),11],"ab")] {
+ let b=SourceSwitchBarrier();var text=before,range=NSRange(location:0,length:0),switches=0
+ b.source={en};b.read={.init(field:field,text:text,selection:range)};b.select={_ in switches+=1;return noErr}
+ for code in keys {b.observe(.keyDown,key(code))}
+ text=actual;range=NSRange(location:actual.utf16.count,length:0)
+ check(b.request(ko),"ambiguous initial body request")
+ b.step();check(switches==0,"unchanged baseline and actual pending prefix never authorize source switch")
+ b.fail("test_cleanup")
+}
+// Confirm all five Korean renderers and queued input across that boundary.
+for id in KoreanKeyboardLayout.supportedIDs {
+ let b=SourceSwitchBarrier();var text="initial prompt",range=NSRange(location:0,length:0),source=id,switches=0,posts=0
+ let keys:[UInt16]=id==ko ? [15,40,1]:([KoreanKeyboardLayout.threeSetID,KoreanKeyboardLayout.threeSet390ID].contains(id) ? [40,3,1]:[5,0,45])
+ let rendered=MismatchReplayLedger.render((source:id,keys:keys.map{($0,false)}))
+ b.source={source};b.read={.init(field:field,text:text,selection:range)}
+ b.select={source=$0;switches+=1;return noErr}
+ for code in keys {b.observe(.keyDown,key(code))}
+ check(b.request(en),"Korean initial body source request")
+ check(b.receive(.keyDown,key(0)),"following key kept behind initial body boundary")
+ b.step();check(switches==0,"placeholder still visible never proves prior keys")
+ text=rendered;range=NSRange(location:rendered.utf16.count,length:0)
+ b.step();check(switches==1 && source==en,"five Korean arrays switch only after full insertion")
+ b.send={e in posts+=1;check(!b.receive(e.type,e),"own queued key delivery");b.observe(e.type,e);text+="a";range=NSRange(location:text.utf16.count,length:0)}
+ b.step();b.step();b.step()
+ check(posts==1 && !b.busy && text==rendered+"a","initial body acknowledgment preserves queued key exactly once")
+ b.fail("test_cleanup")
+}
 // Korean insertion also acknowledges initial-body removal; following input
 // must replace the verified full selection exactly once.
 do {
@@ -470,4 +531,242 @@ for reason in ["current","pre_key","pending_key","adopted","ascii","mixed","jamo
  check((result?.plan.replayRoman=="rks") == ["current","pre_key","adopted","ascii","mixed","jamo","partial"].contains(reason),"verified delivery-history \(reason) proof")
  b.fail("test_cleanup")
 }
+
+func originPacket(_ code:CGKeyCode,_ timestamp:CGEventTimestamp,_ tag:Int64)->CGEvent {
+ let source=CGEventSource(stateID:.privateState)!;source.userData=tag
+ let e=CGEvent(keyboardEventSource:source,virtualKey:code,keyDown:true)!
+ e.flags=[];e.timestamp=timestamp
+ return e
+}
+// Quartz may rewrite a returned event's timestamp between main and onset taps.
+// A missed receipt must not strand later typing behind a source boundary.
+for token:Int64 in [0x4852000100000101,0x4851455600000101] {
+ for passed in [true,false] {
+ for mismatchFirst in [false,true] {
+  let b=SourceSwitchBarrier();var time=0.0,source=en,text="",range=NSRange(location:0,length:0),switches=0,posts=0,retained=0
+  b.now={time};b.source={source};b.read={.init(field:field,text:text,selection:range)};b.readFocus={field}
+  b.select={source=$0;switches+=1;return noErr};b.retained={retained += $0.count}
+  b.beginOnsetReplay(field:field,before:"",caret:0)
+  var original=originPacket(0,100,UInt64(bitPattern:token)>>48 == 0x4852 ? token:0)
+  let mismatch=MismatchRecoveryEngine();mismatch.enabled=true;mismatch.testSource={en}
+  let captured=mismatch.captureEventOrigin(.keyDown,original)
+  check(captured != nil,"original source intent captured")
+  if UInt64(bitPattern:token)>>48 == 0x4852 {check(captured==token,"physical provenance identity retained")}
+  // A received event gets the source's userData. CGEvent.data does not
+  // serialize all source metadata, so use the real source API as in source-timestamp tests.
+  original=originPacket(0,100,captured!)
+  // Capture the real token at main; use the same event through either tap order.
+  b.observeBeforeOnset(.keyDown,original,waiting:true)
+  let identity=original.getIntegerValueField(.eventSourceUserData)
+  original.timestamp=200
+  if mismatchFirst {_ = mismatch.event(.keyDown,original)}
+  original.timestamp=300
+  let receipt=original.copy()!
+  if !mismatchFirst {_ = mismatch.event(.keyDown,original)}
+  check(original.getIntegerValueField(.eventSourceUserData)==identity,"mismatch consumes intent without erasing downstream identity")
+  let boundary=KeyboardStateMirror();boundary.beginTesting()
+  let boundaryResult=boundary.receive(.keyDown,original)
+  // Source-backed synthetic getters can retain source userData; actual app
+  // delivery is checked separately in the live fixture, never inferred from serialization.
+  check(boundaryResult != nil,"origin identity never consumes or duplicates the original at final boundary")
+  check(receipt.getIntegerValueField(.eventSourceUserData)==identity,"asynchronous onset receipt survives boundary cleanup")
+  b.confirmOnsetDelivery(receipt,passed:passed)
+  text=passed ? "a":"";range=NSRange(location:text.utf16.count,length:0)
+  check(b.request(ko),"source request after retimestamped onset receipt")
+  check(b.receive(.keyDown,key(40)),"following text queued until source proof")
+  b.send={e in
+   posts+=1;check(!b.receive(e.type,e),"one boundary replay only")
+   b.observe(e.type,e);text=b.expected!.0;range=b.expected!.1
+  }
+  for _ in 0..<5{b.step()}
+  time=1.1;b.step()
+  print("retimestamp onset passed=\(passed) switches=\(switches) posts=\(posts) retained=\(retained)")
+  check(switches==1 && posts==1 && retained==0 && !b.busy,"retimestamped onset receipt must not cause deadline retention of following input")
+  check(text==(passed ? "aㅏ":"ㅏ"),"original delivery decision and following composition preserved")
+ }
+ }
+}
+
+
+for change in ["tag","code"] {
+ let b=SourceSwitchBarrier();var switches=0,text="",range=NSRange(location:0,length:0)
+ b.source={en};b.read={.init(field:field,text:text,selection:range)};b.select={_ in switches+=1;return noErr}
+ b.beginOnsetReplay(field:field,before:"",caret:0)
+ let event=originPacket(0,100,0x4852000100000111)
+ b.observeBeforeOnset(.keyDown,event,waiting:true)
+ let wrong=change=="tag" ? originPacket(0,200,0x4852000100000112):event.copy()!
+ wrong.timestamp=200
+ if change=="code"{wrong.setIntegerValueField(.keyboardEventKeycode,value:1)}
+ b.confirmOnsetDelivery(wrong,passed:true)
+ check(b.request(ko),"wrong receipt test boundary")
+ b.step();check(switches==0 && b.expected?.0=="","wrong \(change) cannot acknowledge another key")
+ let right=event.copy()!;right.timestamp=300;b.confirmOnsetDelivery(right,passed:true)
+ text="a";range=NSRange(location:1,length:0);b.step()
+ check(switches==1,"correct tagged receipt still resumes after wrong \(change)")
+ b.fail("test_cleanup")
+}
+do {
+ let b=SourceSwitchBarrier();var switches=0
+ b.source={en};b.read={.init(field:field,text:"",selection:NSRange(location:0,length:0))};b.select={_ in switches+=1;return noErr}
+ b.beginOnsetReplay(field:field,before:"",caret:0)
+ let event=key(0);event.timestamp=100;event.setIntegerValueField(.eventSourceUserData,value:0)
+ b.observeBeforeOnset(.keyDown,event,waiting:true)
+ let changed=event.copy()!;changed.timestamp=200;b.confirmOnsetDelivery(changed,passed:true)
+ check(b.request(ko),"untagged receipt test boundary");b.step()
+ check(switches==0,"untagged changed timestamp is never guessed from key code")
+ b.confirmOnsetDelivery(event,passed:false);b.step();check(switches==1,"exact legacy timestamp receipt remains supported")
+ b.fail("test_cleanup")
+}
+
+// Autorepeat may carry the press origin again. Every receipt still owns one
+// occurrence; a later same-key event must not overwrite an earlier one.
+for retimed in [false,true] {
+ let b=SourceSwitchBarrier()
+ b.source={en};b.read={.init(field:field,text:"",selection:NSRange(location:0,length:0))}
+ b.beginOnsetReplay(field:field,before:"",caret:0)
+ let first=originPacket(0,100,0x4852000100000222),repeated=originPacket(0,200,0x4852000100000222)
+ repeated.setIntegerValueField(.keyboardEventAutorepeat,value:1)
+ b.observeBeforeOnset(.keyDown,first,waiting:true)
+ b.observeBeforeOnset(.keyDown,repeated,waiting:true)
+ check(b.diagnosticCounts.awaitingOnset==2,"repeated press identity preserves both pending occurrences")
+ let receipt=first.copy()!,repeatReceipt=repeated.copy()!
+ if retimed{receipt.timestamp=300;repeatReceipt.timestamp=400}
+ b.confirmOnsetDelivery(receipt,passed:true)
+ check(b.diagnosticCounts.awaitingOnset==1 && b.expected?.0=="a","first receipt confirms exactly one occurrence")
+ b.confirmOnsetDelivery(repeatReceipt,passed:true)
+ check(b.diagnosticCounts.awaitingOnset==0 && b.expected?.0=="aa","repeat receipt confirms remaining occurrence exactly once")
+ b.fail("test_cleanup")
+}
+
+// Diagnostic wait reasons use existing decisions, emit once per reason, and
+// leave the same text/caret/source/receipt safety checks in place.
+do {
+ let b=SourceSwitchBarrier();var available=true,text="",range=NSRange(location:0,length:0),source=en,ready=true,stages:[String]=[],switches=0
+ b.read={available ? .init(field:field,text:text,selection:range):nil};b.readFocus={field};b.ready={ready};b.source={source}
+ b.trace={stages.append($0)};b.select={source=$0;switches+=1;return noErr}
+ b.observe(.keyDown,key(0));check(b.request(ko),"diagnostic mismatch request")
+ for _ in 0..<5 {b.step()}
+ check(stages.filter{$0=="waiting_for_text"}.count==1 && switches==0,"unchanged text mismatch emits one wait reason without switching")
+ text="a";b.step();check(stages.last=="waiting_for_caret" && switches==0,"caret mismatch is distinct from text mismatch")
+ available=false;b.step();check(stages.last=="waiting_for_snapshot","unreadable snapshot is distinct from a changed field")
+ ready=false;b.step();check(stages.last=="waiting_for_repair","repair wait is distinct from unreadable snapshot")
+ ready=true;available=true;range=NSRange(location:1,length:0);b.step()
+ check(switches==1 && stages.last=="editor_confirmed_switch","wait diagnostics preserve normal source completion")
+ b.step();check(!b.busy,"diagnosed boundary finishes normally")
+ b.fail("test_cleanup")
+}
+
+// A native backspace can leave a live syllable. Its remaining observed keys
+// may be reused only after the complete post-delete text/caret is verified.
+for scenario in ["live", "repeat", "whole", "text", "caret", "focus", "source", "unverified", "shortcut"] {
+ let b=SourceSwitchBarrier();var text="pre: ",range=NSRange(location:5,length:0),source=ko,focused=field,switches=0
+ b.read={.init(field:focused,text:text,selection:range)};b.source={source};b.select={source=$0;switches+=1;return noErr}
+ for code:UInt16 in [15,40,1] {b.observe(.keyDown,key(code));text=b.expected!.0;range=b.expected!.1}
+ if scenario=="unverified" {text="pre: changed";range=NSRange(location:text.utf16.count,length:0)}
+ b.observe(.keyDown,key(51,scenario=="shortcut" ? .maskAlternate:[]))
+ text="pre: 가";range=NSRange(location:6,length:0)
+ if scenario=="repeat" {b.observe(.keyDown,key(51));text="pre: ㄱ";b.observe(.keyDown,key(40));text="pre: 가"}
+ if scenario=="whole" {text="pre: ";range=NSRange(location:5,length:0)}
+ if scenario=="text" {text="new: 가"}
+ if scenario=="caret" {range=NSRange(location:5,length:0)}
+ if scenario=="focus" {focused=other}
+ if scenario=="source" {source=en}
+ b.observe(.keyDown,key(1))
+ let joins=["live","repeat"].contains(scenario)
+ check((b.expected?.0=="pre: 간")==joins,"post-backspace \(scenario) requires exact original field, text, caret, source and observed prefix")
+ if joins {text="pre: 간";range=NSRange(location:6,length:0);check(b.request(en),"post-backspace boundary requested");b.step();b.step();check(source==en && switches==1 && !b.busy,"post-backspace first switch completes")}
+ if scenario=="whole" {check(b.expected?.0=="pre: ㄴ","whole-syllable deletion uses actual empty baseline")}
+ b.fail("test_cleanup")
+}
+
+// Deletion may commit the previous syllable while retaining a detached initial.
+// Its observed-key boundary must survive the next medial instead of making 익.
+do {
+ let b=SourceSwitchBarrier();var text="앞🙂 ",range=NSRange(location:text.utf16.count,length:0),source=ko,switches=0
+ b.read={.init(field:field,text:text,selection:range)};b.source={source};b.select={source=$0;switches+=1;return noErr}
+ for code:UInt16 in [15,46,3,38,0,2,37,15,38] {b.observe(.keyDown,key(code));text=b.expected!.0;range=b.expected!.1}
+ check(text=="앞🙂 그럼이거","phrase before component deletion")
+ b.observe(.keyDown,key(51));text="앞🙂 그럼이ㄱ";range=NSRange(location:text.utf16.count,length:0)
+ b.observe(.keyDown,key(38));check(b.expected?.0=="앞🙂 그럼이거","verified observed-key split keeps preceding 이 committed")
+ text="앞🙂 그럼이거";range=NSRange(location:text.utf16.count,length:0)
+ check(b.request(en),"phrase switch requested");b.step();b.step()
+ check(source==en && switches==1 && !b.busy,"phrase switches on first request after component deletion")
+ b.fail("test_cleanup")
+}
+
+// Web editors expose an AX-only terminal LF and use NBSP for typed spaces.
+// Acknowledge only observed insertion style and that one original end suffix.
+for id in KoreanKeyboardLayout.supportedIDs {
+ let b=SourceSwitchBarrier();var text="앞🙂\n",range=NSRange(location:3,length:0),source=id
+ let keys:[UInt16]=id==ko ? [15,40,1]:([KoreanKeyboardLayout.threeSetID,KoreanKeyboardLayout.threeSet390ID].contains(id) ? [40,3,1]:[5,0,45])
+ b.read={.init(field:field,text:text,selection:range)};b.source={source};b.select={source=$0;return noErr}
+ for c in keys {b.observe(.keyDown,key(c))}
+ text="앞🙂간";range=NSRange(location:4,length:0)
+ check(b.matches(.init(field:field,text:text,selection:range)),"native-layout \(id) exact insertion with AX-only end LF removed")
+ check(b.request(en),"terminal LF request");b.step();b.step();check(source==en && !b.busy,"terminal LF does not freeze following input")
+ b.fail("test_cleanup")
+}
+do {
+ let b=SourceSwitchBarrier();var text="keep space \n",range=NSRange(location:11,length:0),source=en
+ b.read={.init(field:field,text:text,selection:range)};b.source={source};b.select={source=$0;return noErr}
+ for c:UInt16 in [0,49,11,49] {b.observe(.keyDown,key(c))}
+ text="keep space A\u{00a0}b\u{00a0}";range=NSRange(location:text.utf16.count,length:0)
+ check(b.matches(.init(field:field,text:text,selection:range)),"one terminal LF plus typed NBSP/case style is exact editor equivalence")
+ for wrong in ["keep\u{00a0}space A\u{00a0}b\u{00a0}","keep space A b  ","keep space A b", "keep space A b\u{200b}","keep space A b\n\n"] {
+  check(!b.matchesText(.init(field:field,text:wrong,selection:range)),"surrounding space, missing/doubled character and other whitespace remain mismatches")
+ }
+ check(!b.matches(.init(field:field,text:text,selection:NSRange(location:11,length:0))),"equivalent text never bypasses caret acknowledgment")
+ check(b.request(ko),"styled web request");b.step();b.step();check(source==ko && !b.busy,"styled web boundary completes without text edits")
+ b.fail("test_cleanup")
+}
+// A contradictory editor body must not capture the next original key. Settle
+// only suppressed modifier edges; no text replay or source change is permitted.
+for blocked in [false,true] {
+ let b=SourceSwitchBarrier();var text="",range=NSRange(location:0,length:0),ready=true,switches=0,posts=0,retained=0,settled=0,stages:[String]=[]
+ b.read={.init(field:field,text:text,selection:range)};b.source={en};b.ready={ready};b.select={_ in switches+=1;return noErr};b.send={_ in posts+=1};b.retained={retained += $0.count};b.cancelledModifiers={settled += $0.count};b.trace={stages.append($0)}
+ b.observe(.keyDown,key(0));text="external";range=NSRange(location:8,length:0)
+ check(b.request(ko),"divergent boundary request");b.step()
+ let up=key(54);up.type = .flagsChanged;up.flags=[];check(b.receive(.flagsChanged,up),"suppressed right release queued before following input")
+ if blocked{ready=false}
+ check(b.receive(.keyDown,key(11))==blocked,"divergence passes current physical input only when no repair owns it")
+ check(b.busy==blocked && settled==(blocked ? 0:1),"divergence cancellation settles observed modifier edges")
+ check(posts==0 && switches==0 && retained==0,"no source selection, synthetic replay or text retention on input resumption")
+ if !blocked{check(stages.contains("editor_diverged_input_resumed"),"content-free cancellation reason recorded")}
+ b.fail("test_cleanup")
+}
+do {
+ let b=SourceSwitchBarrier();var text="\n",range=NSRange(location:0,length:0)
+ b.read={.init(field:field,text:text,selection:range)};b.source={en}
+ b.observe(.keyDown,key(0));text="";check(b.request(ko),"empty web prefix boundary");b.step()
+ check(b.receive(.keyDown,key(11)) && b.busy,"AX-only LF removal before delayed first character remains a pending prefix")
+ b.fail("test_cleanup")
+}
+
+do {
+ let b=SourceSwitchBarrier();var text="",range=NSRange(location:0,length:0),settled=0
+ b.read={.init(field:field,text:text,selection:range)};b.source={en};b.cancelledModifiers={settled += $0.count}
+ b.observe(.keyDown,key(0));text="external";range=NSRange(location:8,length:0);check(b.request(ko),"unmapped modifier boundary");b.step()
+ let left=key(55,.maskCommand);left.type = .flagsChanged;check(b.receive(.flagsChanged,left),"left Command remains owned by the existing ordered queue")
+ check(b.receive(.keyDown,key(11,.maskCommand)) && b.busy && settled==0,"unmapped modifier is never discarded to resume following input")
+ b.fail("test_cleanup")
+}
+
+do {
+ let b=SourceSwitchBarrier();var text="\n",range=NSRange(location:0,length:0),source=ko
+ b.read={.init(field:field,text:text,selection:range)};b.source={source};b.select={source=$0;return noErr}
+ for c:UInt16 in [15,40,1] {b.observe(.keyDown,key(c))}
+ text="간";range=NSRange(location:1,length:0);b.observe(.keyDown,key(51));text="가"
+ b.observe(.keyDown,key(1));check(b.matches(.init(field:field,text:"간",selection:range)),"web LF equivalence also preserves verified deletion continuation")
+ b.fail("test_cleanup")
+}
+do {
+ let b=SourceSwitchBarrier();var text="\n",range=NSRange(location:0,length:0),source=en,writes=0
+ b.read={.init(field:field,text:text,selection:range)};b.source={source};b.select={source=$0;return noErr};b.applySelection={_,_ in writes+=1;return false}
+ for c:UInt16 in [5,34,17,4,32,11] {b.observe(.keyDown,key(c))}
+ text="github";range=NSRange(location:0,length:6);b.observe(.keyDown,key(0,.maskCommand));check(b.request(ko),"web select-all boundary")
+ for _ in 0..<4{b.step()}
+ check(source==ko && !b.busy && writes==0,"explicit select-all uses verified body length after AX-only terminal LF disappears")
+ b.fail("test_cleanup")
+}
+
 print("Source switch barrier:",checks,"checks passed")

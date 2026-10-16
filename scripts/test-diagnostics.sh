@@ -11,3 +11,6 @@ hanq_test_run "$stage/diagnostics-tests" --diagnose-input "$stage/trace.log"
 # Invalid/missing destinations must not evaluate messages or crash the caller.
 hanq_test_run "$stage/diagnostics-tests" --expect-disabled --diagnose-input "$stage/missing/trace.log"
 hanq_test_run "$stage/diagnostics-tests" --diagnose-input
+swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/Incidents/main.swift -o "$stage/incident-tests"
+hanq_test_run "$stage/incident-tests"
+python3 -B Tests/Diagnostics/test_incident_summary.py

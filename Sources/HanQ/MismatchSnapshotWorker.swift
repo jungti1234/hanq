@@ -23,6 +23,8 @@ final class MismatchSnapshotWorker {
     }
     static func read(pid:pid_t)->MismatchSnapshotResult {
         let began=ProcessInfo.processInfo.systemUptime
+        let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
+        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead)}
         let focusAccess=InputFocusAccess()
         let application=AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application,0.05)

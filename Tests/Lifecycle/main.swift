@@ -164,3 +164,140 @@ precondition(!MismatchRecoveryEngine.supportsSnapshotRole("AXPopUpButton",includ
 precondition(SelectionPreservingSourceSwitch.supportsEditableRole("AXComboBox"))
 precondition(!SelectionPreservingSourceSwitch.supportsEditableRole("AXPopUpButton"))
 print("PASS: combo source boundary requires content/range validation without widening automatic mismatch detection")
+
+
+// Exercise the production onset -> source barrier -> retained-input wiring,
+// with owned snapshots and a mocked sender (no taps, OS posts or source changes).
+do {
+ let b=owner.sourceSwitchBarrier,field=AXUIElementCreateApplication(12345)
+ let previousRetained=owner.mismatchRecovery.engine.retained
+ for missing in [false,true] {
+  b.fail("test_cleanup")
+  var text="",range=NSRange(location:0,length:0),source="com.apple.keylayout.ABC",time=0.0,posts=0
+  b.now={time};b.ready={true};b.source={source};b.read={.init(field:field,text:text,selection:range)};b.readFocus={field}
+  b.select={source=$0;return noErr}
+  b.beginOnsetReplay(field:field,before:"",caret:0)
+  let inputSource=CGEventSource(stateID:.privateState)!;inputSource.userData=0x4852000100000011
+  let original=CGEvent(keyboardEventSource:inputSource,virtualKey:0,keyDown:true)!;original.flags=[];original.timestamp=100
+  b.observeBeforeOnset(.keyDown,original,waiting:true)
+  let receipt=original.copy()!;receipt.timestamp=200
+  if !missing {owner.onsetRecovery.didProcessPhysicalKey(receipt,true);text="a";range=NSRange(location:1,length:0)}
+  precondition(b.request("com.apple.inputmethod.Korean.2SetKorean"))
+  let next=CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:true)!;next.flags=[]
+  precondition(b.receive(.keyDown,next))
+  b.send={event in posts+=1;precondition(!b.receive(event.type,event));b.observe(event.type,event);text=b.expected!.0;range=b.expected!.1}
+  for _ in 0..<5 {b.step()}
+  if missing {time=1.1;b.step()}
+  precondition(posts==(missing ? 0:1),"production callback must release only proved input once")
+  precondition(owner.mismatchRecovery.engine.retained.count==previousRetained.count+(missing ? 1:0),"source-boundary retention reaches production retained store only for unproved delivery")
+  owner.mismatchRecovery.engine.retained=previousRetained
+ }
+ b.fail("test_cleanup")
+}
+print("PASS: production onset identity handoff resumes retimestamped delivery; missing proof retains original once; no OS posts")
+
+if let index=CommandLine.arguments.firstIndex(of:"--diagnose-input-incidents"),index+1<CommandLine.arguments.count {
+    owner.markInputIncident()
+    InputIncidentTrace.shared.flush()
+    let directory=URL(fileURLWithPath:CommandLine.arguments[index+1])
+    let files=try! FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil)
+    precondition(!files.isEmpty,"production marker action must persist a metadata incident")
+    print("PASS: production incident marker action and diagnostic-enabled lifecycle, no global taps or posts")
+}
+
+// A failed boundary must settle observed modifier state without performing the
+// deferred action. A retained key is still retained, never posted to the editor.
+for initialSource in ["com.apple.keylayout.ABC",mismatchKoreanID] {
+ for code: Int64 in [54,61] {
+  let app=AppDelegate(),field=AXUIElementCreateApplication(34567),b=app.sourceSwitchBarrier
+  var time=0.0,posts=0,switches=0
+  b.now={time};b.ready={true};b.source={initialSource};b.readFocus={field}
+  b.read={.init(field:field,text:"abc",selection:NSRange(location:3,length:0))}
+  b.send={_ in posts+=1};b.select={_ in switches+=1;return noErr}
+  let held=CGEventFlags(rawValue:code==54 ? CGEventFlags.maskCommand.rawValue|0x10:CGEventFlags.maskAlternate.rawValue|0x40)
+  if code==54 {_=app.filter.process(type:.flagsChanged,key:code,flags:held,acceptNewPress:true)}
+  else {_=app.optionFilter.process(type:.flagsChanged,key:code,flags:held,acceptNewPress:true)}
+  b.observe(.keyDown,observedKey(0)) // Force a pre-existing unacknowledged insertion.
+  precondition(b.request(initialSource==mismatchKoreanID ? "com.apple.keylayout.ABC":mismatchKoreanID))
+  let up=observedKey(CGKeyCode(code));up.type = .flagsChanged;up.flags=[]
+  precondition(b.receive(.flagsChanged,up))
+  time=1.1;b.step()
+  precondition(!b.busy && posts==0 && switches==0 && app.mismatchRecovery.engine.retained.count==1)
+  let next=code==54 ? app.filter.process(type:.flagsChanged,key:code,flags:held,acceptNewPress:true):app.optionFilter.process(type:.flagsChanged,key:code,flags:held,acceptNewPress:true)
+  precondition(next.edge=="right-down","failed boundary must not swallow the next right modifier press")
+ }
+}
+print("PASS: failed boundaries settle observed Command/Option releases in both source directions without posting or switching")
+
+// Do not invent a release when the physical key remains down, or turn a
+// deferred re-press into a new action while cleaning up an aborted queue.
+for repress in [false,true] {
+ let app=AppDelegate(),b=app.sourceSwitchBarrier,field=AXUIElementCreateApplication(45678)
+ let held=CGEventFlags(rawValue:CGEventFlags.maskCommand.rawValue|0x10)
+ b.read={.init(field:field,text:"abc",selection:NSRange(location:3,length:0))};b.readFocus={field};b.source={mismatchKoreanID}
+ _=app.filter.process(type:.flagsChanged,key:54,flags:held,acceptNewPress:true)
+ precondition(b.request("com.apple.keylayout.ABC"))
+ if repress {
+  let up=observedKey(54);up.type = .flagsChanged;up.flags=[];precondition(b.receive(.flagsChanged,up))
+  let down=observedKey(54);down.type = .flagsChanged;down.flags=held;precondition(b.receive(.flagsChanged,down))
+ } else {
+  let letter=observedKey(0);letter.flags=held;precondition(b.receive(.keyDown,letter))
+ }
+ b.fail("focus_changed")
+ let repeated=app.filter.process(type:.flagsChanged,key:54,flags:held,acceptNewPress:true)
+ precondition(repeated.edge==nil && app.filter.consuming == !repress)
+ _=app.filter.process(type:.flagsChanged,key:54,flags:[],acceptNewPress:true)
+ precondition(app.filter.process(type:.flagsChanged,key:54,flags:held,acceptNewPress:true).edge=="right-down")
+}
+print("PASS: aborted queues preserve a genuinely held key and do not activate a deferred re-press")
+
+// Registered external language and Hanja keys must settle their per-device
+// state too, without issuing either action or posting the retained input.
+do {
+ let suite="taek.in.hanq.boundary-release-tests.\(UUID().uuidString)"
+ // Use an independent suite; never touch saved user profiles.
+ let isolated=UserDefaults(suiteName:suite)!
+ defer {isolated.removePersistentDomain(forName:suite)}
+ let profiles=ExternalKeyboardProfiles(defaults:isolated)
+ profiles.save(.init(korean:.init(keyCode:61),hanja:.init(keyCode:62)),for:"fixture")
+ let device=ExternalKeyboardDevice(registryID:100,identity:"fixture",name:"Fixture",external:true)
+ let controller=ExternalKeyboardController(profiles:profiles,devices:.init(snapshot:[100:device]))
+ func physical(_ code:CGKeyCode,_ flags:CGEventFlags)->CGEvent {
+  let event=observedKey(code);event.type = .flagsChanged;event.flags=flags
+  event.setIntegerValueField(CGEventField(rawValue:87)!,value:100);event.setIntegerValueField(.eventSourceUnixProcessID,value:0)
+  return event
+ }
+ for code:CGKeyCode in [61,62] {
+  let app=AppDelegate();app.externalKeyboards=controller
+  let b=app.sourceSwitchBarrier,field=AXUIElementCreateApplication(56789)
+  let held=CGEventFlags(rawValue:code==61 ? CGEventFlags.maskAlternate.rawValue|0x40:CGEventFlags.maskControl.rawValue|0x2000)
+  let down=physical(code,held)
+  precondition(controller.process(type:.flagsChanged,event:down,active:true,koreanAllowed:true,hanjaAllowed:true).consume)
+  b.read={.init(field:field,text:"abc",selection:NSRange(location:3,length:0))};b.readFocus={field};b.source={mismatchKoreanID}
+  precondition(b.request("com.apple.keylayout.ABC"));precondition(b.receive(.flagsChanged,physical(code,[])))
+  b.fail("deadline")
+  precondition(!controller.consuming && app.mismatchRecovery.engine.retained.count==1)
+  let next=controller.process(type:.flagsChanged,event:down,active:true,koreanAllowed:true,hanjaAllowed:true)
+  precondition(next.consume && (code != 61 || next.korean))
+  _=controller.process(type:.flagsChanged,event:physical(code,[]),active:false,koreanAllowed:false,hanjaAllowed:false)
+ }
+}
+print("PASS: retained releases settle registered per-device modifiers without a language or Hanja action")
+
+// A divergent editor cancels before the next physical key, balancing the
+// already suppressed right release without retaining or replaying text.
+do {
+ let app=AppDelegate()
+ let b=app.sourceSwitchBarrier,field=AXUIElementCreateApplication(45678)
+ var text="",range=NSRange(location:0,length:0),selections=0
+ b.read={.init(field:field,text:text,selection:range)};b.source={"com.apple.keylayout.ABC"};b.ready={true};b.select={_ in selections+=1;return noErr}
+ b.observe(.keyDown,observedKey(0));text="external";range=NSRange(location:8,length:0)
+ let down=CGEvent(keyboardEventSource:nil,virtualKey:54,keyDown:true)!;down.type = .flagsChanged;down.flags=CGEventFlags(rawValue:CGEventFlags.maskCommand.rawValue|0x10)
+ precondition(app.filter.process(type:.flagsChanged,key:54,flags:down.flags,acceptNewPress:true).edge=="right-down")
+ precondition(b.request(mismatchKoreanID));b.step()
+ let up=down.copy()!;up.flags=[];precondition(b.receive(.flagsChanged,up))
+ precondition(!b.receive(.keyDown,observedKey(11)) && !b.busy && selections==0)
+ precondition(!app.filter.consuming && app.mismatchRecovery.engine.retained.isEmpty)
+ precondition(app.filter.process(type:.flagsChanged,key:54,flags:down.flags,acceptNewPress:true).edge=="right-down")
+ print("PASS: divergent switch cancellation passes original input and settles product right Command state without text retention")
+}

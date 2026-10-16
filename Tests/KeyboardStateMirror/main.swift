@@ -24,6 +24,21 @@ check(mirror.preserve(.keyDown,normal,process:{Unmanaged.passUnretained(normal)}
 mirror.stop();called=false
 check(mirror.preserve(.keyDown,normal,process:{called=true;return nil}) != nil && !called,"stopped boundary cannot run a consuming handler")
 print("PASS: \(checks) keyboard state boundary ownership, flags and teardown assertions; no OS posts")
+
+for tag:Int64 in [0x4852000100000001,0x4851455600000001] {
+ let original=key(.keyDown);original.setIntegerValueField(.eventSourceUserData,value:tag)
+ let receipt=original.copy()!;var seen:Int64=0
+ mirror.diagnosticBoundary={_,event,consumed in check(!consumed,"ordinary provenance is never consumed");seen=event.getIntegerValueField(.eventSourceUserData)}
+ check(mirror.receive(.keyDown,original)?.takeUnretainedValue() === original,"ordinary original passed once")
+ check(seen==tag,"observer sees identity before boundary cleanup; source metadata is verified live")
+ check(receipt.getIntegerValueField(.eventSourceUserData)==tag,"async gate receipt retains its own identity")
+}
+mirror.diagnosticBoundary=nil
+for tag:Int64 in [0x12345678,0x48414E5100000001,0x4851535749544348] {
+ let e=key(.keyDown);e.setIntegerValueField(.eventSourceUserData,value:tag)
+ check(mirror.receive(.keyDown,e) != nil && e.getIntegerValueField(.eventSourceUserData)==tag,"unrelated producer/repair tags are untouched")
+}
+
 var posted=PostedKeys()
 posted.record(56,down:true,modifier:true);posted.record(37,down:true);posted.record(37,down:true)
 check(posted.takeReleases()==[PostedKeys.Key(code:37,modifier:false),PostedKeys.Key(code:56,modifier:true)],"interrupted producer releases letter before its modifier once")

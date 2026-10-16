@@ -10,6 +10,8 @@ for mode in editor-transitions layouts ack-timeout shift-onset early-capture ear
     hanq_test_run "$stage/tests" "--test-$mode"
 done
 hanq_test_run "$stage/tests" --test-integration --diagnose-input "$stage/privacy.log"
+hanq_test_run "$stage/tests" --test-integration --diagnose-input-incidents "$stage/incidents"
+hanq_test_run "$stage/tests" --test-selection-retry --diagnose-input-incidents "$stage/incidents"
 if rg -q 'PRIVATE_ONSET_PAYLOAD|"code"|"events"' "$stage/privacy.log"; then exit 1; fi
 rg -q 'onset.privacy_check' "$stage/privacy.log"
 echo 'PASS: production onset diagnostics omit text, clipboard and key payloads'
