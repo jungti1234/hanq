@@ -381,6 +381,10 @@ python3 scripts/summarize-input-incident.py "$incident_dir"/incident-*.json
 
 ### 기존 검사와 상태 진단
 
+사용자가 직접 실행하는 [ChatGPT 자동 입력 시험 앱](../Tools/InputTestRecorder/README.md)은 `bash scripts/build-chatgpt-input-test.sh`로 만든다. 사용자가 도구 자체의 AX·키 전송 권한을 허용하고 시작한 뒤 빈 초안을 선택하면100회 고정 문장 입력·실제 입력 간격·AX 본문/커서·최종 소스를 대조한다. 기존 초안 보호·선택 확인·첫 실패 중단과 전송 키 제외를 적용하며 실제 본문·클립보드는 저장하지 않는다. 한Q 본체를 교체하거나 입력기·한Q 권한을 변경하지 않는다. 대역은 `bash scripts/test-chatgpt-input-test.sh`, 별도 소유 실제 IME는 `bash scripts/test-auto-input-native.sh '<새 결과 JSON 경로>'`로 검사한다. 이 두 결과를 실제 ChatGPT 실행으로 합산하지 않는다.
+
+사용자가 직접 입력할 때의 수동 관찰 기록 도구는 `bash scripts/build-input-test-recorder.sh`로 별도 생성한다. 추가 AX·키 전송 없이 기존 한Q 진단 폴더의 새 메타데이터만 수집한다. 두 도구의 파일·수명·개인정보 검사는 `bash scripts/test-input-test-recorder.sh`, 저장 구간 요약은 `python3 scripts/summarize-input-test-session.py '<세션 폴더>'`로 실행한다. 한Q 메타데이터의 수신 미확인 표시, 사용자 관찰, 자동 시험 앱의 별도 AX 대조와 명목 속도 충족 여부를 구분한다.
+
 시험 실행 스크립트는 `scripts/test-workspace.sh`를 통해 실행 파일·복사한 리소스·제어 파일·진단 로그를 `/private/tmp` 아래의 실행별 임시 폴더에 둔다. 시험 프로세스의 작업 디렉터리도 해당 폴더이며, 필요한 원본 자료는 터미널이 먼저 복사한다. 외부 키보드 화면과 첫 자음 시험 결과는 종료 후 터미널이 지정된 작업 폴더로 복사한다. Documents 접근 허용이나 전체 디스크 접근을 추가하지 않는다. 손쉬운 사용·키 전송 권한 사전 체크는 그대로 필요하다.
 
 `python3 Tests/TestWorkspace/test_runtime_paths.py`는 임시 작업 디렉터리에서의 읽기·쓰기와 종료 코드 전달, 영구 시험 폴더의 보호 경로·심볼릭 링크 거부를 검사한다. Sparkle 설치 시험의 서버·앱·결과도 `/private/tmp` 아래에서 유지하고, 필요한 결과는 시험 종료 후 터미널로 복사한다.
