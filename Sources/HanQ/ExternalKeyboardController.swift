@@ -265,7 +265,7 @@ final class ExternalKeyboardController: NSObject, NSWindowDelegate {
             result.korean = active && koreanAllowed && korean.edge == .down
             result.hanja = active && hanjaAllowed && hanja.edge == .up
             for (binding, consumed) in [(profile.korean, korean.consume), (profile.hanja, hanja.consume)] where consumed {
-                let alsoHeld = binding.modifier.map { modifier in
+                let alsoHeld = binding.modifier.map { modifier -> Bool in
                     physicalModifiers.contains { $0.key != device.registryID && $0.value & modifier.mask != 0 }
                 } ?? false
                 if !alsoHeld { result.flags = binding.removingModifier(from: result.flags) }
