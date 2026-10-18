@@ -3,6 +3,7 @@
 import argparse
 import collections
 import json
+import importlib.util
 from pathlib import Path
 
 
@@ -32,6 +33,14 @@ def summarize(folder):
                            if session.get("selfTest", False) else
                            "Human observations and HanQ metadata only; counts and no loss report do not prove editor delivery."),
     }
+    status_paths=sorted(folder.glob("storage-*.json"))
+    summary["storage_statuses"]=[]
+    summary["rejected_storage_statuses"]=result.get("rejectedStorageStatuses",0) if result else None
+    if status_paths:
+        if len(status_paths)>16 or any(path.stat().st_size>16*1024 for path in status_paths):raise ValueError("storage status collection limit")
+        spec=importlib.util.spec_from_file_location("incident_summary",Path(__file__).with_name("summarize-input-incident.py"))
+        incident_summary=importlib.util.module_from_spec(spec);spec.loader.exec_module(incident_summary)
+        summary["storage_statuses"]=[incident_summary.summarize_storage_document(json.loads(path.read_text())) for path in status_paths]
     if (folder / "auto-run.json").exists():
         plan = json.loads((folder / "auto-run.json").read_text())
         automatic = json.loads((folder / "auto-result.json").read_text()) if (folder / "auto-result.json").exists() else None

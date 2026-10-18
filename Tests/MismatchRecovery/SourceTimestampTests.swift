@@ -51,5 +51,70 @@ func runSourceTimestampTests() {
     p.userToggleDuringRecovery(at:4200)
     _=p.event(.keyDown,delivered(1,4300,discardedToken))
     probeTestCheck(p.pendingSources[p.bufferedID(p.pending.last!)]==p.englishID,"direct dispatch consumes engine source history")
-    print("PASS: source timestamps exclude older English from repair and preserve queued source intervals")
+    // Native arm64 HID tick values are much smaller than session nanoseconds.
+    // Reproduce the false pre-switch branch with the same provenance adapter.
+    probeTestCheck(MismatchEventClock.nanoseconds(fromHIDTicks:3,numerator:125,denominator:3)==125,"Mach ticks convert with integer precision")
+    probeTestCheck(MismatchEventClock.nanoseconds(fromHIDTicks:123,numerator:1,denominator:1)==123,"unit timebase preserves timestamps")
+    probeTestCheck(MismatchEventClock.nanoseconds(fromHIDTicks:1,numerator:125,denominator:3)==41,"fractional nanoseconds round down")
+    probeTestCheck(MismatchEventClock.nanoseconds(fromHIDTicks:UInt64.max,numerator:2,denominator:2)==UInt64.max,"full-width multiplication avoids intermediate overflow")
+    probeTestCheck(MismatchEventClock.nanoseconds(fromHIDTicks:UInt64.max,numerator:125,denominator:3)==0,"unrepresentable clock value has no invented ordering")
+    probeTestCheck(MismatchEventClock.nanoseconds(fromHIDTicks:100,numerator:1,denominator:0)==0 && MismatchEventClock.nanoseconds(fromHIDTicks:100,numerator:0,denominator:1)==0,"invalid timebase cannot poison the switch watermark")
+    do {
+        let engine=MismatchRecoveryEngine();engine.enabled=true;engine.testSource={mismatchKoreanID};engine.testFastContext={true}
+        var reads=0;engine.testSnapshot={reads+=1;return MismatchSnapshot(element:field,text:"",selection:NSRange(location:0,length:0))}
+        engine.noteUserSourceSwitch(at:100000)
+        let hid=key(2,3000)
+        let tag=engine.captureEventOrigin(.keyDown,hid)!
+        _=engine.event(.keyDown,delivered(2,200000,tag))
+        probeTestCheck(reads==0 && engine.plan==nil,"unconverted native tick value reproduces false pre-switch rejection")
+    }
+    let clockNow:UInt64=1_000_000_000_000
+    probeTestCheck(MismatchEventClock.normalizeHIDTimestamp(23_999_999_997,observedAt:clockNow,numerator:125,denominator:3)==999_999_999_875,"hardware HID ticks select the compatible monotonic clock")
+    probeTestCheck(MismatchEventClock.normalizeHIDTimestamp(clockNow-125,observedAt:clockNow,numerator:125,denominator:3)==clockNow-125,"already-nanosecond posted HID is never double converted")
+    probeTestCheck(MismatchEventClock.normalizeHIDTimestamp(clockNow-125,observedAt:clockNow,numerator:1,denominator:1)==clockNow-125,"unit clocks remain exact")
+    probeTestCheck(MismatchEventClock.normalizeHIDTimestamp(UInt64.max,observedAt:clockNow,numerator:125,denominator:3)==0,"future/overflow clocks cannot poison the source boundary")
+    probeTestCheck(MismatchEventClock.normalizeHIDTimestamp(0,observedAt:clockNow,numerator:125,denominator:3)==0,"zero clock remains unknown")
+    for raw:UInt64 in [23_952_000_000,998_000_000_000] {
+        probeTestCheck(MismatchEventClock.normalizeHIDTimestamp(raw,observedAt:clockNow,numerator:125,denominator:3)==998_000_000_000,"genuinely old keys retain their age in either HID representation")
+    }
+    for old in [false,true] {
+        let engine=MismatchRecoveryEngine();engine.enabled=true;engine.testSource={mismatchKoreanID};engine.testFastContext={true}
+        var snapshots=0
+        engine.testSnapshot={snapshots+=1;return MismatchSnapshot(element:field,text:"",selection:NSRange(location:0,length:0))}
+        // A synthetic 125/3 timebase makes the test independent of its host.
+        let hid=key(2,old ? 2000:3000)
+        let normalized=MismatchEventClock.nanoseconds(fromHIDTicks:hid.timestamp,numerator:125,denominator:3)
+        engine.noteUserSourceSwitch(at:100000)
+        let gate=MismatchSwitchGate(accepts:{false},switched:{_ in})
+        var forwarded=0
+        gate.forwarded={type,event,time in forwarded+=1;engine.captureEventOrigin(type,event,at:time)}
+        _=gate.receive(.keyDown,hid,at:normalized)
+        let token=hid.getIntegerValueField(.eventSourceUserData)
+        probeTestCheck(hid.timestamp==(old ? 2000:3000) && forwarded==1,"normalization leaves delivered event timestamp unchanged")
+        _=engine.event(.keyDown,delivered(2,200000,token))
+        probeTestCheck(old ? engine.plan==nil && snapshots==0:engine.plan?.roman=="d" && snapshots>0,old ? "genuinely pre-switch HID key remains excluded after downstream retiming":"post-switch HID key creates candidate despite smaller raw tick value")
+    }
+    do {
+        var switchTime:CGEventTimestamp=0,capsTime:CGEventTimestamp=0,forwardedTime:CGEventTimestamp=0
+        let gate=MismatchSwitchGate(accepts:{true},switched:{switchTime=$0})
+        gate.forwarded={_,_,time in forwardedTime=time}
+        let command=key(54,3000);command.type = .flagsChanged;command.flags=CGEventFlags(rawValue:0x10|CGEventFlags.maskCommand.rawValue)
+        _=gate.receiveHID(.flagsChanged,command)
+        probeTestCheck(switchTime==MismatchEventClock.hidTimestamp(command) && command.timestamp==3000,"native right Command uses normalized boundary without mutating raw event")
+        let caps=key(57,4000);caps.type = .flagsChanged;caps.flags=[]
+        gate.acceptsExternalSource={true};gate.capsChanged={capsTime=$0}
+        _=gate.receiveHID(.flagsChanged,caps)
+        probeTestCheck(capsTime==MismatchEventClock.hidTimestamp(caps) && forwardedTime==capsTime,"native Caps and ordinary provenance use the same normalized domain")
+    }
+    do {
+        let engine=MismatchRecoveryEngine()
+        let command=key(54,3000);command.type = .flagsChanged
+        let token=engine.captureEventOrigin(.flagsChanged,command,at:125000)!
+        let source=CGEventSource(stateID:.privateState)!;source.userData=token
+        let downstream=CGEvent(keyboardEventSource:source,virtualKey:54,keyDown:true)!
+        downstream.type = .flagsChanged;downstream.timestamp=900000
+        probeTestCheck(engine.takeSourceSwitchTimestamp(.flagsChanged,downstream)==125000,"normal switch retains physical HID boundary despite session retiming")
+        probeTestCheck(engine.takeSourceSwitchTimestamp(.flagsChanged,downstream)==900000,"consumed normal switch cannot reuse a stale provenance entry")
+    }
+    print("PASS: source timestamps normalize HID ticks, exclude older English and preserve queued source intervals")
 }

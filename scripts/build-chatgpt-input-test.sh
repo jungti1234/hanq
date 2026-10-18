@@ -20,7 +20,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>HanQ ChatGPT Input Test</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
-<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleVersion</key><string>11</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict></plist>

@@ -19,7 +19,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>HanQ Input Test Recorder</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleVersion</key><string>9</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict></plist>

@@ -46,6 +46,7 @@ final class OnsetRecoveryEngine:NSObject {
     var recovering=false
     var pending:[CGEvent]=[]
     var currentPlan:OnsetRecoveryPlan?
+    private var incidentShapeProbe=InputIncidentShapeProbe()
     var lastText:String?
     var unavailableReason=""
     var lastAvailability=""
@@ -503,8 +504,12 @@ final class OnsetRecoveryEngine:NSObject {
         var range=CFRange();guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.location>=0,range.length>=0,range.location+range.length<=text.utf16.count else{unavailableReason="selection_invalid";return nil}
         guard let after=focusedElement(ax,pid:target.processIdentifier),CFEqual(element,after) else{unavailableReason="focus_changed_during_snapshot";return nil}
         if InputIncidentTrace.shared.enabled {
-            InputIncidentTrace.shared.shape(.onsetAX,identity:CFHash(element),count:text.utf16.count,selected:range.length>0,editing:recovering)
-        }
+            let trace=InputIncidentTrace.shared
+            let (identity,owner,window,epoch)=trace.fieldRegistry.identify(element,owner:target.processIdentifier,window:nil,generation:trace.collectionGeneration)
+            var evidence=InputIncidentAXEvidence();evidence.owner=owner;evidence.window=window;evidence.identityEpoch=epoch;evidence.route=focusAccess.lastRoute
+            let change=incidentShapeProbe.observe(identity:identity,text:text,selection:NSRange(location:range.location,length:range.length),generation:trace.collectionGeneration,ax:evidence)
+            trace.shape(.onsetAX,identity:identity,count:text.utf16.count,selected:range.length>0,editing:recovering,change:change)
+        } else {incidentShapeProbe.reset()}
         return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length))
     }
     func observeAvailability(_ snap:OnsetSnapshot?){

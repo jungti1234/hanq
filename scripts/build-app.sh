@@ -85,6 +85,7 @@ bash scripts/test-input-delivery-origin.sh
 bash scripts/test-keyboard-state-mirror.sh
 bash scripts/test-selection-source-switch.sh
 bash scripts/test-source-switch-barrier.sh
+bash scripts/test-source-evidence.sh
 bash scripts/test-onset-recovery.sh
 bash scripts/test-mismatch-recovery.sh
 bash scripts/test-diagnostics.sh

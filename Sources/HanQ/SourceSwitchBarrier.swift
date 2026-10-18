@@ -4,6 +4,10 @@ import Carbon
 /// Keep a user source boundary behind text already submitted to the editor.
 /// The ledger is evidence for ordering, never a replacement for editor text.
 final class SourceSwitchBarrier {
+    var sourceEvidence:MismatchSourceEvidence?
+    private var deferredHistoryEpoch:Int?
+    var didConfirmSource:(String,CGEventTimestamp)->Void = {_,_ in}
+    var incidentTrace=InputIncidentTrace.shared
     struct Snapshot { let field:AXUIElement; let text:String; let selection:NSRange }
     static let marker:Int64 = 0x4851535749544348
     var read:()->Snapshot? = {nil}
@@ -48,6 +52,10 @@ final class SourceSwitchBarrier {
     private var targetTimestamp:CGEventTimestamp=0
     private var awaitingReplay=false
     private var externalEditPending=false
+    private struct ManualEdit {let token:Int;let field:AXUIElement;let source:String}
+    private var manualEdit:ManualEdit?
+    private var manualEditSequence=0
+    private func isReady()->Bool {manualEdit==nil && ready()}
     private var waitingForRepairBoundary=false
     private struct DeliveryKey:Hashable {
         let identity:UInt64;let code:Int64
@@ -199,7 +207,7 @@ final class SourceSwitchBarrier {
         ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil
         trace("source_initial_body_removed")
     }
-    func resetObservation(){field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
     // Backspace can remove one component of live Hangul rather than commit the
     // remaining syllable. Reuse only our observed key prefix, after the editor
     // proves its entire text and caret. Never decompose existing editor text.
@@ -226,25 +234,45 @@ final class SourceSwitchBarrier {
     }
     // The main tap records accepted keys before the mismatch tap reads their
     // pre-insertion snapshot. Offer either complete ledger, never inferred text.
+    private func discardInvalidDeferredHistory() {
+        if let saved=deferredHistoryEpoch,sourceEvidence?.retains(saved) != true {
+            if let evidence=sourceEvidence{incidentTrace.sourceEvidence(.rejected,evidence.diagnostic(selected:source()))}
+            resetObservation()
+        }
+    }
     func verifiedTwoSetHistory(_ snap:MismatchSnapshot,after boundary:CGEventTimestamp,allowPrior:Bool=false)->(plan:MismatchRecoveryPlan,lastKeyAt:Double)? {
-        guard !busy,ready(),!externalEditPending,selectedRange==nil,
-              let field,CFEqual(field,snap.element),source()==mismatchKoreanID,
-              historyStarted>boundary else{return nil}
+        discardInvalidDeferredHistory()
+        if let saved=deferredHistoryEpoch {
+            guard sourceEvidence?.permitsHistory(saved)==true else{return nil}
+            if let evidence=sourceEvidence{incidentTrace.sourceEvidence(.resumed,evidence.diagnostic(selected:source(),history:true))}
+            deferredHistoryEpoch=nil
+        }
+        guard !busy else{incidentTrace.decision(.handoff,.handoffBusy);return nil}
+        guard isReady() else{incidentTrace.decision(.handoff,.handoffNotReady);return nil}
+        guard !externalEditPending else{incidentTrace.decision(.handoff,.handoffExternalEdit);return nil}
+        guard selectedRange==nil else{incidentTrace.decision(.handoff,.handoffSelection);return nil}
+        guard let field,CFEqual(field,snap.element) else{incidentTrace.decision(.handoff,.handoffField);return nil}
+        guard source()==mismatchKoreanID else{incidentTrace.decision(.handoff,.handoffSource);return nil}
+        guard historyStarted>boundary else{incidentTrace.decision(.handoff,historyStarted==0 ? .handoffUninitialized:.handoffBoundary);return nil}
         let histories=allowPrior ? [(ledger,lastKeyAt),(priorKeyLedger,priorKeyAt)]:[(ledger,lastKeyAt)]
+        var rejection=InputIncidentTrace.DecisionReason.handoffNoHistory
         for (candidate,at) in histories {
-            guard let candidate,now()-at>=0,now()-at<=5,
-                  let plan=candidate.lastTwoSetPlan() else{continue}
+            guard let candidate else{continue}
+            guard now()-at>=0,now()-at<=5 else{rejection = .handoffExpired;continue}
+            guard let plan=candidate.lastTwoSetPlan() else{continue}
             let normal=candidate.text==snap.text && candidate.selection==snap.selection
             guard normal || plan.matches(text:snap.text,selection:snap.selection) ||
-                plan.partialFailurePlan(text:snap.text,selection:snap.selection) != nil else{continue}
+                plan.partialFailurePlan(text:snap.text,selection:snap.selection) != nil else{rejection = .handoffTextMismatch;continue}
+            incidentTrace.decision(.handoff,.handoffAccepted)
             return (plan,at)
         }
+        incidentTrace.decision(.handoff,rejection)
         return nil
     }
     /// The onset engine has selected its exact replacement on this field.
     /// Seed prediction before posting, then observe each posted event once.
     /// This is not editor acknowledgment: selection/switch still requires the
-    /// resulting full text and caret, and ready() must wait for replay delivery.
+    /// resulting full text and caret, and isReady() must wait for replay delivery.
     func beginOnsetReplay(field:AXUIElement,before:String,caret:Int) {
         guard !busy,caret>=0,caret<=before.utf16.count else{return}
         resetObservation()
@@ -254,16 +282,45 @@ final class SourceSwitchBarrier {
     /// focused field must start its own history before that key is submitted.
     /// Never rebase an active transaction or treat a missing reply as a move.
     private func refreshIdleField() {
-        guard !busy,ready(),let field else{return}
+        guard !busy,isReady(),let field else{return}
         let focused:AXUIElement?
         if let readFocus {focused=readFocus()} else{focused=read()?.field}
         guard let focused,!CFEqual(field,focused) else{return}
         resetObservation()
         trace("observation_field_changed")
     }
+    /// Explicit manual replacement owns this field until its full result is
+    /// verified. A switch pressed meanwhile waits, never selects against the
+    /// pre-replacement body. No AX read or input blocking occurs here.
+    func beginManualEdit(field:AXUIElement,source:String)->Int? {
+        guard manualEdit==nil,!busy,ready(),!externalEditPending,
+              repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay else{return nil}
+        manualEditSequence+=1
+        manualEdit=ManualEdit(token:manualEditSequence,field:field,source:source)
+        resetObservation();externalEditPending=true
+        trace("manual_edit_started")
+        return manualEditSequence
+    }
+    func finishManualEdit(_ token:Int,snapshot:Snapshot?) {
+        guard let edit=manualEdit,edit.token==token else{return}
+        manualEdit=nil
+        guard let snapshot,CFEqual(edit.field,snapshot.field),source()==edit.source,
+              snapshot.selection.location>=0,snapshot.selection.length>=0,
+              NSMaxRange(snapshot.selection)<=snapshot.text.utf16.count else {
+            if busy{fail("manual_edit_unverified")}
+            else{resetObservation();repairInFlight.removeAll();externalEditPending=false;trace("manual_edit_unverified")}
+            return
+        }
+        resetObservation();repairInFlight.removeAll();externalEditPending=false
+        field=snapshot.field;ledger=MismatchReplayLedger(before:snapshot.text,caret:snapshot.selection.location)
+        selectedRange=snapshot.selection.length>0 ? snapshot.selection:nil
+        trace("manual_edit_verified")
+        if busy{schedule()}
+    }
     /// A repair owns its replay and acknowledges the final editor state itself.
     /// Its marked events must not leave our pre-repair prediction alive.
     func noteExternalEdit() {
+        manualEdit=nil;manualEditSequence+=1
         resetObservation()
         repairInFlight.removeAll()
         externalEditPending=true
@@ -276,20 +333,21 @@ final class SourceSwitchBarrier {
         if passed {observe(type,event)}
     }
     func adoptVerifiedReplay(_ replay:MismatchReplayLedger, snapshot:MismatchSnapshot) {
-        guard replay.text==snapshot.text,replay.selection==snapshot.selection else{return}
+        guard manualEdit==nil,replay.text==snapshot.text,replay.selection==snapshot.selection else{return}
         guard transactionField == nil || CFEqual(transactionField!,snapshot.element) else{return}
         field=snapshot.element;ledger=replay;selectedRange=nil;externalEditPending=false
         priorKeyLedger=nil;lastKeyAt=now();historyStarted=MismatchRecoveryEngine.sourceEventTime()
         trace("repair_history_adopted")
     }
     func observe(_ type:CGEventType,_ event:CGEvent) {
+        sourceEvidence?.observeInteraction(type,event)
         let heldCode=event.getIntegerValueField(.keyboardEventKeycode)
         if type == .keyDown {deliveredHeld.insert(heldCode)}
         if type == .keyUp {deliveredHeld.remove(heldCode)}
         if [.leftMouseDown,.rightMouseDown,.otherMouseDown].contains(type){resetObservation();return}
         guard type == .keyDown else{return}
         if externalEditPending {
-            guard ready() else{
+            guard isReady() else{
                 if repairInFlight.count<256 {repairInFlight.insert(DeliveryKey(event))}
                 return
             }
@@ -324,7 +382,9 @@ final class SourceSwitchBarrier {
         }
         guard flags.isEmpty,let code=UInt16(exactly:event.getIntegerValueField(.keyboardEventKeycode)),
               MismatchRecoveryPlan.character(code,event.flags.contains(.maskShift)) != nil else{resetObservation();return}
-        let id=source()
+        let selected=source(),deferred=sourceEvidence?.deferredSource(for:selected)
+        discardInvalidDeferredHistory()
+        let id=deferred ?? selected
         guard id.hasPrefix("com.apple.keylayout." ) || MismatchKeyboardLayout.supports(id) else{resetObservation();return}
         refreshIdleField()
         if ledger == nil {
@@ -334,20 +394,29 @@ final class SourceSwitchBarrier {
             if ledger == nil {
                 field=snap.field
                 ledger=MismatchReplayLedger(before:(snap.text as NSString).replacingCharacters(in:snap.selection,with:""),caret:snap.selection.location)
-                historyStarted=event.timestamp
             }
         }
         if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil}
         guard (ledger?.segments.reduce(0,{$0+$1.keys.count}) ?? 0)<128 else{resetObservation();return}
+        // A completed switch can preserve the proved body/ledger but starts a
+        // new (empty) source interval. Timestamp its first accepted key rather
+        // than treating the old ledger as an already initialized new interval.
+        if ledger?.segments.last?.source != id || ledger?.segments.last?.keys.isEmpty == true {
+            historyStarted=event.timestamp
+        }
         priorKeyLedger=ledger;priorKeyAt=lastKeyAt;lastKeyAt=now()
         ledger?.append(source:id,keys:[(code,event.flags.contains(.maskShift))])
+        if deferred != nil,let evidence=sourceEvidence {
+            deferredHistoryEpoch=evidence.epoch
+            incidentTrace.sourceEvidence(.deferred,evidence.diagnostic(selected:selected,history:true),event:event)
+        }
 
     }
     /// Reserve the edit boundary in the HID stream, before a later right
     /// Command can be consumed by the repair's source gate. Queue the original
     /// events at the normal session tap, preserving its single delivery path.
     func beginRepairBoundary(_ type:CGEventType,_ event:CGEvent) {
-        if !busy,externalEditPending,!ready(),type == .keyDown,
+        if !busy,externalEditPending,!isReady(),type == .keyDown,
            event.getIntegerValueField(.keyboardEventKeycode)==0,
            event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskShift]) == .maskCommand {
             // Let the repair verify its current text before beginning a new
@@ -367,7 +436,7 @@ final class SourceSwitchBarrier {
         guard busy else{return false}
         if type == .keyDown,target != nil,switchSnapshot == nil,
            !pendingSelectAll,!awaitingSelection,!selectionCommitPending,
-           ready(),repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,
+           isReady(),repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,
            queued.allSatisfy({$0.type == .flagsChanged && $0.getIntegerValueField(.keyboardEventKeycode)==54}),
            let snap=mismatchedSnapshot {
             if isPendingTextPrefix(snap) {
@@ -389,7 +458,13 @@ final class SourceSwitchBarrier {
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0)->Bool {
+        discardInvalidDeferredHistory()
         refreshIdleField()
+        if let edit=manualEdit {
+            if !busy{transactionField=edit.field}
+            busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1;waitReason=nil;lastTextMatch=nil
+            trace("waiting_for_editor");schedule();return true
+        }
         if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection}
         guard field != nil,ledger != nil else{return false}
         if !busy { transactionField=field }
@@ -416,7 +491,7 @@ final class SourceSwitchBarrier {
         guard busy else{return}
         // A repair has its own bounded edit/verification transaction. Do not
         // expire our editor-ack deadline or compete with its AX reads meanwhile.
-        if !ready() {
+        if !isReady() {
             if repairWaitStarted == nil {repairWaitStarted=now()}
             guard now()-repairWaitStarted!<3 else{fail("repair_deadline");return}
             wait("waiting_for_repair");return
@@ -452,7 +527,7 @@ final class SourceSwitchBarrier {
         guard let snap=read() else{wait("waiting_for_snapshot");return}
         guard let transactionField,CFEqual(transactionField,snap.field) else{fail("focus_changed");return}
         if externalEditPending {
-            guard ready() else{wait("waiting_for_repair");return}
+            guard isReady() else{wait("waiting_for_repair");return}
             ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)
             selectedRange=snap.selection;field=snap.field;externalEditPending=false
             trace("repair_acknowledged")
@@ -460,7 +535,7 @@ final class SourceSwitchBarrier {
         if !matchesText(snap) {acknowledgeSourceInitialBodyRemoval(snap)}
         noteTextMatch(snap)
         if pendingSelectAll {
-            guard ready() else{wait("waiting_for_repair");return}
+            guard isReady() else{wait("waiting_for_repair");return}
             if !matchesText(snap) {acknowledgeInitialBodyRemoval(snap)}
             guard matchesText(snap) else{waitForMatch(snap);return}
             guard let selectedRange else{schedule();return}
@@ -500,7 +575,7 @@ final class SourceSwitchBarrier {
             trace("select_all_committed");schedule();return
         }
         if let target {
-            guard ready() else{wait("waiting_for_repair");return}
+            guard isReady() else{wait("waiting_for_repair");return}
             if switchSnapshot == nil {
                 guard matches(snap) else{waitForMatch(snap);return}
                 switchSnapshot=snap
@@ -509,6 +584,7 @@ final class SourceSwitchBarrier {
             if selectionPending(){wait("waiting_for_source_commit");return}
             guard result==noErr,source()==target else{fail("switch_failed");return}
             let snap=switchSnapshot!;switchSnapshot=nil
+            didConfirmSource(target,targetTimestamp)
             didSelect(targetTimestamp);targetTimestamp=0
             let previous=ledger
             self.target=nil;resetObservation();self.field=snap.field
@@ -532,7 +608,7 @@ final class SourceSwitchBarrier {
         if !queued.isEmpty {
             replayNext();return
         }
-        guard ready() else{wait("waiting_for_repair");return}
+        guard isReady() else{wait("waiting_for_repair");return}
         if expected == nil || matches(snap) {
             busy=false;self.transactionField=nil;trace("finished")
         }else{waitForMatch(snap)}
@@ -550,6 +626,7 @@ final class SourceSwitchBarrier {
         awaitingReplay=true;deadline=now()+1.0;send(event);schedule()
     }
     func fail(_ reason:String){
+        manualEdit=nil;manualEditSequence+=1
 
         cancelSelection();switchSnapshot=nil;selectionCommitSnapshot=nil
         repairInFlight.removeAll()

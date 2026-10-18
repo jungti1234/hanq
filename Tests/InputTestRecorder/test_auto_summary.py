@@ -10,6 +10,24 @@ spec.loader.exec_module(module)
 
 
 class SummaryTests(unittest.TestCase):
+    def test_storage_status_is_separate_from_editor_observations(self):
+        with tempfile.TemporaryDirectory(prefix="hanq-storage-summary-") as name:
+            root=Path(name);(root/'incidents').mkdir()
+            (root/'session.json').write_text(json.dumps(dict(target='com.openai.codex')))
+            (root/'result.json').write_text(json.dumps(dict(collectionComplete=True,rejectedStorageStatuses=1)))
+            self.assertEqual(module.summarize(root)['storage_statuses'],[])
+            spec=importlib.util.spec_from_file_location('incident_summary',Path(__file__).resolve().parents[2]/'scripts/summarize-input-incident.py')
+            incident=importlib.util.module_from_spec(spec);spec.loader.exec_module(incident)
+            value={key:0 for key in incident.STORAGE_FIELDS};value.update(maximumAutomaticFiles=64,maximumAutomaticBytes=67108864,lastAutomatic=False)
+            (root/'storage-test.json').write_text(json.dumps(dict(schema=1,build='244',status=value)))
+            result=module.summarize(root)
+            self.assertEqual(result['storage_statuses'][0]['storage_after_write']['attempts'],0)
+            self.assertEqual(result['rejected_storage_statuses'],1)
+            self.assertEqual(result['capture_files'],0)
+            self.assertFalse(result['chatgpt_receipt_verified'])
+            value['text']='PRIVATE';(root/'storage-test.json').write_text(json.dumps(dict(schema=1,build='244',status=value)))
+            with self.assertRaises(ValueError):module.summarize(root)
+
     def test_hundred_case_integrity_and_regression_evidence(self):
         with tempfile.TemporaryDirectory(prefix="hanq-auto100-summary-") as name:
             root = Path(name)

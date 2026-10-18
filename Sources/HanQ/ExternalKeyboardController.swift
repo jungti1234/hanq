@@ -193,6 +193,11 @@ final class ExternalKeyboardController: NSObject, NSWindowDelegate {
         var flags: CGEventFlags
         var korean = false
         var hanja = false
+        var diagnosticDevice = 0
+        var diagnosticHandling = 0
+        var diagnosticRole = 0
+        var diagnosticBefore = 0, diagnosticAfter = 0, diagnosticEdge = 0, diagnosticReason = 0
+        var diagnosticAccepted = false
     }
     func wantsInputSource(type: CGEventType, event: CGEvent) -> Bool {
         guard panel?.isKeyWindow != true, panel?.attachedSheet == nil, let device = devices.device(for: event), device.external,
@@ -207,6 +212,7 @@ final class ExternalKeyboardController: NSObject, NSWindowDelegate {
         var result = Result(flags: event.flags)
         let keyboardEvent = type == .keyDown || type == .keyUp || type == .flagsChanged
         let device = keyboardEvent ? devices.device(for: event) : nil
+        result.diagnosticDevice = device.map { !$0.external ? 1:(!devices.isUnique($0) ? 4:(profiles[$0.identity] == nil ? 2:3)) } ?? (keyboardEvent ? 5:0)
         let key = event.getIntegerValueField(.keyboardEventKeycode)
         let binding = KeyboardBinding(keyCode: key)
         if let device, type == .flagsChanged, let modifier = binding.modifier {
@@ -229,6 +235,7 @@ final class ExternalKeyboardController: NSObject, NSWindowDelegate {
             // Suppress HanQ actions only while setup has focus. Only the
             // selected device can be captured, and only while our window has focus.
             result.handled = true
+            result.diagnosticHandling = 1
             result.consume = capturedRelease
             guard active, !IsSecureEventInputEnabled(), panel?.attachedSheet == nil, panel?.isKeyWindow == true, keyboardEvent else { return result }
             guard device == selected else {
@@ -249,10 +256,13 @@ final class ExternalKeyboardController: NSObject, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in if self?.selected != nil { self?.refreshCapture(message: message) } }
             return result
         }
-        if capturedRelease { result.handled = true; result.consume = true; return result }
+        if capturedRelease { result.handled = true; result.consume = true; result.diagnosticHandling = 2; return result }
         if let device, device.external, devices.isUnique(device), let profile = profiles[device.identity] {
             result.handled = true
+            result.diagnosticHandling = 3
+            result.diagnosticRole = profile.korean.matches(type:type,key:key) ? 3:(profile.hanja.matches(type:type,key:key) ? 4:0)
             var state = presses[device.registryID] ?? Presses()
+            let diagnosticPrior=result.diagnosticRole==3 ? state.korean:state.hanja
             let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             let korean = state.korean.process(binding: profile.korean, type: type, key: key,
                 flags: event.flags, repeated: repeated, accept: active && koreanAllowed)
@@ -260,6 +270,15 @@ final class ExternalKeyboardController: NSObject, NSWindowDelegate {
             let hanja = state.hanja.process(binding: profile.hanja, type: type, key: key,
                 flags: event.flags, repeated: repeated,
                 accept: active && hanjaAllowed && otherFlags.intersection([.maskCommand, .maskControl, .maskShift]).isEmpty)
+            if result.diagnosticRole>0 {
+                let current=result.diagnosticRole==3 ? state.korean:state.hanja
+                let edge=result.diagnosticRole==3 ? korean.edge:hanja.edge
+                result.diagnosticBefore=(diagnosticPrior.held ? 1:0) | (diagnosticPrior.consuming ? 2:0)
+                result.diagnosticAfter=(current.held ? 1:0) | (current.consuming ? 2:0)
+                result.diagnosticEdge=edge == .down ? 1:(edge == .up ? 2:0)
+                result.diagnosticAccepted=result.diagnosticRole==3 ? (active && koreanAllowed):(active && hanjaAllowed && otherFlags.intersection([.maskCommand,.maskControl,.maskShift]).isEmpty)
+                result.diagnosticReason=result.diagnosticEdge==1 ? 1:(result.diagnosticEdge==2 ? 2:(repeated || (diagnosticPrior.held && current.held) ? 4:(!result.diagnosticAccepted ? 5:3)))
+            }
             presses[device.registryID] = state
             result.consume = korean.consume || hanja.consume
             result.korean = active && koreanAllowed && korean.edge == .down
@@ -274,6 +293,7 @@ final class ExternalKeyboardController: NSObject, NSWindowDelegate {
             // If the private sender field disappears, fail open instead of applying
             // another keyboard's profile or silently triggering the default keys.
             result.handled = true
+            result.diagnosticHandling = 4;result.diagnosticDevice = 6
         }
         // Global flags cannot always identify which same-side key was released
         // when two keyboards hold it. Once that bit is globally up, clear any

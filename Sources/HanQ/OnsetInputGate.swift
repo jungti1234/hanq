@@ -3,6 +3,7 @@ import AppKit
 // Shared state uses a bounded lock acquisition (2ms maximum requested wait).
 // No AX, disk I/O, or synchronous dispatch to the main thread occurs in receive().
 final class OnsetInputGate {
+    var incidentTrace=InputIncidentTrace.shared
     static func isRecoveryMarker(_ value:Int64)->Bool {
         UInt64(bitPattern:value) >> 32 == 0x48414E51
     }
@@ -196,7 +197,12 @@ final class OnsetInputGate {
     var didProcessPhysicalKey:((CGEvent,Bool)->Void)?
     func receive(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
         let began=diagnosticEvent == nil ? nil:ProcessInfo.processInfo.systemUptime
-        let result=processEvent(type,event)
+        var control=InputIncidentControl.begin(incidentTrace,type,event)
+        var route=InputIncidentControl.Route.onsetPassed
+        let result=processEvent(type,event,route:&route)
+        // The gate's existing lock has been released before diagnostics enqueue.
+        control?.route=route.rawValue
+        if let control{incidentTrace.control(.onset,type,event,control,consumed:result==nil)}
         if let began{diagnosticEvent?(type,event,result==nil,ProcessInfo.processInfo.systemUptime-began)}
         if type == .keyDown,!Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
            didProcessPhysicalKey != nil,let copy=event.copy() {
@@ -205,40 +211,44 @@ final class OnsetInputGate {
         }
         return result
     }
-    private func processEvent(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
+    private func processEvent(_ type:CGEventType,_ event:CGEvent,route:inout InputIncidentControl.Route)->Unmanaged<CGEvent>? {
         // A main-thread heartbeat/take can briefly own this lock. A single failed
         // try is normal contention, not an unhealthy gate. Never wait indefinitely.
         guard lock.try() || lock.lock(before:Date(timeIntervalSinceNow:0.002)) else{
+            route = .onsetLockTimeout
             DispatchQueue.main.async{self.stop();self.failed?("gate_lock_timeout")}
             return Unmanaged.passUnretained(event)
         }
         defer{lock.unlock()}
         if event.getIntegerValueField(.eventSourceUserData)==marker{
+            route = .replayMarker
             replaySeen+=1
             return Unmanaged.passUnretained(event)
         }
         // Old-session replay must pass, but cannot acknowledge this session or
         // be captured again as physical input.
-        if Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)){return Unmanaged.passUnretained(event)}
-        if event.getIntegerValueField(.eventSourceUserData)==0x454F5448{return Unmanaged.passUnretained(event)}
-        guard !stopped else{if type == .keyDown{traceReentry(.key,.stopped)};return Unmanaged.passUnretained(event)}
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{fail("tap_disabled");return Unmanaged.passUnretained(event)}
+        if Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)){route = .replayMarker;return Unmanaged.passUnretained(event)}
+        if event.getIntegerValueField(.eventSourceUserData)==0x454F5448{route = .manualMarker;return Unmanaged.passUnretained(event)}
+        guard !stopped else{route = .onsetStopped;if type == .keyDown{traceReentry(.key,.stopped)};return Unmanaged.passUnretained(event)}
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{route = .tapDisabled;fail("tap_disabled");return Unmanaged.passUnretained(event)}
         let now=ProcessInfo.processInfo.systemUptime
         if reentryTraceEnabled,type == .keyDown{reentryInputSequence+=1}
-        if holdUntil>0 && now-heartbeat>=0.25{expireOrFail("observation_stale");observeDeferredPass(type,event);observePassed(type,event);return Unmanaged.passUnretained(event)}
+        if holdUntil>0 && now-heartbeat>=0.25{route = .onsetStale;expireOrFail("observation_stale");observeDeferredPass(type,event);observePassed(type,event);return Unmanaged.passUnretained(event)}
         if holdUntil>0 {
-            guard now<holdUntil else{expireOrFail("hold_deadline");observeDeferredPass(type,event);observePassed(type,event);return Unmanaged.passUnretained(event)}
-            guard type == .keyDown || type == .keyUp || type == .flagsChanged else{fail("pointer_during_repair");return Unmanaged.passUnretained(event)}
-            guard event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{fail("shortcut_during_repair");return Unmanaged.passUnretained(event)}
+            guard now<holdUntil else{route = .onsetDeadline;expireOrFail("hold_deadline");observeDeferredPass(type,event);observePassed(type,event);return Unmanaged.passUnretained(event)}
+            guard type == .keyDown || type == .keyUp || type == .flagsChanged else{route = .onsetPointer;fail("pointer_during_repair");return Unmanaged.passUnretained(event)}
+            guard event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{route = .onsetShortcut;fail("shortcut_during_repair");return Unmanaged.passUnretained(event)}
             // The original first down already went to the editor. Its release
             // can follow it before a repair is claimed; never bypass queued input.
             if let first=early,earlyReleasePending,type == .keyUp,
                UInt16(event.getIntegerValueField(.keyboardEventKeycode))==first.code {
+                route = .onsetFirstRelease
                 earlyReleasePending=false;observePassed(type,event);return Unmanaged.passUnretained(event)
             }
             // Until a verified repair claims this reservation, following input
             // belongs to the editor. Never quarantine keys for an unknown field.
             if early != nil {
+                route = .onsetUnclaimed
                 early=nil;earlyReleasePending=false;holdUntil=0;hintUntil=0
                 deferred=nil;expiredEarly=true;observePassed(type,event)
                 if type == .keyDown{traceReentry(.key,.unclaimed_followup,now:now)}
@@ -246,7 +256,8 @@ final class OnsetInputGate {
                 return Unmanaged.passUnretained(event)
             }
             earlyReleasePending=false
-            guard held.count<128,let copy=event.copy() else{fail("buffer_limit");return Unmanaged.passUnretained(event)}
+            guard held.count<128,let copy=event.copy() else{route = .onsetBufferLimit;fail("buffer_limit");return Unmanaged.passUnretained(event)}
+            route = .onsetBuffered
             held.append(copy);if type == .keyDown{traceReentry(.key,.hold_active,now:now)};return nil
         }
         observeDeferredPass(type,event);observePassed(type,event)
@@ -294,7 +305,14 @@ final class OnsetGateThread {
         let worker=Thread{[self] in
             let mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}
             guard let tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.tailAppendEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
-                KeyboardStateMirror.shared.preserve(type,event) { Unmanaged<OnsetInputGate>.fromOpaque(ref!).takeUnretainedValue().receive(type,event) }
+                let gate=Unmanaged<OnsetInputGate>.fromOpaque(ref!).takeUnretainedValue()
+                var processed=false
+                let result=KeyboardStateMirror.shared.preserve(type,event) {processed=true;return gate.receive(type,event)}
+                if !processed,var value=InputIncidentControl.begin(gate.incidentTrace,type,event) {
+                    value.route=(KeyboardStateMirror.isMarker(event.getIntegerValueField(.eventSourceUserData)) ? InputIncidentControl.Route.mirrorMarker:.mirrorInactive).rawValue
+                    gate.incidentTrace.control(.onset,type,event,value)
+                }
+                return result
             },userInfo:Unmanaged.passUnretained(gate).toOpaque()) else{
                 gate.stop();DispatchQueue.main.async{self.gate.failed?("tap_create_failed")};return
             }

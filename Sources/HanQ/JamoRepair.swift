@@ -9,6 +9,10 @@ final class JamoRepair {
     private var busy = false
     var isEditing: Bool { busy || watchingHanja }
     var canBeginEdit: () -> Bool = { true }
+    // The owner invalidates typing prediction and returns a scoped generation.
+    // Only a verified full result may become the next switching baseline.
+    var beginTextEdit:(AXUIElement,String)->Int? = {_,_ in 0}
+    var endTextEdit:(Int,AXUIElement,String?,NSRange?)->Void = {_,_,_,_ in}
     private let marker: Int64 = 0x454F5448
     private var hanjaWatchID = 0
     private var watchingHanja = false
@@ -348,8 +352,8 @@ final class JamoRepair {
             if self.selection(element) == range {
                 switch action {
                 case .paste(let replacement):
-                    self.pasteReplacement(element, pid: pid, text: text, range: range,
-                                          originalSelection: originalSelection, replacement: replacement)
+                    self.pasteReplacement(element, app:app, pid: pid, text: text, range: range,
+                                          originalSelection: originalSelection, replacement: replacement,inputSourceID:inputSourceID)
                 case .hanja:
                     // Wait for AX to reflect the selection before opening the
                     // native candidates. The IME owns replacement and Escape.
@@ -434,16 +438,27 @@ final class JamoRepair {
         poll()
     }
 
-    private func pasteReplacement(_ element: AXUIElement, pid: pid_t, text: String,
-                                  range: NSRange, originalSelection: NSRange, replacement: String) {
+    private func pasteReplacement(_ element: AXUIElement, app:AXUIElement, pid: pid_t, text: String,
+                                  range: NSRange, originalSelection: NSRange, replacement: String,inputSourceID:String?) {
         guard AXIsProcessTrusted() else { busy = false; return }
+        guard let inputSourceID,let editToken=beginTextEdit(element,inputSourceID) else{_ = setSelection(element,originalSelection);busy=false;return}
+        let expectedRevision=revision
         let clipboard = NSPasteboard.general
         let saved = (clipboard.pasteboardItems ?? []).map { item in
             item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
         }
+        func restoreClipboard(){
+            clipboard.clearContents()
+            let items=saved.map{entries -> NSPasteboardItem in
+                let item=NSPasteboardItem();for (type,data) in entries{item.setData(data,forType:type)};return item
+            }
+            if !items.isEmpty{clipboard.writeObjects(items)}
+        }
         clipboard.clearContents()
+        let clearedChange=clipboard.changeCount
         guard clipboard.setString(replacement, forType: .string) else {
-            _ = setSelection(element, originalSelection); busy = false; return
+            if clipboard.changeCount==clearedChange{restoreClipboard()}
+            _ = setSelection(element, originalSelection); busy = false;endTextEdit(editToken,element,nil,nil);return
         }
         let ownedChange = clipboard.changeCount
         busy = true
@@ -455,22 +470,24 @@ final class JamoRepair {
                 guard let self else { return }
                 let value = self.attribute(element, kAXValueAttribute) as? String
                 let unchanged = value.map { $0.utf8.elementsEqual(text.utf8) } == true
-                if unchanged, attempt < 30 { finish(attempt + 1); return }
-                if clipboard.changeCount == ownedChange {
-                    clipboard.clearContents()
-                    let items = saved.map { entries -> NSPasteboardItem in
-                        let item = NSPasteboardItem()
-                        for (type, data) in entries { item.setData(data, forType: type) }
-                        return item
-                    }
-                    if !items.isEmpty { clipboard.writeObjects(items) }
-                }
+                let caret=self.selection(element)
+                let expectedCaret=range.location+replacement.utf16.count
+                let matched=value.map{$0.utf8.elementsEqual(expected.utf8)} == true
+                let validCaret=caret==NSRange(location:expectedCaret,length:0)
+                let contextUnchanged=self.revision==expectedRevision && AXIsProcessTrusted()
+                    && !IsSecureEventInputEnabled() && NSWorkspace.shared.frontmostApplication?.processIdentifier==pid
+                if contextUnchanged,(unchanged || (matched && !validCaret)),attempt<30 {finish(attempt+1);return}
+                if clipboard.changeCount == ownedChange {restoreClipboard()}
                 if unchanged, self.selection(element) == range,
                    NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
                     _ = self.setSelection(element, originalSelection)
                 }
                 if value.map({ $0.utf8.elementsEqual(expected.utf8) }) != true { NSLog("자모 조합: 편집기 적용을 확인하지 못했습니다.") }
+                let verified=matched && validCaret && contextUnchanged
+                    && InputSourceSnapshot.read()?.id==inputSourceID
+                    && self.attribute(app,kAXFocusedUIElementAttribute).map{CFEqual($0,element)} == true
                 self.busy = false
+                self.endTextEdit(editToken,element,verified ? value:nil,verified ? caret:nil)
             }
         }
         finish(0)

@@ -13,15 +13,15 @@ struct MismatchSnapshotResult {
 // sends keys, edits text, or touches UI. Results are consumed on the main queue.
 final class MismatchSnapshotWorker {
     private let queue=DispatchQueue(label:"hanq.mismatch.snapshot",qos:.userInitiated)
-    private let readOperation:(pid_t)->MismatchSnapshotResult
-    init(read:@escaping (pid_t)->MismatchSnapshotResult=MismatchSnapshotWorker.read){readOperation=read}
-    func request(pid:pid_t,completion:@escaping (MismatchSnapshotResult)->Void){
+    private let readOperation:((pid_t)->MismatchSnapshotResult)?
+    init(read:((pid_t)->MismatchSnapshotResult)?=nil){readOperation=read}
+    func request(pid:pid_t,semantics:Bool=false,completion:@escaping (MismatchSnapshotResult)->Void){
         queue.async {
-            let result=self.readOperation(pid)
+            let result=self.readOperation?(pid) ?? Self.read(pid:pid,semantics:semantics)
             DispatchQueue.main.async{completion(result)}
         }
     }
-    static func read(pid:pid_t)->MismatchSnapshotResult {
+    static func read(pid:pid_t,semantics:Bool=false)->MismatchSnapshotResult {
         let began=ProcessInfo.processInfo.systemUptime
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
         defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead)}
@@ -29,21 +29,34 @@ final class MismatchSnapshotWorker {
         let application=AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application,0.05)
         var focusMs=0.0,attributesMs=0.0
+        let diagnosticGeneration=InputIncidentTrace.shared.collectionGeneration
+        let collectSemantics=semantics && InputIncidentTrace.shared.enabled
+        var route=0
         func result(_ snapshot:MismatchSnapshot?=nil,_ reason:String="")->MismatchSnapshotResult {
             MismatchSnapshotResult(snapshot:snapshot,reason:reason,durationMs:(ProcessInfo.processInfo.systemUptime-began)*1000,focusMs:focusMs,attributesMs:attributesMs)
         }
         func focused()->AXUIElement? {
             let start=ProcessInfo.processInfo.systemUptime
             defer{focusMs+=(ProcessInfo.processInfo.systemUptime-start)*1000}
-            return focusAccess.focusedElement(application:application,pid:pid)
+            let element=focusAccess.focusedElement(application:application,pid:pid)
+            let current=focusAccess.lastRoute
+            if current != 0{route=route==0 || route==current ? current:3}
+            return element
         }
         guard let element=focused() else{return result(nil,"focused_element_unreadable")}
         let start=ProcessInfo.processInfo.systemUptime
         var values:CFArray?
-        let names=[kAXRoleAttribute,kAXSubroleAttribute,kAXValueAttribute,kAXSelectedTextRangeAttribute] as CFArray
-        let error=AXUIElementCopyMultipleAttributeValues(element,names,[],&values)
+        let baseNames=[kAXRoleAttribute,kAXSubroleAttribute,kAXValueAttribute,kAXSelectedTextRangeAttribute]
+        // One optional attribute batch on the existing bounded idle worker;
+        // input callbacks never perform these supplemental IPCs or await it.
+        let names=(baseNames + (collectSemantics ? ["AXPlaceholderValue",kAXTitleAttribute,kAXDescriptionAttribute,kAXNumberOfCharactersAttribute,kAXWindowAttribute]:[])) as CFArray
+        var error=AXUIElementCopyMultipleAttributeValues(element,names,[],&values)
+        if error != .success,collectSemantics {
+            values=nil
+            error=AXUIElementCopyMultipleAttributeValues(element,baseNames as CFArray,[],&values)
+        }
         attributesMs=(ProcessInfo.processInfo.systemUptime-start)*1000
-        guard error == .success,let list=values as? [AnyObject],list.count==4 else{return result(nil,"attribute_batch_unreadable")}
+        guard error == .success,let list=values as? [AnyObject],list.count>=4 else{return result(nil,"attribute_batch_unreadable")}
         guard let role=list[0] as? String,["AXTextArea","AXTextField"].contains(role) else{return result(nil,"not_supported_text_field")}
         guard list[1] as? String != "AXSecureTextField" else{return result(nil,"secure_text_field")}
         guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{return result(nil,"text_unreadable")}
@@ -58,6 +71,10 @@ final class MismatchSnapshotWorker {
         let selection=NSRange(location:range.location,length:range.length)
         guard let content=MismatchTextReader.read(element,value:text,selection:selection) else{return result(nil,"editor_coordinates_unverified")}
         guard let finalFocus=focused(),CFEqual(element,finalFocus) else{return result(nil,"focus_changed_during_snapshot")}
-        return result(MismatchSnapshot(element:element,text:content.text,selection:selection,selectedText:content.selectedText))
+        var evidence:InputIncidentAXEvidence?,window:AXUIElement?
+        if collectSemantics,InputIncidentTrace.shared.collectionGeneration==diagnosticGeneration,InputIncidentTrace.shared.enabled {
+            (evidence,window)=InputIncidentAXEvidence.attributes(list,value:text,verified:content.text,route:route)
+        }
+        return result(MismatchSnapshot(element:element,text:content.text,selection:selection,selectedText:content.selectedText,incidentAX:evidence,incidentWindow:window,incidentGeneration:diagnosticGeneration))
     }
 }

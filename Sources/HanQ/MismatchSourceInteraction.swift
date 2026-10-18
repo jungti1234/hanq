@@ -1,6 +1,37 @@
 import AppKit
 import Carbon
 
+// Hardware HID records can expose Mach ticks while posted HID and session
+// records already contain nanoseconds. Resolve the representation against the
+// observation's monotonic clock before preserving provenance. Never rewrite
+// the delivered event, and never turn an invalid/future value into a boundary.
+enum MismatchEventClock {
+    static let timebase:mach_timebase_info_data_t = {
+        var value=mach_timebase_info_data_t()
+        mach_timebase_info(&value)
+        return value
+    }()
+    static func nanoseconds(fromHIDTicks ticks:UInt64,numerator:UInt32,denominator:UInt32)->CGEventTimestamp {
+        guard denominator>0,numerator>0 else{return 0}
+        let product=ticks.multipliedFullWidth(by:UInt64(numerator))
+        guard product.high<UInt64(denominator) else{return 0}
+        return UInt64(denominator).dividingFullWidth(product).quotient
+    }
+    static func normalizeHIDTimestamp(_ raw:UInt64,observedAt now:UInt64,numerator:UInt32,denominator:UInt32)->CGEventTimestamp {
+        guard raw>0,numerator>0,denominator>0 else{return 0}
+        let converted=nanoseconds(fromHIDTicks:raw,numerator:numerator,denominator:denominator)
+        // Both formats can occur in one HID stream. The compatible clock is
+        // the closest past representation; multiplying an already-nanosecond
+        // event would create a far-future, permanently blocking watermark.
+        var result:UInt64=raw<=now ? raw:0
+        if converted<=now,converted>result{result=converted}
+        return result
+    }
+    static func hidTimestamp(_ event:CGEvent)->CGEventTimestamp {
+        normalizeHIDTimestamp(event.timestamp,observedAt:DispatchTime.now().uptimeNanoseconds,numerator:timebase.numer,denominator:timebase.denom)
+    }
+}
+
 extension MismatchRecoveryEngine {
     func supportsRecoverySource(_ id:String)->Bool {
         MismatchKeyboardLayout.supports(id) || id==englishID || id=="com.apple.keylayout.ABC" || id=="com.apple.keylayout.US"

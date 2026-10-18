@@ -13,6 +13,9 @@ struct CommandFilter {
     private(set) var consuming = false
     private var rightWasDown = false
 
+    // Fixed two-bit state; no event or physical key value escapes the filter.
+    var diagnosticState:Int {(rightWasDown ? 1:0) | (consuming ? 2:0)}
+
     struct Result {
         let consume: Bool
         let flags: CGEventFlags

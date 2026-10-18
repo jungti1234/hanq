@@ -6,6 +6,7 @@ import AppKit
 /// positively identifies another process.
 final class InputFocusAccess {
     let system = AXUIElementCreateSystemWide()
+    private(set) var lastRoute=0
     var read: (AXUIElement) -> AXUIElement? = InputFocusAccess.readFocused
     var frontmostPID: () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
 
@@ -34,9 +35,11 @@ final class InputFocusAccess {
     }
 
     func focusedElement(application: AXUIElement, pid: pid_t) -> AXUIElement? {
+        lastRoute=0
         if let element = read(system) {
             guard Self.owner(of: element) == pid else { return nil }
             AXUIElementSetMessagingTimeout(element, 0.05)
+            lastRoute=1
             return element
         }
         // Some editors expose focus only on the application AX root. This
@@ -44,6 +47,7 @@ final class InputFocusAccess {
         guard frontmostPID() == pid, let element = read(application),
               Self.owner(of: element) == pid else { return nil }
         AXUIElementSetMessagingTimeout(element, 0.05)
+        lastRoute=2
         return element
     }
 }

@@ -14,6 +14,66 @@ func file(_ value: [String: Any], phase: Int = 0) throws -> URL {
     let path = source.appendingPathComponent("incident-1-\(phase)-" + UUID().uuidString + ".json")
     try RecorderSession.writeJSON(value, to: path); return path
 }
+var identified=valid;let runID=UUID().uuidString;identified["runID"]=runID
+let identifiedTrace=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:identified))
+check(identifiedTrace.runID==runID,"anonymous run ID accepted")
+let identifiedRoundtrip=try RecorderTrace.decode(JSONEncoder().encode(identifiedTrace))
+check(identifiedRoundtrip.runID==runID,"run identity survives sanitized roundtrip")
+let unidentified=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid))
+check(unidentified.runID==nil,"old trace remains unmeasured")
+for invalid:Any in ["PRIVATE_RECORDER_TEXT","",NSNull(),42,true] {
+ var object=valid;object["runID"]=invalid
+ do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:object));fatalError("invalid run ID accepted")}catch{checks+=1}
+}
+var reasonFrame=frame;reasonFrame["lane"]=4;reasonFrame["kind"]=8;reasonFrame["edge"]=1;reasonFrame["category"]=3;reasonFrame["event"]=12
+var reasonTrace=valid;reasonTrace["frames"]=[reasonFrame]
+let reasonData=try JSONSerialization.data(withJSONObject:reasonTrace)
+let decodedReason=try RecorderTrace.decode(reasonData)
+check(decodedReason.frames[0].category==3,"new fixed detection decisions accepted alongside old frames")
+var deliveryTrace=valid
+deliveryTrace["decisionDelivery"]=["capacity":4096,"overflow":["5":2,"184":3]]
+let deliveryValue=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:deliveryTrace))
+check(deliveryValue.decisionDelivery?.overflow["5"]==2,"bounded decision delivery metadata preserved")
+let deliveryRoundtrip=try RecorderTrace.decode(JSONEncoder().encode(deliveryValue))
+check(deliveryRoundtrip.decisionDelivery?.capacity==4096,"optional metadata survives sanitize and encode")
+let timing:[String:Any]=["queueMicros":10000,"lockWaitMicros":40000,"contended":true,"clipped":false]
+let waitStats:[String:Any]=["processed":3,"contended":1,"totalLockWaitMicros":40000,"maxLockWaitMicros":40000,"maxQueueMicros":50000,"clipped":0]
+var timedFrame=reasonFrame;timedFrame["decisionTiming"]=timing
+var timedTrace=valid;timedTrace["frames"]=[timedFrame]
+timedTrace["decisionDelivery"]=["capacity":4096,"overflow":[:],"waits":["5":waitStats]]
+let timed=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:timedTrace))
+check(timed.frames[0].decisionTiming?.lockWaitMicros==40000,"per-reason wait timing preserved")
+let timedRoundtrip=try RecorderTrace.decode(JSONEncoder().encode(timed))
+check(timedRoundtrip.decisionDelivery?.waits?["5"]?.processed==3,"cumulative timing survives strict roundtrip")
+let invalidTimings:[[String:Any]]=[
+    ["queueMicros":-1,"lockWaitMicros":0,"contended":false,"clipped":false],
+    ["queueMicros":0,"lockWaitMicros":60000001,"contended":true,"clipped":false],
+    ["queueMicros":0,"lockWaitMicros":1,"contended":false,"clipped":false],
+    ["queueMicros":0,"lockWaitMicros":0,"contended":1,"clipped":false],
+    ["queueMicros":0,"lockWaitMicros":0,"contended":false,"clipped":false,"text":"PRIVATE_RECORDER_TEXT"]]
+for invalid in invalidTimings {
+    var row=timedFrame;row["decisionTiming"]=invalid;var value=timedTrace;value["frames"]=[row]
+    do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:value));fatalError("invalid timing accepted")}catch{checks+=1}
+}
+for (key,value) in [("processed",0),("contended",4),("totalLockWaitMicros",-1),("maxLockWaitMicros",50000),("maxQueueMicros",60000001),("clipped",4)] {
+    var stats=waitStats;stats[key]=value;var object=timedTrace;object["decisionDelivery"]=["capacity":4096,"overflow":[:],"waits":["5":stats]]
+    do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:object));fatalError("invalid wait stats accepted")}catch{checks+=1}
+}
+var generic=frame;generic["decisionTiming"]=timing
+var genericTrace=valid;genericTrace["frames"]=[generic]
+do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:genericTrace));fatalError("timing on nondecision accepted")}catch{checks+=1}
+let invalidDeliveries:[[String:Any]]=[
+    ["capacity":1,"overflow":[:]], ["capacity":4096,"overflow":[:],"coalesced":["76":true]], ["capacity":4096,"overflow":[:],"coalesced":["310":1]], ["capacity":4096,"overflow":["310":1]],
+    ["capacity":4096,"overflow":["05":1]], ["capacity":4096,"overflow":["5":-1]],
+    ["capacity":4096,"overflow":["5":true]], ["capacity":4096,"overflow":[:],"text":"PRIVATE_RECORDER_TEXT"]]
+for delivery in invalidDeliveries {
+    var value=valid;value["decisionDelivery"]=delivery
+    do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:value));fatalError("invalid delivery metadata accepted")}catch{checks+=1}
+}
+for (name,value) in [("kind",9),("edge",6),("category",32),("count",1),("field",999),("lane",1)] {
+ var row=reasonFrame;row[name]=value;var trace=valid;trace["frames"]=[row]
+ do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:trace));fatalError("invalid decision accepted")}catch{checks+=1}
+}
 let preexisting = try file(valid)
 let session = try RecorderSession(source: source, outputRoot: output, product: ["pid": 123])
 try session.collect(scenario: "ordinary")
@@ -70,4 +130,32 @@ for _ in 0..<511 { try limited.record("trial_started", scenario: "ordinary") }
 do { try limited.record("trial_started", scenario: "ordinary"); fatalError("event cap exceeded") } catch { checks += 1 }
 try limited.finish(scenario: "ordinary")
 check(FileManager.default.fileExists(atPath: limited.directory.appendingPathComponent("result.json").path), "event cap leaves a final-result slot")
+let observations:[String:Any] = ["capacity":8,"readCapacity":1,"processed":["6":4],"overflow":["1124":2],"omitted":["2338":1],"coalesced":["960":1]]
+let actualObservation=valid.merging(["observationDelivery":observations]){_,new in new}
+check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:actualObservation)))?.observationDelivery?.capacity==8,"typed observation counters accepted")
+check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid)))?.observationDelivery==nil,"old missing observations remain unmeasured")
+for invalid in [observations.merging(["capacity":3]){_,n in n},observations.merging(["readCapacity":0]){_,n in n},observations.merging(["overflow":["2560":1]]){_,n in n},observations.merging(["overflow":["06":1]]){_,n in n},observations.merging(["overflow":["4":1]]){_,n in n},observations.merging(["coalesced":["6":1]]){_,n in n},observations.merging(["text":"PRIVATE"]){_,n in n}] {
+ let row=valid.merging(["observationDelivery":invalid]){_,n in n}
+ check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:row)))==nil,"invalid observation payload rejected")
+}
+let genericTiming:[String:Any] = ["queueMicros":10000,"lockWaitMicros":40000,"contended":true,"clipped":false]
+let genericStats:[String:Any] = ["processed":3,"contended":1,"totalLockWaitMicros":40000,"maxLockWaitMicros":40000,"maxQueueMicros":50000,"clipped":0]
+let timedObs=observations.merging(["processed":["1124":3],"waits":["1124":genericStats]]){_,n in n}
+let observedFrame=frame.merging(["kind":6,"lane":4,"category":4,"observationTiming":genericTiming]){_,n in n}
+let generalObservationTimedTrace243=valid.merging(["observationDelivery":timedObs,"frames":[observedFrame],"captureTiming":genericTiming]){_,n in n}
+check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:generalObservationTimedTrace243)))?.frames.first?.observationTiming?.contended==true,"general individual timing and totals accepted")
+check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:actualObservation)))?.observationDelivery?.waits==nil,"old observations have unmeasured waits")
+for bad in [genericTiming.merging(["lockWaitMicros":-1]){_,n in n},genericTiming.merging(["contended":false]){_,n in n},genericTiming.merging(["text":"PRIVATE"]){_,n in n}] {
+ let badFrame=observedFrame.merging(["observationTiming":bad]){_,n in n}
+ check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid.merging(["frames":[badFrame]]){_,n in n})))==nil,"invalid general frame timing rejected")
+ check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid.merging(["captureTiming":bad]){_,n in n})))==nil,"invalid capture timing rejected")
+}
+for bad in [timedObs.merging(["waits":[:]]){_,n in n},timedObs.merging(["waits":["1124":genericStats.merging(["processed":2]){_,n in n}]]){_,n in n},timedObs.merging(["waits":["1124":genericStats.merging(["text":"PRIVATE"]){_,n in n}]]){_,n in n}] {
+ check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid.merging(["observationDelivery":bad]){_,n in n})))==nil,"invalid general totals rejected")
+}
+let timerWait=frame.merging(["kind":9,"category":9,"observationTiming":genericTiming]){_,n in n}
+check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid.merging(["frames":[timerWait]]){_,n in n}))) != nil,"typed timer wait frame accepted")
+for bad in [timerWait.merging(["edge":32]){_,n in n},timerWait.merging(["category":10]){_,n in n},timerWait.merging(["event":1]){_,n in n},observedFrame.merging(["kind":8]){_,n in n}] {
+ check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid.merging(["frames":[bad]]){_,n in n})))==nil,"invalid wait frame or kind mixing rejected")
+}
 print("PASS: \(checks) recorder metadata/privacy, source identity, bounded files, private modes, lifecycle and result checks; no global input or ChatGPT access")

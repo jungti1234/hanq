@@ -21,6 +21,6 @@ extension MismatchRecoveryEngine {
             self.consumeIdleSnapshot(result.snapshot)
         }
         if let testIdleRead{testIdleRead(completion)}
-        else{snapshotWorker.request(pid:pid,completion:completion)}
+        else{snapshotWorker.request(pid:pid,semantics:true,completion:completion)}
     }
 }

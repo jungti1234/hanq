@@ -20,12 +20,13 @@ struct InputSourceSnapshot: Equatable {
         }
         return InputSourceSnapshot(id: id, name: string(source, kTISPropertyLocalizedName), languages: languages)
     }
-    static func available() -> [InputSourceSnapshot] {
+    static func available() -> [InputSourceSnapshot] { availableResult().sources }
+    static func availableResult() -> (readable:Bool,sources:[InputSourceSnapshot]) {
         let query = [kTISPropertyInputSourceIsEnabled as String: true,
                      kTISPropertyInputSourceIsSelectCapable as String: true,
                      kTISPropertyInputSourceCategory as String: kTISCategoryKeyboardInputSource as String] as CFDictionary
-        guard let sources = TISCreateInputSourceList(query, false)?.takeRetainedValue() as? [TISInputSource] else { return [] }
-        return sources.compactMap { from($0) }
+        guard let sources = TISCreateInputSourceList(query, false)?.takeRetainedValue() as? [TISInputSource] else { return (false,[]) }
+        return (true,sources.compactMap { from($0) })
     }
     private static func string(_ source: TISInputSource, _ key: CFString) -> String? {
         guard let pointer = TISGetInputSourceProperty(source, key) else { return nil }
@@ -40,6 +41,7 @@ final class InputSourceObserver: NSObject {
     private var last: InputSourceSnapshot?
     private var initialized = false
     var onChange: ((InputSourceSnapshot?) -> Void)?
+    var onObservation: ((InputSourceSnapshot?) -> Void)?
 
     func start() {
         guard !started else { return }
@@ -65,6 +67,7 @@ final class InputSourceObserver: NSObject {
     }
     func refresh() {
         let current = InputSourceSnapshot.read()
+        onObservation?(current)
         guard !initialized || current != last else { return }
         initialized = true; last = current
         KoreanEnglishSwitch.remember(current)
@@ -97,12 +100,30 @@ enum KoreanEnglishSwitch {
         let preferred = toKorean ? "com.apple.inputmethod.Korean.2SetKorean" : "com.apple.keylayout.ABC"
         return choices.first(where: { $0.id == preferred })?.id ?? choices.first?.id
     }
-    static func target(for current: InputSourceSnapshot?) -> String? {
-        remember(current)
-        return resolve(current: current, available: InputSourceSnapshot.available(),
-            rememberedKorean: UserDefaults.standard.string(forKey: "lastKoreanSourceID"),
-            rememberedEnglish: UserDefaults.standard.string(forKey: "lastEnglishSourceID"))
+    // Reuse the same current/list reads used for switching. Diagnostics must
+    // never retry a query or choose a target from guessed/last-confirmed state.
+    struct Resolution {
+        let target:String?;let status:Int;let currentClass:Int;let targetClass:Int
+        let availableCount:Int;let koreanCount:Int;let englishCount:Int
     }
+    static func sourceClass(_ source:InputSourceSnapshot?)->Int {
+        guard let source else{return 0}
+        return source.isKorean ? (source.isEnglish ? 3:1):(source.isEnglish ? 2:4)
+    }
+    static func resolution(current:InputSourceSnapshot?,readable:Bool,sources:[InputSourceSnapshot],rememberedKorean:String?,rememberedEnglish:String?)->Resolution {
+        let target=resolve(current:current,available:sources,rememberedKorean:rememberedKorean,rememberedEnglish:rememberedEnglish)
+        return Resolution(target:target,status:current==nil ? 1:(!readable ? 2:(target==nil ? 3:4)),
+            currentClass:sourceClass(current),targetClass:sourceClass(sources.first{$0.id==target}),
+            availableCount:min(4096,sources.count),koreanCount:min(4096,sources.filter{$0.isKorean}.count),englishCount:min(4096,sources.filter{$0.isEnglish}.count))
+    }
+    static func targetResolution(for current:InputSourceSnapshot?)->Resolution {
+        remember(current)
+        let list=InputSourceSnapshot.availableResult()
+        return resolution(current:current,readable:list.readable,sources:list.sources,
+            rememberedKorean:UserDefaults.standard.string(forKey:"lastKoreanSourceID"),
+            rememberedEnglish:UserDefaults.standard.string(forKey:"lastEnglishSourceID"))
+    }
+    static func target(for current: InputSourceSnapshot?) -> String? {targetResolution(for:current).target}
     /// Text recovery must respect the chosen Korean source, not the switcher's
     /// fallback policy. Missing IDs are resolved to two-set by KoreanKeyboardLayout.
     static func romanSourceID(current: InputSourceSnapshot?, available: [InputSourceSnapshot],

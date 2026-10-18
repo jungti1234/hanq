@@ -2,8 +2,11 @@ import AppKit
 import Carbon
 
 let mismatchKoreanID="com.apple.inputmethod.Korean.2SetKorean"
-struct MismatchSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var selectedText:String?=nil }
+struct MismatchSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var selectedText:String?=nil;var incidentAX:InputIncidentAXEvidence?=nil;var incidentWindow:AXUIElement?=nil;var incidentGeneration:Int32?=nil }
 final class MismatchRecoveryEngine:NSObject {
+    var sourceEvidence:MismatchSourceEvidence?
+    private var deferredCandidateEpoch:Int?
+    var incidentTrace=InputIncidentTrace.shared
     let detectionOnly:Bool
     init(detectionOnly:Bool=false){self.detectionOnly=detectionOnly;super.init()}
     var detectionCount=0
@@ -70,18 +73,27 @@ final class MismatchRecoveryEngine:NSObject {
     private var eventOrigins:[Int64:EventOrigin]=[:]
     private var nextOrigin:Int64=0
     var willForwardEvent:(CGEventType,CGEvent)->Void = {_,_ in}
-    @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent)->Int64? {
-        if recovering{observeRecoverySource(currentSource(),at:event.timestamp)}
+    @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent,at capturedTimestamp:CGEventTimestamp?=nil)->Int64? {
+        let timestamp=capturedTimestamp ?? event.timestamp
+        if recovering{observeRecoverySource(currentSource(),at:timestamp)}
         let incoming=event.getIntegerValueField(.eventSourceUserData)
-        guard type == .keyDown || type == .keyUp,
+        guard type == .keyDown || type == .keyUp || type == .flagsChanged,
               incoming==0 || InputDeliveryOrigin.isMarker(incoming) else{return nil}
         willForwardEvent(type,event)
         nextOrigin+=1
         let token=InputDeliveryOrigin.isMarker(incoming) ? incoming:(0x4851455600000000 | nextOrigin)
-        eventOrigins[token]=EventOrigin(timestamp:event.timestamp,source:recovering ? intendedSource:nil,code:event.getIntegerValueField(.keyboardEventKeycode),type:type)
+        eventOrigins[token]=EventOrigin(timestamp:timestamp,source:recovering ? intendedSource:nil,code:event.getIntegerValueField(.keyboardEventKeycode),type:type)
         if eventOrigins.count>1024 {eventOrigins=Dictionary(uniqueKeysWithValues:eventOrigins.sorted{$0.value.timestamp>$1.value.timestamp}.prefix(512).map{($0.key,$0.value)})}
         event.setIntegerValueField(.eventSourceUserData,value:token)
         return token
+    }
+    // Normal right Command is consumed at the main tap, so the mismatch tap
+    // will never retire its origin. Take the HID boundary once, before an async
+    // source selection; session retiming must not move it past following keys.
+    func takeSourceSwitchTimestamp(_ type:CGEventType,_ event:CGEvent)->CGEventTimestamp {
+        guard let original=origin(type,event) else{return event.timestamp}
+        eventOrigins.removeValue(forKey:event.getIntegerValueField(.eventSourceUserData))
+        return original.timestamp
     }
     func discardEventOrigin(_ token:Int64){eventOrigins.removeValue(forKey:token)}
     private func origin(_ type:CGEventType,_ event:CGEvent)->EventOrigin? {
@@ -173,6 +185,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
     }
     var currentPlan:MismatchRecoveryPlan?
+    private var incidentShapeProbe=InputIncidentShapeProbe()
     var lastText:String?
     var lastSampleSnapshot:MismatchSnapshot?
     var unavailableReason=""
@@ -426,15 +439,40 @@ final class MismatchRecoveryEngine:NSObject {
     // This engine repairs Korean input only. Avoid AX work for ordinary Roman
     // input, while keeping an active repair (which temporarily uses English)
     // on its full verification path.
-    func skipRomanObservation()->Bool {
+    func skipRomanObservation(site:InputIncidentTrace.DecisionSite = .sample,event:CGEvent?=nil)->Bool {
         guard !recovering else{return false}
         let source=currentSource()
+        if let evidence=sourceEvidence {
+            if let saved=deferredCandidateEpoch,!evidence.retains(saved) {
+                plan=nil;planElement=nil;lastSampleSnapshot=nil;deferredCandidateEpoch=nil
+                incidentTrace.sourceEvidence(.rejected,evidence.diagnostic(selected:source),event:event)
+            }
+            if evidence.deferredSource(for:source) != nil {
+                if plan != nil {deferredCandidateEpoch=evidence.epoch}
+                if source.hasPrefix("com.apple.keylayout."){incidentTrace.decision(site,.romanSource,event:event)}
+                // Keep only verified history/candidates. New physical keys are
+                // observed by the barrier, in an explicitly deferred interval.
+                incidentTrace.sourceEvidence(.deferred,evidence.diagnostic(selected:source,candidate:plan != nil),event:event)
+                return true
+            }
+            if let saved=deferredCandidateEpoch {
+                let valid=evidence.permitsHistory(saved)
+                if !valid{plan=nil;planElement=nil;lastSampleSnapshot=nil}
+                deferredCandidateEpoch=nil
+                incidentTrace.sourceEvidence(valid ? .resumed:.rejected,evidence.diagnostic(selected:source,candidate:valid && plan != nil),event:event)
+            }
+            if source.hasPrefix("com.apple.keylayout.") {
+                incidentTrace.sourceEvidence(.romanSkipped,evidence.diagnostic(selected:source),event:event)
+            }
+        }
         guard source.hasPrefix("com.apple.keylayout.") else{return false}
+        incidentTrace.decision(site,.romanSource,event:event)
         plan=nil;planElement=nil;lastSampleSnapshot=nil
         lastSource=source;englishID=source
         return true
     }
     private func processEvent(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
+        if !recovering{sourceEvidence?.observeInteraction(type,event)}
         if type == .keyDown || type == .keyUp {log("key_received")}
         detectionRevision+=1
         if recovering{observeRecoverySource(currentSource(),at:event.timestamp)}
@@ -447,7 +485,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         if enabled,!suspended,type != .tapDisabledByTimeout,type != .tapDisabledByUserInput,
            !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
-           event.getIntegerValueField(.eventSourceUserData) != 0x454F5448,skipRomanObservation(){
+           event.getIntegerValueField(.eventSourceUserData) != 0x454F5448,skipRomanObservation(site:.event,event:event){
             // Skipping Korean detection must not forget a press already passed
             // to the editor, or a later repair could delay its physical release.
             let code=event.getIntegerValueField(.keyboardEventKeycode)
@@ -464,6 +502,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         guard enabled,!suspended else{return Unmanaged.passUnretained(event)}
         guard canObserve() else{
+            incidentTrace.decision(.event,.observationBlocked,event:event)
             log("observation_blocked")
             if recovering{park("another_edit_started")}else{cancelDetection()}
             return Unmanaged.passUnretained(event)
@@ -478,6 +517,7 @@ final class MismatchRecoveryEngine:NSObject {
             // A normal switch can reach the main tap before older printable
             // events reach this observer. Never classify those older keys using
             // the new source or include them in a repair candidate.
+            incidentTrace.decision(.event,.preSwitchKey,event:event)
             cancelDetection();return Unmanaged.passUnretained(event)
         }
         if !recovering,type == .keyDown,
@@ -565,6 +605,7 @@ final class MismatchRecoveryEngine:NSObject {
         // event delivery occurred between that read and this decision.
         let observed=sampled ?? snapshot();observeAvailability(observed)
         guard let snap=observed else{
+            incidentTrace.decision(.event,.snapshotUnavailable,event:event)
             // A new untracked event breaks the exact key sequence. Sampling-only
             // outages may retry, but never silently omit a key from that sequence.
             plan=nil
@@ -581,13 +622,14 @@ final class MismatchRecoveryEngine:NSObject {
             guard MismatchKeyboardLayout.supports(currentSource()),disallowed.isEmpty,
                   let candidate=MismatchRecoveryPlan.next(previous:plan,text:snap.text,selection:snap.selection,
                     code:UInt16(event.getIntegerValueField(.keyboardEventKeycode)),shift:event.flags.contains(.maskShift),sourceID:currentSource()) else{
-                plan=nil;log("candidate_cancelled",["reason":"non_korean_or_non_printable_or_selection"]);return Unmanaged.passUnretained(event)
+                plan=nil;incidentTrace.decision(.event,.candidateRejectedKey,event:event);log("candidate_cancelled",["reason":"non_korean_or_non_printable_or_selection"]);return Unmanaged.passUnretained(event)
             }
             plan=candidate;planElement=snap.element;planStart=ProcessInfo.processInfo.systemUptime
             log("candidate_recorded")
+            incidentTrace.decision(.event,.candidateRecorded,event:event)
 
             log("key",["code":event.getIntegerValueField(.keyboardEventKeycode),"roman":candidate.roman,"source":InputSourceAccess.currentID()])
-        }else if !keyboard || (type == .flagsChanged && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty){plan=nil;log("candidate_cancelled",["reason":"navigation_or_modifier"])}
+        }else if !keyboard || (type == .flagsChanged && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty){plan=nil;incidentTrace.decision(.event,.candidateCancelledNavigation,event:event);log("candidate_cancelled",["reason":"navigation_or_modifier"])}
         return Unmanaged.passUnretained(event)
     }
     func sample(synchronous:Bool=false,beforeKey:Bool=false,followingEvent:CGEvent?=nil){
@@ -599,24 +641,31 @@ final class MismatchRecoveryEngine:NSObject {
             }
             if sourceWorkPaused,let start=sourcePauseStarted,interactionNow()-start>30{park("source_interaction_timeout")}
         }
-        lastSampleSnapshot=nil
         if enabled,!suspended,skipRomanObservation(){return}
+        lastSampleSnapshot=nil
         if enabled{followFrontmost(event:followingEvent)}
         guard enabled,!suspended,!recovering else{return}
-        guard canObserve() else{cancelDetection();return}
+        guard canObserve() else{incidentTrace.decision(.sample,.observationBlocked);cancelDetection();return}
         if !synchronous,(testSnapshot==nil || testIdleRead != nil) {
             requestIdleSnapshot();return
         }
         consumeIdleSnapshot(snapshot(),allowPrior:beforeKey)
     }
     func consumeIdleSnapshot(_ observed:MismatchSnapshot?,allowPrior:Bool=false) {
+        // A queued AX reply can arrive after the source changed. Apply the same
+        // preservation/safety gate before it can clear a deferred candidate.
+        if enabled,!suspended,!recovering,skipRomanObservation(){return}
         observeAvailability(observed)
-        guard let snap=observed else{return}
+        guard let snap=observed else{incidentTrace.decision(.sample,.snapshotUnavailable);return}
         lastSampleSnapshot=snap
         sourceChanged(currentSource(),snap)
-        if InputIncidentTrace.shared.enabled {
-            InputIncidentTrace.shared.shape(.mismatchAX,identity:CFHash(snap.element),count:snap.text.utf16.count,selected:snap.selection.length>0,editing:recovering)
-        }
+        if incidentTrace.enabled {
+            let (identity,owner,window,epoch)=incidentTrace.fieldRegistry.identify(snap.element,owner:target?.processIdentifier ?? 0,window:snap.incidentGeneration==incidentTrace.collectionGeneration ? snap.incidentWindow:nil,generation:incidentTrace.collectionGeneration)
+            var evidence=snap.incidentGeneration==incidentTrace.collectionGeneration ? (snap.incidentAX ?? InputIncidentAXEvidence()):InputIncidentAXEvidence()
+            evidence.owner=owner;evidence.window=window;evidence.identityEpoch=epoch
+            let change=incidentShapeProbe.observe(identity:identity,text:snap.text,selection:snap.selection,generation:incidentTrace.collectionGeneration,ax:evidence)
+            incidentTrace.shape(.mismatchAX,identity:identity,count:snap.text.utf16.count,selected:snap.selection.length>0,editing:recovering,change:change)
+        } else {incidentShapeProbe.reset()}
         if let known=verifiedDeliveryHistory?(snap,allowPrior),known.plan.sourceID==currentSource(),
            known.plan.codes.count>(plan?.codes.count ?? 0),
            ProcessInfo.processInfo.systemUptime-known.lastKeyAt>=0,
@@ -625,8 +674,8 @@ final class MismatchRecoveryEngine:NSObject {
             NSLog("입력 불일치 전달 이력 인계")
         }
         if lastText != snap.text{log("text",["text":snap.text,"source":InputSourceAccess.currentID(),"selection":[snap.selection.location,snap.selection.length]]);lastText=snap.text}
-        guard let candidate=plan else{return}
-        if ProcessInfo.processInfo.systemUptime-planStart>5{log("candidate_cancelled",["reason":"timeout"]);plan=nil;return}
+        guard let candidate=plan else{incidentTrace.decision(.sample,.noCandidate);return}
+        if ProcessInfo.processInfo.systemUptime-planStart>5{incidentTrace.decision(.sample,.candidateExpired);log("candidate_cancelled",["reason":"timeout"]);plan=nil;return}
         let verified=candidate.matches(text:snap.text,selection:snap.selection) ? candidate :
             candidate.partialFailurePlan(text:snap.text,selection:snap.selection)
         if let verified {
@@ -637,17 +686,19 @@ final class MismatchRecoveryEngine:NSObject {
             // mismatch. Do not wait for all keys to be released: their up events
             // are preserved in the same ordered queue as subsequent down events.
             if detectionOnly{reportMismatch(verified,snap)}else{beginRecovery(verified,snap)}
-        }
+        }else{incidentTrace.decision(.sample,.candidateTextMismatch)}
     }
     func beginRecovery(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot){
-        guard canBeginRepair(),MismatchKeyboardLayout.supports(candidate.sourceID),candidate.matches(text:snap.text,selection:snap.selection) else{return}
+        guard canBeginRepair() else{incidentTrace.decision(.repair,.repairBlocked);return}
+        guard MismatchKeyboardLayout.supports(candidate.sourceID) else{incidentTrace.decision(.repair,.repairSourceUnsupported);return}
+        guard candidate.matches(text:snap.text,selection:snap.selection) else{incidentTrace.decision(.repair,.repairTextMismatch);return}
         guard !detectionOnly else{reportMismatch(candidate,snap);return}
         recoverySourceID=candidate.sourceID
         var candidate=candidate
         candidate.captureObserved(text:snap.text)
         var writable:DarwinBoolean=false
         let canSelect=testSelectionWritable?(snap.element) ?? (AXUIElementIsAttributeSettable(snap.element,kAXSelectedTextRangeAttribute as CFString,&writable) == .success && writable.boolValue)
-        guard canSelect else{reportMismatch(candidate,snap);plan=nil;log("recovery_unsupported",["reason":"selection_not_writable"]);return}
+        guard canSelect else{incidentTrace.decision(.repair,.selectionNotWritable);reportMismatch(candidate,snap);plan=nil;log("recovery_unsupported",["reason":"selection_not_writable"]);return}
         recoveryEpoch+=1
         verifiedProgressEvents = -1
         recoveryDeadline=ProcessInfo.processInfo.systemUptime+2.5
@@ -1200,12 +1251,22 @@ final class MismatchRecoveryEngine:NSObject {
         CFRunLoopAddSource(CFRunLoopGetMain(),runSource,.commonModes)
         enabled=true;recovering=false;plan=nil;locked=nil;lastText=nil;lastSource=InputSourceAccess.currentID();started=ProcessInfo.processInfo.systemUptime
         switchGate=MismatchSwitchGate(accepts:{[weak self] in
-            guard let self,self.enabled,!self.suspended,self.recovering,self.canToggleRightCommand(),!IsSecureEventInputEnabled(),self.target != nil else{return false}
-            return self.fastRecoveryContext()
+            guard let self else{return false}
+            func reject(_ reason:Int)->Bool{self.switchGate?.acceptanceReason=reason;return false}
+            guard self.enabled else{return reject(2)}
+            guard !self.suspended else{return reject(3)}
+            guard self.recovering else{return reject(4)}
+            guard self.canToggleRightCommand() else{return reject(self.switchGate?.acceptanceReason == 0 ? 5:(self.switchGate?.acceptanceReason ?? 5))}
+            guard !IsSecureEventInputEnabled() else{return reject(6)}
+            guard self.target != nil else{return reject(7)}
+            let accepted=self.fastRecoveryContext()
+            self.switchGate?.acceptanceReason=accepted ? 1:8
+            return accepted
         },switched:{[weak self] timestamp in self?.userToggleDuringRecovery(at:timestamp)})
+        switchGate?.incidentTrace=incidentTrace
         // Capture intent in the same HID stream as the user's switch. Quartz
         // may retimestamp a delayed event before the downstream session tap.
-        switchGate?.forwarded = { [weak self] type,event in self?.captureEventOrigin(type,event) }
+        switchGate?.forwarded = { [weak self] type,event,timestamp in self?.captureEventOrigin(type,event,at:timestamp) }
         switchGate?.acceptsExternalSource = { [weak self] in
             guard let self else{return false}
             return self.enabled && !self.suspended && self.recovering && self.fastRecoveryContext()
