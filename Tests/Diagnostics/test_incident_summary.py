@@ -9,6 +9,45 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_switch_evidence_and_hud_privacy(self):
+        timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
+        evidence=dict(observedAtMicros=20000,timestampMicros=100020000,keyClass=1)
+        row=dict(frame(1,1,event=1,ms=20),sequence=1,eventEvidence=evidence)
+        hud=dict(frame(2,12,category=1,ms=50,origin=0),sequence=2,edge=3,observationTiming=timing)
+        result=summary.summarize(dict(schema=1,trigger=1,frames=[row,hud]))
+        self.assertEqual(result['key_event_evidence'][0]['key_class_name'],'space')
+        self.assertEqual(result['hud_stages'][0]['stage'],'first_appkit_draw')
+        self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[]))['key_event_evidence'],[])
+        for bad in [dict(evidence,keyCode=17),dict(evidence,keyClass=True),dict(evidence,keyClass=7),dict(evidence,observedAtMicros=-1),dict(evidence,timestampMicros='private')]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,eventEvidence=bad)]))
+        for bad in [dict(lane=3),dict(kind=3),dict(event=0),dict(milliseconds=21)]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**bad)]))
+        for bad in [dict(edge=6),dict(category=5),dict(lane=1),dict(event=-1),dict(edge=True),dict(category=True),dict(event=True),dict(inputOrigin=1),dict(eventEvidence=evidence)]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(hud,**bad)]))
+        for origin in [None,True,-1,9_000_000_000_000_001,'private']:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[],clockOriginMicros=origin))
+        zero=summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,eventEvidence=dict(evidence,timestampMicros=0))],clockOriginMicros=100000000))
+        self.assertIsNone(zero['key_event_evidence'][0]['os_to_observation_us'])
+
+    def test_switch_report_distinguishes_space_and_latin_observation_without_claiming_cause(self):
+        request=dict(sequence=4,milliseconds=30,action='requested',target=1,targetEventMilliseconds=100030)
+        commit=dict(sequence=6,milliseconds=40,action='committed',target=1,targetEventMilliseconds=100030)
+        control=dict(event=2,lane='main',milliseconds=30,filterEdge=1,filterConsumed=True)
+        keys=[dict(event=1,kind=1,edge=1,inputOrigin=1,lane='hid',observedAtMicros=20000,timestampMicros=100020000,keyClass=1),
+              dict(event=2,kind=11,edge=1,inputOrigin=1,lane='hid',observedAtMicros=30000,timestampMicros=100030000,keyClass=4),
+              dict(event=3,kind=1,edge=1,inputOrigin=1,lane='hid',observedAtMicros=200000,timestampMicros=100190000,keyClass=2)]
+        hud=[dict(milliseconds=50,stage='requested'),dict(milliseconds=80,stage='first_appkit_draw')]
+        shapes=[dict(milliseconds=220,contentChanged=True,editing=False,caretPrecedingClass=1)]
+        r=summary.switch_timelines([request,commit],[control],keys,hud,shapes)[0]
+        self.assertEqual(r['previous_key']['keyClass'],1)
+        self.assertEqual(r['previous_key']['os_relative_to_switch_us'],-10000)
+        self.assertEqual(r['following_keys'][0]['observed_relative_to_switch_us'],170000)
+        self.assertEqual(r['following_keys'][0]['os_relative_to_switch_us'],160000)
+        self.assertEqual(r['selection_confirmed_after_ms'],10)
+        self.assertEqual(r['changed_shapes'][0]['caretPrecedingClass'],1)
+        self.assertIn('unverified',r['interpretation'])
+        self.assertEqual(summary.switch_timelines([request],[],[],[],[])[0]['following_keys'],[])
+
     def test_capture_preservation_backlog_and_privacy(self):
         request=dict(trigger=5,milliseconds=20,afterSequence=10,lane=8,detail=31,event=0,inputOrigin=0)
         preserved=dict(deferred=True,requests=[request],postCapacity=4096,postOmittedFrames=0,closed=True,closedMilliseconds=1020,endedOnShutdown=False)

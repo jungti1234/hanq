@@ -33,3 +33,17 @@ swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache So
 hanq_test_run "$stage/capture-preservation-tests" "$stage/capture-preservation.json"
 python3 -B scripts/summarize-input-incident.py "$stage/capture-preservation.json" > "$stage/capture-summary.json"
 python3 -B Tests/Diagnostics/test_incident_summary.py
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/SwitchTimeline/main.swift -o "$stage/switch-timeline-tests"
+hanq_test_run "$stage/switch-timeline-tests" "$stage/switch-timeline.json"
+python3 -B scripts/summarize-input-incident.py "$stage/switch-timeline.json" > "$stage/switch-summary.json"
+python3 - "$stage/switch-summary.json" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]));r=v['switch_timelines'][0]
+assert r['previous_key']['key_class_name']=='space'
+assert r['previous_key']['os_relative_to_switch_us']==-10000
+assert r['following_keys'][0]['os_relative_to_switch_us']==160000
+assert r['following_keys'][0]['os_to_observation_us']==10000
+assert r['changed_shapes'][0]['caret_preceding_class_name']=='hangul_syllable'
+assert [h['stage'] for h in r['hud']]==['requested','ordered','first_appkit_draw']
+print('PASS switch timeline end-to-end summary; selection/drawing are not IME receipt')
+PY

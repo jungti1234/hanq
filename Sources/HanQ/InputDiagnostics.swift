@@ -212,13 +212,24 @@ final class InputIncidentFieldRegistry {
 struct InputIncidentShapeProbe {
     private var text:String?,selection:NSRange?,field:UInt?,generation:Int32=0
     private var sample=0
-    private var valueClass=0,priorWindow=0,priorEpoch=0
+    private var valueClass=0,priorWindow=0,priorEpoch=0,caretPrecedingClass=0
     private static func sameContent(_ a:String,_ b:String)->Bool {
         // Literal CF comparison handles native and AX/NSString-backed storage
         // without a per-code-unit Swift loop or a diagnostic content hash.
         CFStringCompare(a as CFString,b as CFString,CFStringCompareFlags(rawValue:0)) == .compareEqualTo
     }
-    mutating func reset(){text=nil;selection=nil;field=nil;generation=0;sample=0;valueClass=0;priorWindow=0;priorEpoch=0}
+    mutating func reset(){text=nil;selection=nil;field=nil;generation=0;sample=0;valueClass=0;priorWindow=0;priorEpoch=0;caretPrecedingClass=0}
+    // One UTF-16 unit from the already verified snapshot; never exports a character.
+    static func precedingClass(_ text:String,_ selection:NSRange)->Int {
+        guard selection.length==0,selection.location>0,selection.location<=text.utf16.count else{return 0}
+        switch CFStringGetCharacterAtIndex(text as CFString,selection.location-1) {
+        case 65...90,97...122:return 1 // ASCII letter
+        case 0xAC00...0xD7A3:return 2 // Hangul syllable
+        case 0x1100...0x11FF,0x3130...0x318F,0xA960...0xA97F,0xD7B0...0xD7FF:return 3 // Jamo
+        case 9,10,13,32:return 4 // whitespace
+        default:return 5
+        }
+    }
     mutating func observe(identity:UInt,text:String,selection:NSRange,generation:Int32,ax:InputIncidentAXEvidence?=nil)->InputIncidentTrace.ShapeChange {
         if self.generation != generation{reset();self.generation=generation}
         let sameField=field==identity && self.text != nil
@@ -236,8 +247,9 @@ struct InputIncidentShapeProbe {
             evidence!.windowRelation=priorWindow==0 || window==0 ? 0:(priorWindow==window ? 1:2)
             priorWindow=window
         }
+        if !known || content || cursor{caretPrecedingClass=Self.precedingClass(text,selection)}
         sample+=1;self.text=text;self.selection=selection;field=identity
-        return .init(sample:sample,known:known,content:content,selection:cursor,ax:evidence)
+        return .init(sample:sample,known:known,content:content,selection:cursor,ax:evidence,caretPrecedingClass:caretPrecedingClass)
     }
 }
 
@@ -247,7 +259,24 @@ struct InputIncidentShapeProbe {
 final class InputIncidentTrace {
     let fieldRegistry=InputIncidentFieldRegistry()
     enum Lane:Int,Codable {case hid=1,main,onset,mismatch,boundary,onsetAX,mismatchAX,sourceBoundary}
-    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision}
+    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud}
+    enum HUDStage:Int {case requested=1,ordered,firstDraw,suppressed,unavailable}
+    struct EventEvidence:Codable {
+        let observedAtMicros:Int;let timestampMicros:Int;let keyClass:Int
+        // Physical classes only. No letter identity, Unicode payload or raw flags.
+        init(time:Double,origin:Double,type:CGEventType,event:CGEvent) {
+            observedAtMicros=Int(max(0,min((time-origin)*1_000_000,9_000_000_000_000_000)))
+            timestampMicros=Int(min(event.timestamp/1000,9_000_000_000_000_000))
+            if [.leftMouseDown,.rightMouseDown,.otherMouseDown].contains(type){keyClass=5}
+            else if type == .flagsChanged{keyClass=4}
+            else {switch event.getIntegerValueField(.keyboardEventKeycode) {
+            case 49:keyClass=1 // space
+            case 0...9,11...17,31,32,34,35,37,38,40,45,46:keyClass=2 // letter position
+            case 36,48,51,53,76,117,123...126:keyClass=3 // editing/navigation
+            default:keyClass=6 // other
+            }}
+        }
+    }
     // Append-only fixed codes. No source IDs, key values or arbitrary messages.
     enum DecisionSite:Int {case event=1,sample,eligibility,handoff,repair}
     enum DecisionReason:Int {
@@ -331,7 +360,7 @@ final class InputIncidentTrace {
         let confirmedAgeMicros:Int?;let targetAgeMicros:Int?
         let committed:Bool;let deferred:Bool;let candidatePreserved:Bool;let historyPreserved:Bool
     }
-    struct ShapeChange {let sample:Int;let known:Bool;let content:Bool;let selection:Bool;var ax:InputIncidentAXEvidence?=nil}
+    struct ShapeChange {let sample:Int;let known:Bool;let content:Bool;let selection:Bool;var ax:InputIncidentAXEvidence?=nil;var caretPrecedingClass:Int?=nil}
     struct ShapeEvidence:Codable {
         // phase 1=new baseline, 2=checkpoint/current capture, 3=closed span.
         let phase:Int;let comparisonKnown:Bool;let contentChanged:Bool;let selectionChanged:Bool
@@ -339,6 +368,7 @@ final class InputIncidentTrace {
         var firstMilliseconds:Int;var lastMilliseconds:Int;var observations:Int;var coalesced:Int
         var baselineSequence:Int
         var ax:InputIncidentAXEvidence?=nil
+        var caretPrecedingClass:Int?=nil
     }
     struct ShapePoint:Codable {let field:Int;let count:Int;let selected:Bool;var evidence:ShapeEvidence}
     struct ShapeBaseline:Codable {let lane:Lane;let active:Bool;let current:ShapePoint;let previous:ShapePoint?}
@@ -351,6 +381,7 @@ final class InputIncidentTrace {
         var sourceEvidence:SourceEvidence?=nil
         var shapeEvidence:ShapeEvidence?=nil
         var controlEvidence:InputIncidentControl?=nil
+        var eventEvidence:EventEvidence?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -394,6 +425,7 @@ final class InputIncidentTrace {
         var shapeBaselines:[ShapeBaseline]?=nil
         var capturePreservation:CapturePreservation?=nil
         var captureBacklog:CaptureBacklog?=nil
+        var clockOriginMicros:Int?=nil
     }
     private struct Identity:Hashable {let token:UInt64;let type:UInt32;let domain:Int}
     // Scalar reference only: never retain/read a mutable CGEvent asynchronously.
@@ -543,7 +575,9 @@ final class InputIncidentTrace {
     }
     private func snapshot(_ reason:Trigger,timing:DecisionTiming,incident:Int,phase:Int=0,frames:[Frame]?=nil)->Capture {
         let start=(position-stored+capacity)%capacity
-        return Capture(runID:runID,skippedEvents:skippedEvents,skippedAuxiliary:skippedAuxiliary,decisionDelivery:DecisionDelivery(capacity:decisionCapacity,overflow:decisionOverflow,waits:decisionWaits,coalesced:decisionCoalesced),observationDelivery:observationSnapshot(),captureTiming:timing,trigger:reason,incident:incident,phase:phase,discardedOldFrames:overwritten,frames:frames ?? (0..<stored).compactMap{ring[(start+$0)%capacity]},shapeBaselines:shapeSnapshot(),captureBacklog:backlogSnapshot())
+        var value=Capture(runID:runID,skippedEvents:skippedEvents,skippedAuxiliary:skippedAuxiliary,decisionDelivery:DecisionDelivery(capacity:decisionCapacity,overflow:decisionOverflow,waits:decisionWaits,coalesced:decisionCoalesced),observationDelivery:observationSnapshot(),captureTiming:timing,trigger:reason,incident:incident,phase:phase,discardedOldFrames:overwritten,frames:frames ?? (0..<stored).compactMap{ring[(start+$0)%capacity]},shapeBaselines:shapeSnapshot(),captureBacklog:backlogSnapshot())
+        value.clockOriginMicros=Int(max(0,min(origin*1_000_000,9_000_000_000_000_000)))
+        return value
     }
     private func backlogSnapshot()->CaptureBacklog {
         CaptureBacklog(automaticCapacity:16,manualCapacity:4,requestCapacityPerTrigger:16,requestsPerWindow:32,
@@ -765,6 +799,7 @@ final class InputIncidentTrace {
     func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0){
         guard enabled,!IsSecureEventInputEnabled() else{return}
         let time=clock(),reference=EventReference(event,type)
+        let evidence = lane == .hid || lane == .main ? EventEvidence(time:time,origin:origin,type:type,event:event):nil
         let code=event.getIntegerValueField(.keyboardEventKeycode)
         let editing=event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty == false || [36,48,51,53,76,117,123,124,125,126].contains(code)
         let pointer=type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown
@@ -774,6 +809,8 @@ final class InputIncidentTrace {
             if editing || pointer{lastEdit=time;invalidateShapes()}
             let (identifier,origin)=eventIdentity(reference)
             append(lane,.event,observedAt:time,observationTiming:timing,event:identifier,edge:edge,category:category,inputOrigin:origin,consumed:consumed,duration:duration)
+            ring[(position-1+capacity)%capacity]?.eventEvidence=evidence
+            updatePreservedLastFrame()
         }
         // Preserve the request even when event queue capacity was exhausted.
         if duration>=0.05{requestCapture(.callbackDelay,lane:lane,event:event)}
@@ -926,7 +963,7 @@ final class InputIncidentTrace {
         }
     }
     private func shapeEvidence(_ value:ShapeEvidence,phase:Int)->ShapeEvidence {
-        ShapeEvidence(phase:phase,comparisonKnown:value.comparisonKnown,contentChanged:value.contentChanged,selectionChanged:value.selectionChanged,editingChanged:value.editingChanged,gap:value.gap,editing:value.editing,firstMilliseconds:value.firstMilliseconds,lastMilliseconds:value.lastMilliseconds,observations:value.observations,coalesced:value.coalesced,baselineSequence:value.baselineSequence,ax:value.ax)
+        ShapeEvidence(phase:phase,comparisonKnown:value.comparisonKnown,contentChanged:value.contentChanged,selectionChanged:value.selectionChanged,editingChanged:value.editingChanged,gap:value.gap,editing:value.editing,firstMilliseconds:value.firstMilliseconds,lastMilliseconds:value.lastMilliseconds,observations:value.observations,coalesced:value.coalesced,baselineSequence:value.baselineSequence,ax:value.ax,caretPrecedingClass:value.caretPrecedingClass)
     }
     private func appendShape(_ lane:Lane,_ point:ShapePoint,phase:Int,time:Double,timing:DecisionTiming?=nil){
         append(lane,.shape,observedAt:time,observationTiming:timing,count:point.count,selected:point.selected,field:point.field)
@@ -955,7 +992,7 @@ final class InputIncidentTrace {
                 if let previous,previous.active,previous.point.evidence.observations>previous.reportedObservations {
                     appendShape(lane,previous.point,phase:3,time:origin+Double(previous.point.evidence.lastMilliseconds)/1000)
                 }
-                let evidence=ShapeEvidence(phase:1,comparisonKnown:known,contentChanged:known && change?.content==true,selectionChanged:known && change?.selection==true,editingChanged:sameField && previous?.editing != editing,gap:gap,editing:editing,firstMilliseconds:ms,lastMilliseconds:ms,observations:1,coalesced:0,baselineSequence:sequence+1,ax:change?.ax)
+                let evidence=ShapeEvidence(phase:1,comparisonKnown:known,contentChanged:known && change?.content==true,selectionChanged:known && change?.selection==true,editingChanged:sameField && previous?.editing != editing,gap:gap,editing:editing,firstMilliseconds:ms,lastMilliseconds:ms,observations:1,coalesced:0,baselineSequence:sequence+1,ax:change?.ax,caretPrecedingClass:change?.caretPrecedingClass)
                 let point=ShapePoint(field:fields[identity]!,count:count,selected:selected,evidence:evidence)
                 appendShape(lane,point,phase:1,time:time,timing:timing)
                 shapes[lane]=Shape(field:identity,count:count,selected:selected,editing:editing,active:true,sample:change?.sample,point:point,previous:previous.map{value in var point=value.point;point.evidence=shapeEvidence(point.evidence,phase:3);return point},checkpointAt:time,reportedObservations:1)
@@ -1002,11 +1039,20 @@ final class InputIncidentTrace {
     func control(_ lane:Lane,_ type:CGEventType,_ event:CGEvent?,_ value:InputIncidentControl,consumed:Bool=false){
         guard enabled,!IsSecureEventInputEnabled() else{return}
         let time=clock(),reference=event.map{EventReference($0,type)}
+        let evidence = lane == .hid || lane == .main ? event.map{EventEvidence(time:time,origin:origin,type:type,event:$0)}:nil
         _ = submit(.context,lane,8+value.role,observedAt:time){[self] timing in
             let (identifier,origin)=reference.map{eventIdentity($0)} ?? (0,0)
             append(lane,.controlDecision,observedAt:time,observationTiming:timing,event:identifier,edge:value.role,category:value.route,inputOrigin:origin,consumed:consumed)
             ring[(position-1+capacity)%capacity]?.controlEvidence=value
+            ring[(position-1+capacity)%capacity]?.eventEvidence=evidence
             updatePreservedLastFrame()
+        }
+    }
+    // Existing HUD work only: firstDraw is AppKit drawing, not compositor receipt.
+    func hud(_ stage:HUDStage,sourceClass:Int,presentation:Int=0){
+        guard enabled,!IsSecureEventInputEnabled() else{return};let time=clock()
+        _ = submit(.context,.main,16+stage.rawValue,observedAt:time){[self] timing in
+            append(.main,.hud,observedAt:time,observationTiming:timing,event:max(0,presentation),edge:stage.rawValue,category:max(0,min(sourceClass,4)))
         }
     }
     func context(){

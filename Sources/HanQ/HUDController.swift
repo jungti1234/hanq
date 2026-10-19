@@ -6,9 +6,11 @@ private final class SourcePanel: NSPanel {
 }
 
 private final class RoundedHUDView: NSView {
+    var firstDraw:(()->Void)?
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.withAlphaComponent(0.72).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 18, yRadius: 18).fill()
+        let callback=firstDraw;firstDraw=nil;callback?()
     }
 }
 
@@ -16,7 +18,9 @@ final class HUDController {
     private let panel = SourcePanel(contentRect: .zero,
         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private let label = NSTextField(labelWithString: "")
+    private let background = RoundedHUDView()
     private var dismissal: Timer?
+    private var presentation=0
 
     init() {
         panel.isOpaque = false
@@ -27,7 +31,6 @@ final class HUDController {
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
-        let background = RoundedHUDView()
         label.font = .systemFont(ofSize: 24, weight: .medium)
         label.alignment = .center
         label.textColor = .labelColor
@@ -47,10 +50,15 @@ final class HUDController {
         panel.contentView = background
     }
 
-    func show(name: String?) {
+    func show(name: String?, sourceClass:Int=0) {
+        let trace=InputIncidentTrace.shared
+        presentation+=1
+        let request=presentation
+        trace.hud(.requested,sourceClass:sourceClass,presentation:request)
         dismissal?.invalidate()
         guard let sourceName = name, !sourceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let screen = NSScreen.main ?? NSScreen.screens.first else { hide(); return }
+              let screen = NSScreen.main ?? NSScreen.screens.first else { trace.hud(.unavailable,sourceClass:sourceClass,presentation:request);hide(); return }
+        background.firstDraw=trace.enabled ? {trace.hud(.firstDraw,sourceClass:sourceClass,presentation:request)}:nil
         let name = sourceName
         label.stringValue = name
         panel.setAccessibilityLabel("입력 소스: \(name)")
@@ -63,6 +71,7 @@ final class HUDController {
         panel.setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.minY + frame.height * 0.30,
                               width: size.width, height: size.height), display: true)
         panel.orderFrontRegardless()
+        trace.hud(.ordered,sourceClass:sourceClass,presentation:request)
         let shownAt = ProcessInfo.processInfo.systemUptime
         let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
@@ -75,6 +84,7 @@ final class HUDController {
         dismissal = timer
     }
     func hide() {
+        background.firstDraw=nil
         dismissal?.invalidate(); panel.orderOut(nil)
     }
 }

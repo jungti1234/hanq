@@ -58,7 +58,8 @@ def describe_ax(value):
 def shape_evidence(value):
     flags={'comparisonKnown','contentChanged','selectionChanged','editingChanged','gap','editing'}
     numbers={'phase','firstMilliseconds','lastMilliseconds','observations','coalesced','baselineSequence'}
-    if not isinstance(value,dict) or set(value)-{'ax'}!=flags|numbers:raise ValueError('invalid shape evidence fields')
+    if not isinstance(value,dict) or set(value)-{'ax','caretPrecedingClass'}!=flags|numbers:raise ValueError('invalid shape evidence fields')
+    if 'caretPrecedingClass' in value and (type(value['caretPrecedingClass']) is not int or not 0<=value['caretPrecedingClass']<=5):raise ValueError('invalid caret class')
     if any(type(value[k]) is not bool for k in flags) or any(type(value[k]) is not int for k in numbers):raise ValueError('invalid shape evidence types')
     if value['phase'] not in [1,2,3] or not 0<=value['firstMilliseconds']<=value['lastMilliseconds']<=9_000_000_000_000_000 or not 0<=value['coalesced']<value['observations'] or value['baselineSequence']<=0:raise ValueError('invalid shape span')
     if (not value['comparisonKnown'] and (value['contentChanged'] or value['selectionChanged'])) or (value['gap'] and value['comparisonKnown']):raise ValueError('invalid shape comparison')
@@ -99,6 +100,49 @@ def source_evidence(value):
 
 CONTROL_ROUTES = dict(enumerate(['passed', 'tap_disabled', 'permission_denied', 'update_restricted', 'manual_marker', 'replay_marker', 'mirror_marker', 'mirror_inactive', 'recipient_moved_early', 'candidate_consumed', 'candidate_panel', 'barrier_queued', 'external_consumed', 'filter_consumed', 'recipient_moved_late', 'hid_tag_ignored', 'hid_consumed', 'hid_passed', 'onset_lock_timeout', 'onset_stopped', 'onset_stale', 'onset_deadline', 'onset_pointer', 'onset_shortcut', 'onset_first_release', 'onset_unclaimed', 'onset_buffer_limit', 'onset_buffered', 'onset_passed', 'recovery_redirect', 'secure_suppressed'],start=1))
 CONTROL_ROLES={0:"health",1:"right_command",2:"right_option",3:"configured_korean",4:"configured_hanja"}
+KEY_CLASSES={1:'space',2:'letter_position',3:'editing_or_navigation',4:'modifier',5:'pointer',6:'other'}
+CARET_CLASSES={0:'unavailable_or_no_preceding_character',1:'ascii_letter',2:'hangul_syllable',3:'jamo',4:'whitespace',5:'other'}
+HUD_STAGES={1:'requested',2:'ordered',3:'first_appkit_draw',4:'suppressed',5:'unavailable'}
+
+def event_evidence(value):
+    if not isinstance(value,dict) or set(value)!={'observedAtMicros','timestampMicros','keyClass'} or any(type(x) is not int for x in value.values()):raise ValueError('invalid event evidence fields')
+    if value['keyClass'] not in KEY_CLASSES or any(not 0<=value[k]<=9_000_000_000_000_000 for k in ['observedAtMicros','timestampMicros']):raise ValueError('invalid event evidence values')
+    return value
+
+def switch_timelines(sources,controls,keys,hud,shapes):
+    # Reporting only. No missing frame, selected source or draw call proves IME receipt.
+    unique={}
+    for row in keys:
+        if row['kind']==1 and row['edge']==1 and row['inputOrigin']==1 and row['keyClass'] in [1,2,6]:
+            if row['event'] not in unique or row['lane']=='hid':unique[row['event']]=row
+    ordinary=sorted(unique.values(),key=lambda x:x['observedAtMicros'])
+    result=[]
+    requests=[r for r in sources if r['action']=='requested']
+    for i,request in enumerate(requests):
+        at=request['milliseconds']
+        end=min(at+1000,requests[i+1]['milliseconds']) if i+1<len(requests) else at+1000
+        presses=[c for c in controls if c['lane']=='main' and c['filterEdge']==1 and c['filterConsumed'] and abs(c['milliseconds']-at)<=10]
+        def matches(c):
+            return any(k['event']==c['event'] and k['timestampMicros']>0 and k['timestampMicros']//1000==request.get('targetEventMilliseconds') for k in keys)
+        press=next((c for c in presses if matches(c)),None)
+        boundary=next((k for k in keys if press and k['event']==press['event'] and k['lane']=='hid'),None)
+        if boundary is None:boundary=next((k for k in keys if press and k['event']==press['event'] and k['kind']==11),None)
+        t=boundary['observedAtMicros'] if boundary else at*1000
+        before=[k for k in ordinary if t-1_000_000<=k['observedAtMicros']<t]
+        after=[k for k in ordinary if t<=k['observedAtMicros']<end*1000]
+        def key(row):
+            if row is None:return None
+            v=dict(row,observed_relative_to_switch_us=row['observedAtMicros']-t)
+            v['os_relative_to_switch_us']=row['timestampMicros']-boundary['timestampMicros'] if boundary and row['timestampMicros']>0 and boundary['timestampMicros']>0 else None
+            return v
+        commit=next((s for s in sources if s['sequence']>request['sequence'] and s['action']=='committed' and s.get('targetEventMilliseconds')==request['targetEventMilliseconds'] and s['target']==request['target']),None) if 'targetEventMilliseconds' in request else None
+        result.append(dict(request_sequence=request['sequence'],milliseconds=at,target=request['target'],control_event=press['event'] if press else None,
+                           previous_key=key(before[-1] if before else None),following_keys=[key(k) for k in after[:3]],
+                           selection_confirmed_after_ms=commit['milliseconds']-at if commit else None,
+                           hud=[h for h in hud if at<=h['milliseconds']<end],
+                           changed_shapes=[s for s in shapes if at<=s['milliseconds']<end and s.get('contentChanged') and not s['editing']],
+                           interpretation='OS event order, source selection, AX provider observation and AppKit drawing are distinct; exact letters and editor/IME receipt are unverified'))
+    return result
 def control_evidence(value):
     ranges={'role': 4, 'eventType': 4, 'route': 31, 'runtime': 127, 'incomingFlags': 7, 'filterFlags': 7, 'filterBefore': 3, 'filterAfter': 3, 'filterEdge': 2, 'filterReason': 7, 'externalDevice': 6, 'externalHandling': 4, 'externalRole': 4, 'hidAcceptance': 10, 'querySite': 3, 'queryStatus': 5, 'currentClass': 4, 'targetClass': 4, 'availableCount': 4096, 'koreanCount': 4096, 'englishCount': 4096, 'queryMicros': 60000000}
     flags=['filterMeasured', 'filterAccepted', 'filterConsumed', 'queryClipped']
@@ -138,6 +182,8 @@ def summarize(data):
     if data.get('schema') != 1 or not isinstance(data.get('frames'), list):
         raise ValueError('unsupported incident schema')
     run_id=data.get('runID')
+    clock_origin=data.get('clockOriginMicros')
+    if 'clockOriginMicros' in data and (type(clock_origin) is not int or not 0<=clock_origin<=9_000_000_000_000_000):raise ValueError('invalid clock origin')
     if 'runID' in data and (not isinstance(run_id,str) or not re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}',run_id)):
         raise ValueError('invalid diagnostic run ID')
     lanes={1:'hid',2:'main',3:'onset',4:'mismatch',5:'annotated_boundary',6:'onset_ax',7:'mismatch_ax',8:'source_boundary'}
@@ -223,7 +269,7 @@ def summarize(data):
                 except (ValueError,TypeError):raise ValueError('invalid observation code')
                 if str(code)!=key or not 0<=code<2560 or type(n) is not int or n<=0:raise ValueError('invalid observation code/count')
                 operation,rest=divmod(code,256);lane,detail=divmod(rest,32)
-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,9,10,11,12,13,17,25,26,27,28,29] if operation==9 else [0])
+                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,9,10,11,12,13,17,25,26,27,28,29] if operation==9 else [0])
                 if not valid or (group=='coalesced' and not (operation==3 or (operation==5 and lane==3 and detail>0))):raise ValueError('invalid observation detail')
                 row=dict(operation=names[operation],lane=lanes[lane+1],detail=detail,count=n)
                 if operation==5 and lane<3 and 8<=detail<=12:row.update(control_role=CONTROL_ROLES[detail-8])
@@ -256,14 +302,25 @@ def summarize(data):
     control_rows=[]
     source_evidence_rows=[]
     shape_rows=[]
+    key_rows=[]
+    hud_rows=[]
     baselines=shape_baselines(data['shapeBaselines']) if 'shapeBaselines' in data else None
     source_actions=dict(enumerate(["observed","requested","committed","deferred","resumed","rejected","roman_skipped"],start=1))
     for frame in data['frames']:
         lane=lanes.get(frame['lane'],'unknown')
+        if 'eventEvidence' in frame:
+            value=event_evidence(frame['eventEvidence'])
+            if frame['kind'] not in [1,11] or frame['lane'] not in [1,2] or frame['event']<=0 or value['observedAtMicros']//1000!=frame['milliseconds']:raise ValueError('invalid event evidence frame')
+            key_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],kind=frame['kind'],edge=frame['edge'],inputOrigin=frame['inputOrigin'],lane=lane,key_class_name=KEY_CLASSES[value['keyClass']],**value))
+            key_rows[-1]['os_to_observation_us']=clock_origin+value['observedAtMicros']-value['timestampMicros'] if clock_origin is not None and value['timestampMicros']>0 else None
+        if frame['kind']==12:
+            if any(type(frame[k]) is not int for k in ['lane','edge','category','event']) or frame['lane']!=2 or frame['edge'] not in HUD_STAGES or frame['category'] not in range(5) or frame['event']<0 or not frame.get('observationTiming') or any(frame.get(k,0)!=0 for k in ['inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False) or any(k in frame for k in ['controlEvidence','sourceEvidence','shapeEvidence','eventEvidence']):raise ValueError('invalid HUD frame')
+            hud_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],presentation_id=frame['event'],stage=HUD_STAGES[frame['edge']],source_class=frame['category']))
         if 'shapeEvidence' in frame:
             evidence=shape_evidence(frame['shapeEvidence'])
             if frame['kind']!=3 or frame.get('field',0)<=0 or evidence['baselineSequence']>frame['sequence'] or frame['milliseconds']!=evidence['lastMilliseconds'] or (evidence['phase']==1 and evidence['baselineSequence']!=frame['sequence']):raise ValueError('invalid shape frame')
             shape_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,field=frame['field'],count=frame['count'],selected=frame['selected'],**evidence,**({'ax_interpretation':describe_ax(evidence['ax'])} if 'ax' in evidence else {})))
+            if 'caretPrecedingClass' in evidence:shape_rows[-1]['caret_preceding_class_name']=CARET_CLASSES[evidence['caretPrecedingClass']]
         maxima[lane]=max(maxima[lane],frame['durationMicros'])
         timing=frame.get('decisionTiming')
         if 'decisionTiming' in frame:
@@ -285,7 +342,7 @@ def summarize(data):
             source_evidence_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],action=source_actions[frame['edge']],**value))
         if frame['kind']==9:
             op=frame['category'];detail=frame['edge']
-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,25,26,27,28,29] if op==10 else [0]
+            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,25,26,27,28,29] if op==10 else [0]
             if not observed or not 1<=op<=10 or detail not in allowed or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False):raise ValueError('invalid observation wait frame')
         if frame['kind']==8:
             site=decision_sites.get(frame['edge'],'unknown')
@@ -335,13 +392,14 @@ def summarize(data):
         for lane,milliseconds in stages.items():
             if lane!='hid' and milliseconds>=stages['hid']:
                 transport_max[lane]=max(transport_max[lane],milliseconds-stages['hid'])
-    return {'build':data.get('build'),'diagnostic_run_id':run_id,'incident':data.get('incident'),'phase':data.get('phase'),
+    return {'build':data.get('build'),'diagnostic_run_id':run_id,'clock_origin_micros':clock_origin,'incident':data.get('incident'),'phase':data.get('phase'),
             'trigger':triggers.get(data['trigger'],'unknown'),'frames':len(data['frames']),
             'discarded_old_frames':data.get('discardedOldFrames'),'best_effort':True,
             'recipient_receipt_verified':False,'event_correlation_is_heuristic':True,
             'observed_keydown_counts':dict(counts),'maximum_correlated_hid_to_stage_ms':dict(transport_max),'maximum_observed_duration_us':dict(maxima),
             'peak_observed_ax_reads':peak,'cross_lane_ax_overlap_starts':overlap_starts,
             'open_or_unpaired_ax_reads':len(active)+unpaired_ends,'recovery_state_counts':dict(state_counts),'maximum_observed_owned_pending_events':dict(pending_max),
+            'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,

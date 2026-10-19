@@ -298,7 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let snapshot{self.mismatchRecovery.engine.observeRecoverySource(snapshot.id)}
             self.jamoRepair.inputSourceDidChange()
             self.sourceObservations += 1
-            if self.permissionGranted && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name) }
+            if self.permissionGranted && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name,sourceClass:KoreanEnglishSwitch.sourceClass(snapshot)) }
+            else {InputIncidentTrace.shared.hud(.suppressed,sourceClass:KoreanEnglishSwitch.sourceClass(snapshot))}
         }
         jamoRepair.beginTextEdit = { [weak self] field,source in
             self?.sourceSwitchBarrier.beginManualEdit(field:field,source:source)
