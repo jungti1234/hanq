@@ -117,6 +117,7 @@ final class SourceSwitchBarrier {
         return (ledger.text,selectedRange ?? ledger.selection)
     }
     func matches(_ snap:Snapshot)->Bool {
+        resolveDeletionBoundary(snap)
         guard let expected,snap.selection==expected.1 else{return false}
         return matchesText(snap)
     }
@@ -149,7 +150,30 @@ final class SourceSwitchBarrier {
         return .style
     }
     func matchesText(_ snap:Snapshot)->Bool {
+        resolveDeletionBoundary(snap)
         guard let ledger else{return false};return textMatch(snap,ledger) != nil
+    }
+    private func resolvingDeletionBoundary(_ snap:Snapshot,_ candidate:MismatchReplayLedger)->MismatchReplayLedger {
+        // Accept only the complete, normally composed new consonant run after
+        // the verified deletion prefix. ASCII or detached vowels still fail.
+        guard candidate.postDeletionPrefixCount != nil,textMatch(snap,candidate)==nil,
+              let committed=candidate.committingDeletionPrefix(),
+              snap.selection==committed.selection,textMatch(snap,committed) != nil else{return candidate}
+        // The old interval is now acknowledged document text, not replay keys.
+        // Bind its actual spelling/space representation outside the new range.
+        guard let last=committed.segments.last else{return candidate}
+        let length=MismatchReplayLedger.render(last).utf16.count
+        let start=snap.selection.location-length
+        let text=snap.text as NSString
+        guard start>=0,NSMaxRange(NSRange(location:start,length:length))<=text.length else{return candidate}
+        var result=MismatchReplayLedger(before:text.replacingCharacters(in:NSRange(location:start,length:length),with:""),caret:start)
+        result.append(source:last.source,keys:last.keys)
+        return result
+    }
+    private func resolveDeletionBoundary(_ snap:Snapshot) {
+        guard let candidate=ledger,candidate.postDeletionPrefixCount != nil,
+              selectedRange==nil,let field,CFEqual(field,snap.field) else{return}
+        ledger=resolvingDeletionBoundary(snap,candidate)
     }
     private func noteTextMatch(_ snap:Snapshot) {
         guard let ledger,let match=textMatch(snap,ledger) else{return}
@@ -218,6 +242,8 @@ final class SourceSwitchBarrier {
               let last=saved.ledger.segments.last,last.source==source() else{return}
         func adopt(_ candidate:MismatchReplayLedger)->Bool {
             guard textMatch(snap,candidate) != nil,candidate.selection==snap.selection else{return false}
+            var candidate=candidate
+            candidate.postDeletionPrefixCount=candidate.segments.last?.source==mismatchKoreanID ? candidate.segments.last?.keys.count:nil
             field=snap.field;ledger=candidate;historyStarted=saved.started;return true
         }
         if adopt(saved.ledger){return}
@@ -254,11 +280,13 @@ final class SourceSwitchBarrier {
         guard let field,CFEqual(field,snap.element) else{incidentTrace.decision(.handoff,.handoffField);return nil}
         guard source()==mismatchKoreanID else{incidentTrace.decision(.handoff,.handoffSource);return nil}
         guard historyStarted>boundary else{incidentTrace.decision(.handoff,historyStarted==0 ? .handoffUninitialized:.handoffBoundary);return nil}
+        resolveDeletionBoundary(.init(field:snap.element,text:snap.text,selection:snap.selection))
         let histories=allowPrior ? [(ledger,lastKeyAt),(priorKeyLedger,priorKeyAt)]:[(ledger,lastKeyAt)]
         var rejection=InputIncidentTrace.DecisionReason.handoffNoHistory
         for (candidate,at) in histories {
-            guard let candidate else{continue}
+            guard var candidate else{continue}
             guard now()-at>=0,now()-at<=5 else{rejection = .handoffExpired;continue}
+            candidate=resolvingDeletionBoundary(.init(field:snap.element,text:snap.text,selection:snap.selection),candidate)
             guard let plan=candidate.lastTwoSetPlan() else{continue}
             let normal=candidate.text==snap.text && candidate.selection==snap.selection
             guard normal || plan.matches(text:snap.text,selection:snap.selection) ||
@@ -596,7 +624,8 @@ final class SourceSwitchBarrier {
                 // Keep the tracked insertion's case tolerance: an editor can
                 // capitalize it after acknowledging the source switch. An empty
                 // segment commits composition even if no key uses this source.
-                ledger=previous;ledger?.segments.append((source:target,keys:[]))
+                ledger=previous;ledger?.postDeletionPrefixCount=nil
+                ledger?.segments.append((source:target,keys:[]))
             } else {
                 ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)
                 selectedRange=snap.selection

@@ -9,3 +9,6 @@ hanq_test_run "$stage/tests"
 
 # Keep the manual-conversion history regression in ordinary build checks.
 bash scripts/test-manual-edit-boundary.sh
+
+# Preserve normal post-edit composition alongside existing recovery tests.
+bash scripts/test-deletion-composition.sh

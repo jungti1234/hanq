@@ -44,10 +44,26 @@ struct MismatchReplayLedger {
     let before:String
     let caret:Int
     var segments:[(source:String,keys:[(UInt16,Bool)])]=[]
+    // A verified post-backspace body does not prove its IME marked range.
+    // Retain the possible commit boundary until actual subsequent text proves it.
+    var postDeletionPrefixCount:Int?
     mutating func append(source:String,keys:[(UInt16,Bool)]) {
         guard !keys.isEmpty else{return}
         if segments.last?.source==source{segments[segments.count-1].keys+=keys}
-        else{segments.append((source,keys))}
+        else{segments.append((source,keys));postDeletionPrefixCount=nil}
+    }
+    func committingDeletionPrefix()->MismatchReplayLedger? {
+        guard let count=postDeletionPrefixCount,let last=segments.last,
+              last.source==KoreanKeyboardLayout.twoSetID,count>0,count<last.keys.count,
+              let onset=MismatchKeyboardLayout.output(code:last.keys[count].0,shift:last.keys[count].1,sourceID:last.source),
+              onset.unicodeScalars.count==1,let scalar=onset.unicodeScalars.first,
+              (0x3131...0x314e).contains(scalar.value) else{return nil}
+        var result=self
+        result.segments.removeLast()
+        result.segments.append((source:last.source,keys:Array(last.keys.prefix(count))))
+        result.segments.append((source:last.source,keys:Array(last.keys.dropFirst(count))))
+        result.postDeletionPrefixCount=nil
+        return result
     }
     static func render(_ segment:(source:String,keys:[(UInt16,Bool)]))->String {
         let roman=segment.keys.compactMap{MismatchRecoveryPlan.character($0.0,$0.1)}.joined()
