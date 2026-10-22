@@ -609,6 +609,7 @@ final class OnsetRecoveryEngine:NSObject {
         bufferedBase=nextBufferedID-Int64(pending.count)
         traceSafety(.started)
         log("repair_started",["pair":candidate.roman,"text":snap.text])
+        InputIncidentTrace.shared.recoveryStarted(.onset,reason:candidate.isCommittedLate ? .committedLateSequence:(candidate.codes.count>1 ? .lateSequence:.firstConsonant))
         replaceAndReplay(candidate,snap)
     }
     func replaceAndReplay(_ candidate:OnsetRecoveryPlan,_ before:OnsetSnapshot){

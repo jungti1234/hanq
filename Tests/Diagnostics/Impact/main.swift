@@ -109,6 +109,7 @@ for i in 0..<count {
  if i%32==0{if enabled{trace.context()};text="";engine.plan=nil;engine.heldKeys=[]}
  if profile=="storage",i%128==0{trace.mark()}
  if profile=="capture",i%16==0{trace.sourceBoundary(.manualEditUnverified,queued:1,awaitingOnset:0)}
+ if profile=="capture",i%64==0{trace.recoveryStarted(.mismatch,reason:.interruptedComposition)}
  let buffered=profile=="buffered" && i%32<8
  if buffered,i%32==0{gate.beat();if !gate.begin(){failures+=1};if enabled{trace.state(.onset,.repairStarted)}}
  for e in events[i+128] {

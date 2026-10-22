@@ -676,8 +676,20 @@ final class MismatchRecoveryEngine:NSObject {
         if lastText != snap.text{log("text",["text":snap.text,"source":InputSourceAccess.currentID(),"selection":[snap.selection.location,snap.selection.length]]);lastText=snap.text}
         guard let candidate=plan else{incidentTrace.decision(.sample,.noCandidate);return}
         if ProcessInfo.processInfo.systemUptime-planStart>5{incidentTrace.decision(.sample,.candidateExpired);log("candidate_cancelled",["reason":"timeout"]);plan=nil;return}
-        let verified=candidate.matches(text:snap.text,selection:snap.selection) ? candidate :
-            candidate.partialFailurePlan(text:snap.text,selection:snap.selection)
+        let verified:MismatchRecoveryPlan?
+        let detectionReason:InputIncidentTrace.RecoveryReason
+        if candidate.matches(text:snap.text,selection:snap.selection) {
+            verified=candidate
+            detectionReason=candidate.verifiedReplacement == nil ? .romanMismatch:.verifiedReplacement
+        }else if let failure=candidate.classifiedPartialFailure(text:snap.text,selection:snap.selection) {
+            verified=failure.plan
+            switch failure.kind {
+            case .mixed:detectionReason = .mixedInsertion
+            case .decomposed:detectionReason = .decomposedJamo
+            case .interrupted:detectionReason = .interruptedComposition
+            case .fragmented:detectionReason = .fragmentedComposition
+            }
+        }else{verified=nil;detectionReason = .unspecifiedMismatch}
         if let verified {
             if candidate.interruptedCompositionPlan(text:snap.text,selection:snap.selection) != nil {
                 NSLog("입력 불일치 후속 조합 복구 확인")
@@ -685,10 +697,10 @@ final class MismatchRecoveryEngine:NSObject {
             // Exact text/range + the observed physical sequence establishes the
             // mismatch. Do not wait for all keys to be released: their up events
             // are preserved in the same ordered queue as subsequent down events.
-            if detectionOnly{reportMismatch(verified,snap)}else{beginRecovery(verified,snap)}
+            if detectionOnly{reportMismatch(verified,snap)}else{beginRecovery(verified,snap,reason:detectionReason)}
         }else{incidentTrace.decision(.sample,.candidateTextMismatch)}
     }
-    func beginRecovery(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot){
+    func beginRecovery(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot,reason:InputIncidentTrace.RecoveryReason = .unspecifiedMismatch){
         guard canBeginRepair() else{incidentTrace.decision(.repair,.repairBlocked);return}
         guard MismatchKeyboardLayout.supports(candidate.sourceID) else{incidentTrace.decision(.repair,.repairSourceUnsupported);return}
         guard candidate.matches(text:snap.text,selection:snap.selection) else{incidentTrace.decision(.repair,.repairTextMismatch);return}
@@ -709,6 +721,7 @@ final class MismatchRecoveryEngine:NSObject {
         clearSourceInteraction();systemSwitch.reset(currentSource());lastIntendedKorean=recoverySourceID
         koreanRetries=0;activationFallbackTried=false;interruptedSourceRestores=0;ledger=nil;ledgerAfterRepair=nil;snapshotWaitStarted=nil
         log("mismatch_confirmed",["roman":candidate.roman,"text":snap.text])
+        incidentTrace.recoveryStarted(.mismatch,reason:reason)
         cycleAndReplay(candidate,snap)
         reportMismatch(candidate,snap)
     }

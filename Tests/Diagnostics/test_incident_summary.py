@@ -48,6 +48,22 @@ class IncidentSummaryTests(unittest.TestCase):
         self.assertIn('unverified',r['interpretation'])
         self.assertEqual(summary.switch_timelines([request],[],[],[],[])[0]['following_keys'],[])
 
+    def test_recovery_start_cause_and_strict_compatibility(self):
+        request=dict(trigger=6,milliseconds=100,afterSequence=10,lane=4,detail=4,event=0,inputOrigin=0)
+        preserved=dict(deferred=True,requests=[request],postCapacity=4096,postOmittedFrames=0,closed=True,closedMilliseconds=1100,endedOnShutdown=False)
+        data=dict(schema=1,trigger=6,frames=[],capturePreservation=preserved)
+        result=summary.summarize(data)
+        self.assertEqual(result['trigger'],'recovery_started')
+        self.assertEqual(result['recovery_detections'][0]['reason'],'interrupted_composition')
+        self.assertEqual(result['recovery_detections'][0]['milliseconds'],100)
+        self.assertIsNone(summary.summarize(dict(schema=1,trigger=1,frames=[]))['recovery_detections'])
+        for lane,details in [(4,[1,2,3,4,5,6,10]),(3,[7,8,9])]:
+            for detail in details:
+                r=dict(request,lane=lane,detail=detail)
+                self.assertEqual(len(summary.summarize(dict(data,capturePreservation=dict(preserved,requests=[r])))['recovery_detections']),1)
+        for change in [dict(detail=0),dict(detail=11),dict(detail=7),dict(lane=2),dict(event=1),dict(text='PRIVATE')]:
+            with self.assertRaises(ValueError):summary.summarize(dict(data,capturePreservation=dict(preserved,requests=[dict(request,**change)])))
+
     def test_capture_preservation_backlog_and_privacy(self):
         request=dict(trigger=5,milliseconds=20,afterSequence=10,lane=8,detail=31,event=0,inputOrigin=0)
         preserved=dict(deferred=True,requests=[request],postCapacity=4096,postOmittedFrames=0,closed=True,closedMilliseconds=1020,endedOnShutdown=False)
@@ -60,7 +76,7 @@ class IncidentSummaryTests(unittest.TestCase):
         self.assertIsNone(old['capture_preservation']);self.assertIsNone(old['capture_backlog'])
         for bad in [None,dict(preserved,text='private'),dict(preserved,postCapacity=0),dict(preserved,postOmittedFrames=True),dict(preserved,closed=False),dict(preserved,requests=[dict(request,keyCode=1)]),dict(preserved,requests=[dict(request,milliseconds='private')]),dict(preserved,requests=[request]*33)]:
             with self.assertRaises(ValueError):summary.summarize(dict(data,capturePreservation=bad))
-        for bad in [None,dict(backlog,text='private'),dict(backlog,pendingAutomatic=17),dict(backlog,requestOverflow={'6':1}),dict(backlog,completedWindows=2),dict(backlog,merged={'05':1}),dict(backlog,requested={'5':True})]:
+        for bad in [None,dict(backlog,text='private'),dict(backlog,pendingAutomatic=17),dict(backlog,requestOverflow={'7':1}),dict(backlog,completedWindows=2),dict(backlog,merged={'05':1}),dict(backlog,requested={'5':True})]:
             with self.assertRaises(ValueError):summary.summarize(dict(data,captureBacklog=bad))
 
     def test_shape_spans_baselines_and_strict_privacy(self):
