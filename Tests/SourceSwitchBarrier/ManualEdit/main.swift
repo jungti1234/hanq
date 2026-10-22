@@ -55,6 +55,32 @@ for ready in [false,true] {
  check(b.beginManualEdit(field:field,source:en)==nil,"do not discard active source boundary or unavailable repair")
  b.fail("input_stopped")
 }
+// The lease starts before asynchronous selection acknowledgment, not at paste.
+// Cancellation during this earlier phase must retain queued input and ignore a
+// late selection/paste completion without affecting a newer replacement.
+for cancel in [false,true] {
+ let b=SourceSwitchBarrier();var source=en,switches=0,retained:[CGEvent]=[]
+ b.source={source};b.select={source=$0;switches+=1;return noErr};b.retained={retained += $0}
+ b.read={.init(field:field,text:"Tkdldnjfem",selection:NSRange(location:0,length:10))}
+ let token=b.beginManualEdit(field:field,source:en)!
+ check(b.request(ko),"source request accepted during selection wait")
+ for code:CGKeyCode in [15,40,1] {check(b.receive(.keyDown,key(code)),"following letters stay behind selection and paste")}
+ b.step();check(switches==0 && retained.isEmpty,"no source or delivery before replacement acknowledgment")
+ if cancel {
+  b.finishManualEdit(token,snapshot:nil)
+  check(retained.map{$0.getIntegerValueField(.keyboardEventKeycode)}==[15,40,1],"selection failure retains original input order")
+  let next=b.beginManualEdit(field:field,source:en)!
+  b.finishManualEdit(token,snapshot:.init(field:field,text:"stale",selection:NSRange(location:5,length:0)))
+  check(b.request(ko),"new request remains scoped to new edit")
+  b.step();check(switches==0,"late old acknowledgment cannot release a new request")
+  b.finishManualEdit(next,snapshot:nil)
+ }else{
+  let final=SourceSwitchBarrier.Snapshot(field:field,text:"싸이월드",selection:NSRange(location:4,length:0))
+  b.read={final};b.finishManualEdit(token,snapshot:final);b.step()
+  check(switches==1 && source==ko,"verified selection and paste release exactly one pending switch")
+  b.fail("test teardown")
+ }
+}
 // The new fixed phases use existing nonblocking boundary collection and strict codecs.
 var captures:[InputIncidentTrace.Capture]=[]
 let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})

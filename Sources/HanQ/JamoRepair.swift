@@ -296,16 +296,28 @@ final class JamoRepair {
               !IsSecureEventInputEnabled(),
               (attribute(element, kAXValueAttribute) as? String) == text,
               selection(element) == originalSelection,
-              attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true,
-              setSelection(element, range) else {
+              attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true else {
             InputDiagnostics.shared.record("변환 중단: 선택 설정 또는 입력 상태 재확인 실패")
+            return
+        }
+        // Selection acknowledgment is already part of this replacement. Reserve
+        // its boundary before the first asynchronous wait, so a source request
+        // cannot overtake selection and cancel the pending paste.
+        let editToken:Int?
+        if case .paste = action {
+            guard let inputSourceID,let token=beginTextEdit(element,inputSourceID) else{return}
+            editToken=token
+        }else{editToken=nil}
+        guard setSelection(element,range) else {
+            InputDiagnostics.shared.record("변환 중단: 선택 설정 또는 입력 상태 재확인 실패")
+            if let editToken{endTextEdit(editToken,element,nil,nil)}
             return
         }
         busy = true
         let expectedRevision = revision
         waitForSelection(element, app: app, pid: pid, text: text, range: range,
                          originalSelection: originalSelection, action: action,
-                         expectedRevision: expectedRevision, inputSourceID: inputSourceID, attempt: 0)
+                         expectedRevision: expectedRevision, inputSourceID: inputSourceID, editToken:editToken, attempt: 0)
     }
 
     /// Chromium/Electron may not publish their editable accessibility tree until
@@ -333,7 +345,7 @@ final class JamoRepair {
 
     private func waitForSelection(_ element: AXUIElement, app: AXUIElement, pid: pid_t,
                                   text: String, range: NSRange, originalSelection: NSRange,
-                                  action: Action, expectedRevision: Int, inputSourceID: String?, attempt: Int) {
+                                  action: Action, expectedRevision: Int, inputSourceID: String?, editToken:Int?, attempt: Int) {
         // AX selection setters can return before the editor reflects the new range.
         // Do not abandon the transaction with only its selection step applied.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
@@ -347,13 +359,14 @@ final class JamoRepair {
                   !IsSecureEventInputEnabled() else {
                 InputDiagnostics.shared.record("변환 중단: 선택 대기 중 입력 상태 변경")
                 self.busy = false
+                if let editToken{self.endTextEdit(editToken,element,nil,nil)}
                 return
             }
             if self.selection(element) == range {
                 switch action {
                 case .paste(let replacement):
                     self.pasteReplacement(element, app:app, pid: pid, text: text, range: range,
-                                          originalSelection: originalSelection, replacement: replacement,inputSourceID:inputSourceID)
+                                          originalSelection: originalSelection, replacement: replacement,inputSourceID:inputSourceID,editToken:editToken)
                 case .hanja:
                     // Wait for AX to reflect the selection before opening the
                     // native candidates. The IME owns replacement and Escape.
@@ -365,11 +378,12 @@ final class JamoRepair {
             } else if attempt < 10 {
                 self.waitForSelection(element, app: app, pid: pid, text: text, range: range,
                                       originalSelection: originalSelection, action: action,
-                                      expectedRevision: expectedRevision, inputSourceID: inputSourceID, attempt: attempt + 1)
+                                      expectedRevision: expectedRevision, inputSourceID: inputSourceID, editToken:editToken, attempt: attempt + 1)
             } else {
                 NSLog("변환 중단: 선택 반영 시간 초과")
                 _ = self.setSelection(element, originalSelection)
                 self.busy = false
+                if let editToken{self.endTextEdit(editToken,element,nil,nil)}
             }
         }
     }
@@ -426,22 +440,19 @@ final class JamoRepair {
                     return
                 }
                 self.cancelHanjaWatch()
-                guard self.revision == confirmed, !self.busy,
-                      self.setSelection(element, correction.range) else { return }
-                self.busy = true
+                guard self.revision == confirmed, !self.busy else { return }
                 InputDiagnostics.shared.record("한자 호환 보정: 원문 뒤 추가 확인")
-                self.waitForSelection(element, app: app, pid: pid, text: current, range: correction.range,
-                                      originalSelection: caret, action: .paste(correction.replacement),
-                                      expectedRevision: confirmed, inputSourceID: source, attempt: 0)
+                self.prepareSelection(element, app: app, pid: pid, text: current, range: correction.range,
+                                      originalSelection: caret, action: .paste(correction.replacement), inputSourceID: source)
             }
         }
         poll()
     }
 
     private func pasteReplacement(_ element: AXUIElement, app:AXUIElement, pid: pid_t, text: String,
-                                  range: NSRange, originalSelection: NSRange, replacement: String,inputSourceID:String?) {
-        guard AXIsProcessTrusted() else { busy = false; return }
-        guard let inputSourceID,let editToken=beginTextEdit(element,inputSourceID) else{_ = setSelection(element,originalSelection);busy=false;return}
+                                  range: NSRange, originalSelection: NSRange, replacement: String,inputSourceID:String?,editToken:Int?) {
+        guard let editToken else{busy=false;return}
+        guard AXIsProcessTrusted() else { busy = false;endTextEdit(editToken,element,nil,nil);return }
         let expectedRevision=revision
         let clipboard = NSPasteboard.general
         let saved = (clipboard.pasteboardItems ?? []).map { item in
