@@ -165,7 +165,8 @@ def capture_preservation(value):
     requests=value['requests']
     if not isinstance(requests,list) or not 1<=len(requests)<=32:raise ValueError('invalid capture requests')
     for row in requests:
-        if not isinstance(row,dict) or set(row)!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for n in row.values()) or not 1<=row['trigger']<=5 or not 1<=row['lane']<=8 or not 0<=row['detail']<=31 or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
+        if not isinstance(row,dict) or set(row)!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for n in row.values()) or not 1<=row['trigger']<=6 or not 1<=row['lane']<=8 or not 0<=row['detail']<=31 or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
+        if row['trigger']==6 and not (row['event']==0 and row['inputOrigin']==0 and ((row['lane']==4 and row['detail'] in [1,2,3,4,5,6,10]) or (row['lane']==3 and row['detail'] in [7,8,9]))):raise ValueError('invalid recovery detection')
     return value
 
 def capture_backlog(value):
@@ -175,7 +176,7 @@ def capture_backlog(value):
     if any(type(value[k]) is not int or value[k]<0 for k in keys-set(groups)) or (value['automaticCapacity'],value['manualCapacity'],value['requestCapacityPerTrigger'],value['requestsPerWindow'])!=(16,4,16,32) or value['pendingAutomatic']>16 or value['pendingManual']>4 or value['completedWindows']>value['submittedWindows']:raise ValueError('invalid capture backlog bounds')
     for key in groups:
         d=value[key]
-        if not isinstance(d,dict) or len(d)>5 or any(k not in ['1','2','3','4','5'] or type(v) is not int or v<=0 for k,v in d.items()):raise ValueError('invalid capture backlog counters')
+        if not isinstance(d,dict) or len(d)>6 or any(k not in ['1','2','3','4','5','6'] or type(v) is not int or v<=0 for k,v in d.items()):raise ValueError('invalid capture backlog counters')
     return value
 
 def summarize(data):
@@ -187,7 +188,7 @@ def summarize(data):
     if 'runID' in data and (not isinstance(run_id,str) or not re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}',run_id)):
         raise ValueError('invalid diagnostic run ID')
     lanes={1:'hid',2:'main',3:'onset',4:'mismatch',5:'annotated_boundary',6:'onset_ax',7:'mismatch_ax',8:'source_boundary'}
-    triggers={1:'manual',2:'callback_delay',3:'ax_delay',4:'possible_length_shrink',5:'source_boundary_interrupted'}
+    triggers={1:'manual',2:'callback_delay',3:'ax_delay',4:'possible_length_shrink',5:'source_boundary_interrupted',6:'recovery_started'}
     counts=collections.defaultdict(collections.Counter)
     active={}
     completed=[]
@@ -269,7 +270,7 @@ def summarize(data):
                 except (ValueError,TypeError):raise ValueError('invalid observation code')
                 if str(code)!=key or not 0<=code<2560 or type(n) is not int or n<=0:raise ValueError('invalid observation code/count')
                 operation,rest=divmod(code,256);lane,detail=divmod(rest,32)
-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,9,10,11,12,13,17,25,26,27,28,29] if operation==9 else [0])
+                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,9,10,11,12,13,14,17,25,26,27,28,29,30] if operation==9 else [0])
                 if not valid or (group=='coalesced' and not (operation==3 or (operation==5 and lane==3 and detail>0))):raise ValueError('invalid observation detail')
                 row=dict(operation=names[operation],lane=lanes[lane+1],detail=detail,count=n)
                 if operation==5 and lane<3 and 8<=detail<=12:row.update(control_role=CONTROL_ROLES[detail-8])
@@ -289,7 +290,7 @@ def summarize(data):
             fields={'processed','contended','totalLockWaitMicros','maxLockWaitMicros','maxQueueMicros','clipped'}
             if not isinstance(value,dict) or set(value)!=fields or any(type(n) is not int or n<0 for n in value.values()):raise ValueError('invalid observation wait stats')
             if value['processed']!=observations['processed'][key] or value['contended']>value['processed'] or value['clipped']>value['processed'] or value['maxLockWaitMicros']>60_000_000 or value['maxQueueMicros']>60_000_000 or value['maxLockWaitMicros']>value['totalLockWaitMicros'] or (value['contended']==0 and value['totalLockWaitMicros']!=0):raise ValueError('inconsistent observation waits')
-            if row['operation']=='capture' and row['detail'] not in [1,2,3,4,5,25,26,27,28,29]:raise ValueError('invalid capture wait code')
+            if row['operation']=='capture' and row['detail'] not in [1,2,3,4,5,6,25,26,27,28,29,30]:raise ValueError('invalid capture wait code')
             observation_totals.append(dict(row,**value))
     capture_timing=data.get('captureTiming')
     if 'captureTiming' in data and not valid_timing(capture_timing):raise ValueError('invalid capture timing')
@@ -342,7 +343,7 @@ def summarize(data):
             source_evidence_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],action=source_actions[frame['edge']],**value))
         if frame['kind']==9:
             op=frame['category'];detail=frame['edge']
-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,25,26,27,28,29] if op==10 else [0]
+            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,6,25,26,27,28,29,30] if op==10 else [0]
             if not observed or not 1<=op<=10 or detail not in allowed or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False):raise ValueError('invalid observation wait frame')
         if frame['kind']==8:
             site=decision_sites.get(frame['edge'],'unknown')
@@ -394,6 +395,7 @@ def summarize(data):
                 transport_max[lane]=max(transport_max[lane],milliseconds-stages['hid'])
     return {'build':data.get('build'),'diagnostic_run_id':run_id,'clock_origin_micros':clock_origin,'incident':data.get('incident'),'phase':data.get('phase'),
             'trigger':triggers.get(data['trigger'],'unknown'),'frames':len(data['frames']),
+            'recovery_detections':None if preservation is None else [dict(r,lane_name=lanes[r['lane']],reason={1:'roman_mismatch',2:'mixed_insertion',3:'decomposed_jamo',4:'interrupted_composition',5:'fragmented_composition',6:'verified_replacement',7:'first_consonant',8:'late_sequence',9:'committed_late_sequence',10:'unspecified_mismatch'}[r['detail']],interpretation='detector_branch_only_not_root_cause') for r in preservation['requests'] if r['trigger']==6],
             'discarded_old_frames':data.get('discardedOldFrames'),'best_effort':True,
             'recipient_receipt_verified':False,'event_correlation_is_heuristic':True,
             'observed_keydown_counts':dict(counts),'maximum_correlated_hid_to_stage_ms':dict(transport_max),'maximum_observed_duration_us':dict(maxima),

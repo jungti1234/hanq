@@ -151,7 +151,7 @@ struct RecorderObservationDelivery: Codable {
         case 5:return (1...8).contains(detail)
         case 6:return detail==0 || (code/32%8==3 && (1...7).contains(detail)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail))
         case 7:return (1...31).contains(detail)
-        case 10:return (1...5).contains(detail) || (9...13).contains(detail) || detail==17 || (25...29).contains(detail)
+        case 10:return (1...6).contains(detail) || (9...14).contains(detail) || detail==17 || (25...30).contains(detail)
         default:return detail==0
         }
     }
@@ -162,7 +162,7 @@ struct RecorderObservationDelivery: Codable {
         (waits.map{ stats in
             Set(stats.keys)==Set(processed.keys) && stats.allSatisfy { key,value in
                 Self.validCode(key) && value.valid && processed[key]==value.processed &&
-                (Int(key)!/256+1 != 10 || (1...5).contains(Int(key)!%32) || (25...29).contains(Int(key)!%32))
+                (Int(key)!/256+1 != 10 || (1...6).contains(Int(key)!%32) || (25...30).contains(Int(key)!%32))
             }
         } ?? true)
     }
@@ -205,7 +205,10 @@ struct RecorderStorageDocument:Codable {
 
 struct RecorderCaptureRequest:Codable {
     let trigger:Int;let milliseconds:Int;let afterSequence:Int;let lane:Int;let detail:Int;let event:Int;let inputOrigin:Int
-    var valid:Bool{(1...5).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...31).contains(detail) && event>=0 && (0...3).contains(inputOrigin)}
+    var valid:Bool{
+        (1...6).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...31).contains(detail) && event>=0 && (0...3).contains(inputOrigin) &&
+        (trigger != 6 || (event==0 && inputOrigin==0 && ((lane==4 && ((1...6).contains(detail) || detail==10)) || (lane==3 && (7...9).contains(detail)))))
+    }
 }
 struct RecorderCapturePreservation:Codable {
     let deferred:Bool;let requests:[RecorderCaptureRequest];let postCapacity:Int;let postOmittedFrames:Int;let closed:Bool
@@ -219,7 +222,7 @@ struct RecorderCaptureBacklog:Codable {
     let postOverflow:[String:Int];let discardedOnDisable:[String:Int];let submittedWindows:Int;let completedWindows:Int
     static let keys:Set<String>=["automaticCapacity","manualCapacity","requestCapacityPerTrigger","requestsPerWindow","pendingAutomatic","pendingManual","requested","merged","deferred","requestOverflow","windowOverflow","postOverflow","discardedOnDisable","submittedWindows","completedWindows"]
     var valid:Bool{
-        automaticCapacity==16 && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...16).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable].allSatisfy{d in d.count<=5 && d.allSatisfy{e in Int(e.key).map{(1...5).contains($0) && String($0)==e.key} == true && e.value>0}}
+        automaticCapacity==16 && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...16).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable].allSatisfy{d in d.count<=6 && d.allSatisfy{e in Int(e.key).map{(1...6).contains($0) && String($0)==e.key} == true && e.value>0}}
     }
 }
 struct RecorderTrace: Codable {
@@ -267,7 +270,7 @@ struct RecorderTrace: Codable {
                   if row.kind==9 {
                       guard row.observationTiming != nil,(1...10).contains(row.category),(0...31).contains(row.edge) else{return false}
                       guard row.event==0,row.inputOrigin==0,!row.consumed,row.durationMicros==0,row.count==0,!row.selected,row.field==0 else{return false}
-                      if row.category==10 {guard (1...5).contains(row.edge) || (25...29).contains(row.edge) else{return false}}
+                      if row.category==10 {guard (1...6).contains(row.edge) || (25...30).contains(row.edge) else{return false}}
                       let code=((row.category-1)*8+row.lane-1)*32+row.edge
                       return RecorderObservationDelivery.validCode(String(code))
                   }
@@ -347,7 +350,7 @@ struct RecorderTrace: Codable {
         }
         let value = try JSONDecoder().decode(RecorderTrace.self, from: data)
         guard value.schema == 1, value.build.range(of: "^(?:[0-9]{1,9}|test)$", options: .regularExpression) != nil,
-              (1...5).contains(value.trigger), value.incident > 0, (0...1).contains(value.phase),
+              (1...6).contains(value.trigger), value.incident > 0, (0...1).contains(value.phase),
               value.discardedOldFrames >= 0,
               [value.skippedEvents, value.skippedAuxiliary].allSatisfy({ dict in
                   dict.count <= 8 && dict.allSatisfy { Int($0.key).map { (1...8).contains($0) } == true && $0.value >= 0 }

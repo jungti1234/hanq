@@ -299,7 +299,7 @@ final class InputIncidentTrace {
         case manualEdit,keyboardCapture,onsetRepair,onsetReservation
         case handoffUninitialized,observationAllowed
     }
-    enum Trigger:Int,Codable {case manual=1,callbackDelay,axDelay,possibleShrink,boundaryInterrupted}
+    enum Trigger:Int,Codable {case manual=1,callbackDelay,axDelay,possibleShrink,boundaryInterrupted,recoveryStarted}
     enum BoundaryStage:Int {
         case waiting=1,queued,onsetWaiting,onsetConfirmed,onsetRetimed,retained,finished,deadline,focusChanged,failed,selection,sourceCommitted
         case snapshotWait,textWait,caretWait,repairWait,repairReceiptWait,onsetReceiptWait,replayReceiptWait,focusWait,selectionCommitWait,sourceCommitWait
@@ -340,6 +340,11 @@ final class InputIncidentTrace {
             default:return nil
             }
         }
+    }
+    // Fixed detector branches, not root-cause or editor/IME truth assertions.
+    enum RecoveryReason:Int {
+        case romanMismatch=1,mixedInsertion,decomposedJamo,interruptedComposition,fragmentedComposition,verifiedReplacement
+        case firstConsonant,lateSequence,committedLateSequence,unspecifiedMismatch
     }
     enum State:Int {
         case repairStarted=1,selection,replay,retained,finished,stopped,sourceChanged,buffered
@@ -469,8 +474,8 @@ final class InputIncidentTrace {
     private let eventCredits:DispatchSemaphore,metadataCredits:DispatchSemaphore,shapeCredits:DispatchSemaphore,readCredits:DispatchSemaphore
     private let observationOverflowSignals:[DispatchSemaphore],observationOmittedSignals:[DispatchSemaphore]
     private var observationProcessed:[Int:Int]=[:],observationOverflow:[Int:Int]=[:],observationOmitted:[Int:Int]=[:],observationCoalesced:[Int:Int]=[:]
-    private let captureCredits=(0..<5).map{_ in DispatchSemaphore(value:16)}
-    private let captureOverflowSignals=(0..<5).map{_ in DispatchSemaphore(value:0)}
+    private let captureCredits=(0..<6).map{_ in DispatchSemaphore(value:16)}
+    private let captureOverflowSignals=(0..<6).map{_ in DispatchSemaphore(value:0)}
     // All window mutation is on decisionQueue under the metadata lock. Writer
     // closures receive value snapshots; a window slot is held through both writes.
     private final class CaptureWindow {
@@ -705,7 +710,7 @@ final class InputIncidentTrace {
                 if reason == .manual,manualCaptures>=32 {
                     observationOmitted[observationCode(.capture,.main,17),default:0]+=1;return
                 }
-                if reason != .manual,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
+                if reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
                     window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
                     let code=reason == window.before.trigger ? reason.rawValue:reason.rawValue+8
                     observationOmitted[observationCode(.capture,.main,code),default:0]+=1
@@ -1076,6 +1081,15 @@ final class InputIncidentTrace {
             append(.sourceBoundary,.sourceBoundary,observedAt:time,observationTiming:timing,event:awaitingOnset,category:stage.rawValue,count:queued)
         }
         if stage == .retained || stage == .deadline || stage == .focusChanged || stage == .failed || stage == .manualEditUnverified || stage == .inputResumed {requestCapture(.boundaryInterrupted,lane:.sourceBoundary,detail:stage.rawValue)}
+    }
+    // Own capture admission: ordinary observation overflow cannot erase the
+    // detector reason. The serial worker freezes the pre-edit ring; storage
+    // throttling defers publication, not preservation. No caller-side AX/I/O.
+    func recoveryStarted(_ lane:Lane,reason:RecoveryReason){
+        guard enabled,!IsSecureEventInputEnabled(),
+              (lane == .mismatch && ((1...6).contains(reason.rawValue) || reason == .unspecifiedMismatch)) ||
+              (lane == .onset && (7...9).contains(reason.rawValue)) else{return}
+        requestCapture(.recoveryStarted,lane:lane,detail:reason.rawValue)
     }
     func mark(){
         guard enabled else{return};let time=clock()

@@ -357,9 +357,17 @@ extension MismatchRecoveryPlan {
               composed != insertion,interruptedTwoSet(codes,insertion:insertion) else{return nil}
         var result=self;result.roman=insertion;result.verifiedReplacement=insertion;return result
     }
+    enum FailureKind {case mixed,decomposed,interrupted,fragmented}
+    // Keep the original proof order and return the branch already evaluated.
+    // Diagnostic classification must not run these expensive proofs again.
+    func classifiedPartialFailure(text:String,selection:NSRange)->(plan:MismatchRecoveryPlan,kind:FailureKind)? {
+        if let plan=mixedPlan(text:text,selection:selection){return (plan,.mixed)}
+        if let plan=decomposedPlan(text:text,selection:selection){return (plan,.decomposed)}
+        if let plan=interruptedCompositionPlan(text:text,selection:selection){return (plan,.interrupted)}
+        if let plan=fragmentedCompositionPlan(text:text,selection:selection){return (plan,.fragmented)}
+        return nil
+    }
     func partialFailurePlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
-        mixedPlan(text:text,selection:selection) ?? decomposedPlan(text:text,selection:selection) ??
-            interruptedCompositionPlan(text:text,selection:selection) ??
-            fragmentedCompositionPlan(text:text,selection:selection)
+        classifiedPartialFailure(text:text,selection:selection)?.plan
     }
 }
