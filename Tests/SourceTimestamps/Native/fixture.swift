@@ -27,6 +27,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
     var stage=0,caseIndex=0,forced=0,armed=false
     var deadline=0.0,settle=0.0
     var outcomes:[[String:Any]]=[]
+    var preparing=false
     let prefix="sample "
     func write(_ name:String,_ object:[String:Any]) {try! JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.prettyPrinted]).write(to:root.appendingPathComponent(name),options:.atomic)}
     func source()->String {
@@ -35,7 +36,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
     }
     func select(_ id:String)->Bool {
         guard let a=TISCreateInputSourceList([kTISPropertyInputSourceID as String:id] as CFDictionary,false)?.takeRetainedValue() as? [TISInputSource],let s=a.first else{return false}
-        return TISSelectInputSource(s)==noErr
+        return ownedSelectInputSource(s)==noErr
     }
     func applicationDidFinishLaunching(_ note:Notification) {
         prior=NSWorkspace.shared.frontmostApplication
@@ -45,13 +46,14 @@ final class Fixture:NSObject,NSApplicationDelegate {
         window.contentView=view;window.makeKeyAndOrderFront(nil);window.makeFirstResponder(view);NSApp.activate(ignoringOtherApps:true)
         timer=Timer.scheduledTimer(withTimeInterval:0.01,repeats:true){[weak self] _ in self?.tick()}
         write("ready.json",["pid":getpid()])
-        startCase()
+        stage = -1;deadline=ProcessInfo.processInfo.systemUptime+5
     }
     func request(_ keys:[[String:Any]]) {
         try? FileManager.default.removeItem(at:root.appendingPathComponent("done.json"))
         write("request.json",["pid":getpid(),"keys":keys]);deadline=ProcessInfo.processInfo.systemUptime+8
     }
     func startCase() {
+        preparing=true;defer{preparing=false}
         guard caseIndex<2 else{finish(true,"normal and forced Roman mismatch after actual right Command both passed");return}
         armed=false;forced=0;view.inputContext?.discardMarkedText()
         if caseIndex>0 {
@@ -63,7 +65,12 @@ final class Fixture:NSObject,NSApplicationDelegate {
         stage=0;settle=ProcessInfo.processInfo.systemUptime+0.25;deadline=settle+8
     }
     func tick() {
+        guard !preparing else{return}
         let now=ProcessInfo.processInfo.systemUptime
+        if stage == -1 {
+            guard now<deadline else{finish(false,"owned source guard unavailable");return}
+            if ownedInputSourceChangeAllowed(){startCase()};return
+        }
         guard now<deadline else{finish(false,"stage timeout");return}
         guard NSApp.isActive,window.firstResponder === view else{finish(false,"owned fixture lost focus");return}
         if stage==0,now>=settle {
@@ -94,18 +101,23 @@ final class Fixture:NSObject,NSApplicationDelegate {
         timer?.invalidate();armed=false
         let finalSource=source()
         var restored=false,restoreStatus:OSStatus = -1
-        if let original,let property=TISGetInputSourceProperty(original,kTISPropertyInputSourceID) {
+        if ownedInputSourceChangeAllowed(),let original,let property=TISGetInputSourceProperty(original,kTISPropertyInputSourceID) {
             let originalID=Unmanaged<CFString>.fromOpaque(property).takeUnretainedValue() as String
-            restoreStatus=TISSelectInputSource(original)
+            restoreStatus=ownedSelectInputSource(original)
             let deadline=Date().addingTimeInterval(1)
             while source() != originalID,Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.01))}
             restored=restoreStatus==noErr && source()==originalID
         }
         let verified=passed && restored
         write("result.json",["passed":verified,"reason":reason,"cases":outcomes,"stage":stage,"caseIndex":caseIndex,"actualSyntheticText":view.string,"caret":view.selectedRange().location,"forcedOriginalLetters":forced,"source":finalSource,"originalSourceRestored":restored,"restoreStatus":restoreStatus])
-        if let prior,!prior.isTerminated{prior.activate(options:[])}
+        if !restored,let original {
+            _=OwnedInputSourceCleanup(window:window,restore:{ownedSelectInputSource(original)==noErr},completed:{
+                self.write("cleanup.json",["restoredAfterReturn":true,"originalResultUnchanged":true]);exit(1)
+            });return
+        }
         print(verified ? "PASS: \(reason)":"FAIL: \(reason); sourceRestored=\(restored)");exit(verified ? 0:1)
     }
 }
-let app=TestApplication.shared as! TestApplication
-let fixture=Fixture();app.fixture=fixture;app.delegate=fixture;app.run()
+@main enum SourceTimestampFixtureMain {
+    static func main(){let app=TestApplication.shared as! TestApplication;let fixture=Fixture();app.fixture=fixture;app.delegate=fixture;app.run()}
+}

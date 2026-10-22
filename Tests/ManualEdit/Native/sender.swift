@@ -9,7 +9,7 @@ import Carbon
         let began=ProcessInfo.processInfo.systemUptime
         func safe(_ app:NSRunningApplication)->Bool {
             CFRunLoopRunInMode(.defaultMode,0.001,false)
-            return !app.isTerminated && NSWorkspace.shared.frontmostApplication?.processIdentifier==app.processIdentifier && !IsSecureEventInputEnabled() && CGPreflightPostEventAccess() && mirror.ready
+            return !app.isTerminated && NSWorkspace.shared.frontmostApplication?.processIdentifier==app.processIdentifier && !IsSecureEventInputEnabled() && CGPreflightPostEventAccess() && mirror.ready && ownedInputFocusMatches(app.processIdentifier)
         }
         while !FileManager.default.fileExists(atPath:root.appendingPathComponent("quit").path),ProcessInfo.processInfo.systemUptime-began<60 {
             let path=root.appendingPathComponent("request.json")

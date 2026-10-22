@@ -73,7 +73,7 @@ enum MismatchTextReader {
         // Reads are asynchronous IPC. Reject a changing value or caret, not a
         // mixed snapshot assembled from two edits.
         var rangeAfter:CFTypeRef?
-        guard Self.value(element) == value,
+        guard let valueAfter=Self.value(element),InputFocusAccess.sameText(valueAfter,value),
               AXUIElementCopyAttributeValue(element,kAXSelectedTextRangeAttribute as CFString,&rangeAfter) == .success,
               let rangeAfter,CFGetTypeID(rangeAfter)==AXValueGetTypeID() else{return nil}
         var r=CFRange();guard AXValueGetValue(rangeAfter as! AXValue,.cfRange,&r),r.location==selection.location,r.length==selection.length else{return nil}

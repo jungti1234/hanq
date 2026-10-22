@@ -288,7 +288,7 @@ final class SourceSwitchBarrier {
             guard now()-at>=0,now()-at<=5 else{rejection = .handoffExpired;continue}
             candidate=resolvingDeletionBoundary(.init(field:snap.element,text:snap.text,selection:snap.selection),candidate)
             guard let plan=candidate.lastTwoSetPlan() else{continue}
-            let normal=candidate.text==snap.text && candidate.selection==snap.selection
+            let normal=candidate.selection==snap.selection && InputFocusAccess.sameText(candidate.text,snap.text)
             guard normal || plan.matches(text:snap.text,selection:snap.selection) ||
                 plan.partialFailurePlan(text:snap.text,selection:snap.selection) != nil else{rejection = .handoffTextMismatch;continue}
             incidentTrace.decision(.handoff,.handoffAccepted)

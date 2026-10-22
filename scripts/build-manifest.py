@@ -19,6 +19,7 @@ def source_hashes():
 if __name__ == '__main__':
     output = Path(sys.argv[1])
     data = {'schemaVersion': 1, 'development': sys.argv[2] == 'true',
+            'swiftOptimization': [] if sys.argv[2] == 'true' else ['-O', '-whole-module-optimization'],
             'sourceCommit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
             'sourceSHA256': source_hashes()}
     output.write_text(json.dumps(data, indent=2) + '\n')

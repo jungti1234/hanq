@@ -36,8 +36,8 @@ enum OnsetLateSequenceDetector {
             }
         }
         func view(_ value:String)->Bool {
-            text==(before as NSString).replacingCharacters(in:NSRange(location:caret,length:0),with:value)
-            && selection==NSRange(location:caret+value.utf16.count,length:0)
+            selection==NSRange(location:caret+value.utf16.count,length:0)
+            && InputFocusAccess.sameText(text,(before as NSString).replacingCharacters(in:NSRange(location:caret,length:0),with:value))
         }
         let split=render(chars.prefix(1))+render(chars.dropFirst())
         let joined=render(chars[...])

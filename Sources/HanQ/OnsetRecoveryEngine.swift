@@ -171,7 +171,7 @@ final class OnsetRecoveryEngine:NSObject {
     func publishPassedBaseline(_ snap:OnsetSnapshot?){
         guard enabled,!recovering,pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,
               let layout=currentLayout(),let snap,snap.selection.length==0 else{gate?.configurePassedBaseline(nil);return}
-        if let last=publishedPassedBaselines.last,CFEqual(last.snapshot.element,snap.element),last.snapshot.text==snap.text,last.snapshot.selection==snap.selection {
+        if let last=publishedPassedBaselines.last,CFEqual(last.snapshot.element,snap.element),InputFocusAccess.sameText(last.snapshot.text,snap.text),last.snapshot.selection==snap.selection {
             gate?.configurePassedBaseline(last.revision,sourceID:layout.sourceID);return
         }
         publishedPassedRevision+=1
@@ -358,7 +358,7 @@ final class OnsetRecoveryEngine:NSObject {
         if eligible{earlyBaseline=lastEditable;observeOutsideEditors()}
         gate.configureEarly(eligible,sourceID:layout?.sourceID ?? "",normal:Set(layout?.normal.keys.map{$0} ?? []),shifted:Set(layout?.shifted.keys.map{$0} ?? []))
         if let snap=observed {
-            if lastText != snap.text{lastText=snap.text;log("text",["text":snap.text,"selection":[snap.selection.location,snap.selection.length],"source":currentSource()])}
+            if !InputFocusAccess.sameText(lastText,snap.text){lastText=snap.text;log("text",["text":snap.text,"selection":[snap.selection.location,snap.selection.length],"source":currentSource()])}
             lastEditable=snap
         }
         publishPassedBaseline(lastEditable)
@@ -484,23 +484,27 @@ final class OnsetRecoveryEngine:NSObject {
         unavailableReason=""
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
         guard !IsSecureEventInputEnabled() else{unavailableReason="secure_input";return nil}
-        guard let target,!target.isTerminated,focusAccess.currentPID()==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}
-        guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{unavailableReason="focused_element_unreadable";return nil}
-        guard attr(element,kAXSubroleAttribute) as? String != "AXSecureTextField" else{unavailableReason="secure_field";return nil}
-        guard let role=attr(element,kAXRoleAttribute) as? String else{unavailableReason="role_unreadable";return nil}
+        guard let target,!target.isTerminated else{unavailableReason="target_not_frontmost";return nil}
+        // focusedElement proves the owner itself. A separate currentPID read
+        // immediately before it duplicated the same system-wide AX request.
+        guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{
+            unavailableReason=focusAccess.lastOwner==target.processIdentifier ? "focused_element_unreadable":"target_not_frontmost";return nil
+        }
+        let context=InputFocusAccess.attributes(element,[kAXSubroleAttribute,kAXRoleAttribute]+(recovering ? []:["AXMarkedTextRange"]))
+        guard context[0] as? String != "AXSecureTextField" else{unavailableReason="secure_field";return nil}
+        guard let role=context[1] as? String else{unavailableReason="role_unreadable";return nil}
         guard OnsetEditableRole.supports(role) else{unavailableReason="not_supported_text_field";return nil}
         // Respect an editor's explicit active composition; unsupported attributes
         // remain unknown, as in the original compatibility probe.
-        var markedValue: CFTypeRef?
-        if !recovering,AXUIElementCopyAttributeValue(element,"AXMarkedTextRange" as CFString,&markedValue) == .success,
-           let markedValue,CFGetTypeID(markedValue)==AXValueGetTypeID() {
+        if !recovering,let markedValue=context[2],CFGetTypeID(markedValue)==AXValueGetTypeID() {
             var marked=CFRange()
             if AXValueGetValue(markedValue as! AXValue,.cfRange,&marked),marked.location>=0,marked.length>0 {
                 unavailableReason="active_composition";return nil
             }
         }
-        guard let text=attr(element,kAXValueAttribute) as? String else{unavailableReason="text_unreadable";return nil}
-        guard let raw=attr(element,kAXSelectedTextRangeAttribute),CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
+        let content=InputFocusAccess.attributes(element,[kAXValueAttribute,kAXSelectedTextRangeAttribute])
+        guard let text=content[0] as? String else{unavailableReason="text_unreadable";return nil}
+        guard let raw=content[1],CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
         var range=CFRange();guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.location>=0,range.length>=0,range.location+range.length<=text.utf16.count else{unavailableReason="selection_invalid";return nil}
         guard let after=focusedElement(ax,pid:target.processIdentifier),CFEqual(element,after) else{unavailableReason="focus_changed_during_snapshot";return nil}
         if InputIncidentTrace.shared.enabled {

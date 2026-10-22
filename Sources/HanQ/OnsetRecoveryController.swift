@@ -73,7 +73,7 @@ final class OnsetRecoveryController: NSObject {
     func tick() {
         guard active else{return}
         let conditions=testConditions?()
-        probeRunning = conditions?.probe ?? NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "taek.in.hanq.onset-recovery-probe" }
+        probeRunning = conditions?.probe ?? !NSRunningApplication.runningApplications(withBundleIdentifier:"taek.in.hanq.onset-recovery-probe").isEmpty
         if probeRunning {
             if let engine, engine.enabled {
                 if engine.recovering { engine.emergencyStop("probe_running") }

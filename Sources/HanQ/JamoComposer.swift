@@ -78,6 +78,10 @@ enum JamoComposer {
     private static let finals = Array(" ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ")
     private static let vowelPairs: [String: Character] = ["ㅗㅏ":"ㅘ", "ㅗㅐ":"ㅙ", "ㅗㅣ":"ㅚ", "ㅜㅓ":"ㅝ", "ㅜㅔ":"ㅞ", "ㅜㅣ":"ㅟ", "ㅡㅣ":"ㅢ"]
     private static let finalPairs: [String: Character] = ["ㄱㅅ":"ㄳ", "ㄴㅈ":"ㄵ", "ㄴㅎ":"ㄶ", "ㄹㄱ":"ㄺ", "ㄹㅁ":"ㄻ", "ㄹㅂ":"ㄼ", "ㄹㅅ":"ㄽ", "ㄹㅌ":"ㄾ", "ㄹㅍ":"ㄿ", "ㄹㅎ":"ㅀ", "ㅂㅅ":"ㅄ"]
+    private static let initialIndexes=Dictionary(uniqueKeysWithValues:initials.enumerated().map{($0.element,$0.offset)})
+    private static let vowelIndexes=Dictionary(uniqueKeysWithValues:vowels.enumerated().map{($0.element,$0.offset)})
+    private static let finalIndexes=Dictionary(uniqueKeysWithValues:finals.enumerated().map{($0.element,$0.offset)})
+    private static let splitFinals=Dictionary(uniqueKeysWithValues:finalPairs.map{($0.value,$0.key)})
 
     static func compose(_ text: String, vowelCombinations:[String:Character]?=nil,combineStandalone:Bool=false) -> String {
         let vowelPairs=vowelCombinations ?? Self.vowelPairs
@@ -87,18 +91,18 @@ enum JamoComposer {
         for scalar in text.unicodeScalars {
             if (0x1100...0x11FF).contains(scalar.value) { run.unicodeScalars.append(scalar) }
             else {
-                normalized += run.precomposedStringWithCanonicalMapping
+                if !run.isEmpty {normalized += run.precomposedStringWithCanonicalMapping}
                 run = ""
                 normalized.unicodeScalars.append(scalar)
             }
         }
-        normalized += run.precomposedStringWithCanonicalMapping
+        if !run.isEmpty {normalized += run.precomposedStringWithCanonicalMapping}
         var chars = Array(normalized)
         var result = ""
         var i = 0
-        func vowel(at index: Int) -> Bool { index < chars.count && vowels.contains(chars[index]) }
+        func vowel(at index: Int) -> Bool { index < chars.count && vowelIndexes[chars[index]] != nil }
         while i < chars.count {
-            guard let initial = initials.firstIndex(of: chars[i]), vowel(at: i + 1) else {
+            guard let initial = initialIndexes[chars[i]], vowel(at: i + 1) else {
                 // A detached initial leaves an IME run starting with a medial.
                 // Native typing still combines its standalone vowel keys.
                 if combineStandalone,i+1<chars.count,
@@ -114,20 +118,20 @@ enum JamoComposer {
             }
             // A precombined final cluster before a vowel splits across syllables.
             if next < chars.count, vowel(at: next + 1),
-               let pair = finalPairs.first(where: { $0.value == chars[next] })?.key {
+               let pair = splitFinals[chars[next]] {
                 chars.replaceSubrange(next...next, with: Array(pair))
             }
             var final = 0
-            if next < chars.count, let candidate = finals.firstIndex(of: chars[next]), candidate > 0,
+            if next < chars.count, let candidate = finalIndexes[chars[next]], candidate > 0,
                !vowel(at: next + 1) {
                 final = candidate; next += 1
                 if next < chars.count, !vowel(at: next + 1),
                    let combined = finalPairs[String([finals[final], chars[next]])],
-                   let combinedIndex = finals.firstIndex(of: combined) {
+                   let combinedIndex = finalIndexes[combined] {
                     final = combinedIndex; next += 1
                 }
             }
-            let code = 0xAC00 + (initial * 21 + vowels.firstIndex(of: v)!) * 28 + final
+            let code = 0xAC00 + (initial * 21 + vowelIndexes[v]!) * 28 + final
             result.unicodeScalars.append(Unicode.Scalar(code)!)
             i = next
         }

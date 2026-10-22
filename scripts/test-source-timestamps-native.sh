@@ -15,10 +15,13 @@ mkdir -p "$app/Contents/MacOS"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Fixture</string><key>CFBundleIdentifier</key><string>taek.in.hanq.late-layout-fixture</string><key>CFBundleName</key><string>SourceTimestampFixture</string><key>NSPrincipalClass</key><string>HanQTimestampApplication</string></dict></plist>
 PLIST
-swiftc -module-cache-path .build/hanq/module-cache Tests/SourceTimestamps/Native/fixture.swift -o "$app/Contents/MacOS/Fixture"
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/KeyboardStateMirror.swift Tests/OnsetRecovery/LateApp/PostedKeys.swift Tests/SourceTimestamps/Native/sender.swift -o "$ipc/sender"
+swiftc -module-cache-path .build/hanq/module-cache Tests/Support/OwnedInputSourceGuard.swift Tests/SourceTimestamps/Native/fixture.swift -o "$app/Contents/MacOS/Fixture"
+swiftc -module-cache-path .build/hanq/module-cache Tests/Support/OwnedInputFocus.swift Sources/HanQ/KeyboardStateMirror.swift Tests/OnsetRecovery/LateApp/PostedKeys.swift Tests/SourceTimestamps/Native/sender.swift -o "$ipc/sender"
 swiftc -module-cache-path .build/hanq/module-cache Tests/SourceTimestamps/Native/marker.swift -o "$ipc/marker"
+swiftc -module-cache-path .build/hanq/module-cache Tests/Support/OwnedInputFocus.swift Tests/LongDocumentInput/ProductIdentity.swift Tests/Support/OwnedInputSourceControl.swift -o "$ipc/source-control"
 codesign --force --sign - "$app"
+"$ipc/source-control" "$ipc" taek.in.hanq.late-layout-fixture "$app/Contents/MacOS/Fixture" > "$output/source-control.log" 2>&1 &
+python3 Tests/LongDocumentInput/fixture_cache.py wait-ready "$ipc"
 (cd "$ipc"; exec ./sender "$ipc") > "$output/sender.log" 2>&1 &
 sender_pid=$!
 trap 'touch "$ipc/quit"; wait "$sender_pid" 2>/dev/null || true' EXIT

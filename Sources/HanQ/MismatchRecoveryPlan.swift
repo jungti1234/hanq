@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 // Track observed printable keys across digits/punctuation, including delayed AX batches.
 struct MismatchRecoveryPlan {
@@ -22,15 +23,7 @@ struct MismatchRecoveryPlan {
     // Comparison only: browser editors exchange U+0020/U+00A0 while typing.
     // Both occupy one UTF-16 unit; never collapse, trim, or rewrite document text.
     static func sameEditorText(_ actual:String,_ expected:String)->Bool {
-        let a=Array(actual.utf16),b=Array(expected.utf16)
-        guard a.count==b.count else{return false}
-        for i in a.indices {
-            if a[i]==b[i]{continue}
-            if a[i]==32 && b[i]==160{continue}
-            if a[i]==160 && b[i]==32{continue}
-            return false
-        }
-        return true
+        InputFocusAccess.sameEditorUTF16(actual,expected)
     }
     // Some editors expose one terminal LF after the caret in an empty final
     // paragraph, then omit that AX-only suffix once typing starts. Accept only
@@ -236,7 +229,7 @@ extension MismatchRecoveryPlan {
               !codes.isEmpty,codes.count<=64,selection.length==0,caret>=0,length>0,
               selection.location<=ns.length else{return nil}
         let range=NSRange(location:caret,length:length)
-        guard ns.replacingCharacters(in:range,with:"")==before else{return nil}
+        guard InputFocusAccess.sameText(ns.replacingCharacters(in:range,with:""),before) else{return nil}
         return ns.substring(with:range)
     }
     private func detachedTwoSet(_ keys:[(UInt16,Bool)])->String? {
@@ -248,7 +241,12 @@ extension MismatchRecoveryPlan {
         return result
     }
     private func interruptedTwoSet(_ keys:[(UInt16,Bool)],insertion:String)->Bool {
-        guard keys.count>1 else{return false}
+        guard keys.count>1,let layout=MismatchKeyboardLayout.load(sourceID),
+              let detached=detachedTwoSet(keys),
+              twoSetComponents(detached,layout:layout).utf16.count==twoSetComponents(insertion,layout:layout).utf16.count else{return false}
+        // A complete interrupted rendering cannot lose elementary components.
+        // Check count only here: canonical Roman aliases (for example K/K)
+        // may map differently before NFKD. All original exact proofs remain.
         for split in 1..<keys.count {
             let prefixKeys=Array(keys.prefix(split))
             guard let prefix=MismatchKeyboardLayout.render(keys:prefixKeys,sourceID:sourceID),
@@ -268,26 +266,33 @@ extension MismatchRecoveryPlan {
     // normal AX snapshot can lag the observed keys; it cannot account for all
     // keys if the components differ. Reject that impossible proof before the
     // partition search, without accepting any new replacement.
-    private func twoSetComponents(_ text:String,layout:KoreanKeyboardLayout)->String {
-        let initials=Array("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
-        let vowels=Array("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ")
-        let finals=Array("ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ")
-        let expanded:[Character:String]=["ㄲ":"ㄱㄱ","ㄸ":"ㄷㄷ","ㅃ":"ㅂㅂ","ㅆ":"ㅅㅅ","ㅉ":"ㅈㅈ",
+    private static let componentInitials=Array("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
+    private static let componentVowels=Array("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ")
+    private static let componentFinals=Array("ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ")
+    private static let basicComponents=Set(componentInitials+componentVowels)
+    private static let expandedComponents:[Character:String]=["ㄲ":"ㄱㄱ","ㄸ":"ㄷㄷ","ㅃ":"ㅂㅂ","ㅆ":"ㅅㅅ","ㅉ":"ㅈㅈ",
             "ㅘ":"ㅗㅏ","ㅙ":"ㅗㅐ","ㅚ":"ㅗㅣ","ㅝ":"ㅜㅓ","ㅞ":"ㅜㅔ","ㅟ":"ㅜㅣ","ㅢ":"ㅡㅣ",
             "ㄳ":"ㄱㅅ","ㄵ":"ㄴㅈ","ㄶ":"ㄴㅎ","ㄺ":"ㄹㄱ","ㄻ":"ㄹㅁ","ㄼ":"ㄹㅂ","ㄽ":"ㄹㅅ","ㄾ":"ㄹㅌ","ㄿ":"ㄹㅍ","ㅀ":"ㄹㅎ","ㅄ":"ㅂㅅ"]
+    private func twoSetComponents(_ text:String,layout:KoreanKeyboardLayout)->String {
         var result=""
         for char in text {
             // Literal Roman segments represent the same observed physical key.
             let value=layout.keys[char] ?? char
+            if Self.basicComponents.contains(value) {
+                result.append(Self.expandedComponents[value] ?? String(value));continue
+            }
+            if value.unicodeScalars.count==1,let scalar=value.unicodeScalars.first,(32...126).contains(scalar.value) {
+                result.append(value);continue
+            }
             for scalar in String(value).decomposedStringWithCompatibilityMapping.unicodeScalars {
                 let jamo:Character
                 switch scalar.value {
-                case 0x1100...0x1112:jamo=initials[Int(scalar.value-0x1100)]
-                case 0x1161...0x1175:jamo=vowels[Int(scalar.value-0x1161)]
-                case 0x11a8...0x11c2:jamo=finals[Int(scalar.value-0x11a8)]
+                case 0x1100...0x1112:jamo=Self.componentInitials[Int(scalar.value-0x1100)]
+                case 0x1161...0x1175:jamo=Self.componentVowels[Int(scalar.value-0x1161)]
+                case 0x11a8...0x11c2:jamo=Self.componentFinals[Int(scalar.value-0x11a8)]
                 default:jamo=Character(String(scalar))
                 }
-                result.append(expanded[jamo] ?? String(jamo))
+                result.append(Self.expandedComponents[jamo] ?? String(jamo))
             }
         }
         return result
@@ -328,7 +333,12 @@ extension MismatchRecoveryPlan {
         guard let insertion=twoSetInsertion(text:text,selection:selection) else{return false}
         for count in (1...codes.count).reversed() {
             let prefix=Array(codes.prefix(count))
-            if MismatchKeyboardLayout.render(keys:prefix,sourceID:sourceID)==insertion || detachedTwoSet(prefix)==insertion || interruptedTwoSet(prefix,insertion:insertion) || fragmentedTwoSet(prefix,insertion:insertion){return true}
+            if MismatchKeyboardLayout.render(keys:prefix,sourceID:sourceID)==insertion || detachedTwoSet(prefix)==insertion{return true}
+        }
+        // The same existential proofs, with all common normal prefixes first.
+        for count in (1...codes.count).reversed() {
+            let prefix=Array(codes.prefix(count))
+            if interruptedTwoSet(prefix,insertion:insertion) || fragmentedTwoSet(prefix,insertion:insertion){return true}
         }
         return false
     }

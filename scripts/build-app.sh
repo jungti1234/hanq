@@ -30,7 +30,12 @@ if [[ "$signing_identity" != - && ! "$signing_identity" =~ ^[0-9a-fA-F]{40}$ ]];
   echo '서명 인증서는 40자리 SHA-1 지문을 지정하세요.' >&2
   exit 1
 fi
-if $development; then compiler+=(-D HANQ_DEVELOPMENT); fi
+if $development; then
+  compiler+=(-D HANQ_DEVELOPMENT)
+else
+  # Keep runtime safety checks while optimizing the production input paths.
+  compiler+=(-O -whole-module-optimization)
+fi
 macos_minimum=13.0
 build_arch=arm64
 swift_target="${build_arch}-apple-macosx${macos_minimum}"

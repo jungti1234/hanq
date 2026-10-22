@@ -37,13 +37,13 @@ final class MismatchRecoveryEngine:NSObject {
             // actual focus, body and selection before detection/edit/replay.
             let raw=event.getIntegerValueField(.eventTargetUnixProcessID)
             if let pid=pid_t(exactly:raw),pid>0 {
-                front=NSRunningApplication(processIdentifier:pid)
+                front=InputFocusAccess.application(pid:pid,reusing:target)
             }else{
                 // Some producers omit the recipient. Preserve actual-focus
                 // discovery there so the first key in a new app is observable.
-                front=focusAccess.currentApplication()
+                front=focusAccess.currentApplication(reusing:target)
             }
-        }else{front=focusAccess.currentApplication()}
+        }else{front=focusAccess.currentApplication(reusing:target)}
         let next=Self.supports(front) ? front:nil
         switchTarget(to:next)
     }
@@ -673,7 +673,7 @@ final class MismatchRecoveryEngine:NSObject {
             plan=known.plan;planElement=snap.element;planStart=known.lastKeyAt
             NSLog("입력 불일치 전달 이력 인계")
         }
-        if lastText != snap.text{log("text",["text":snap.text,"source":InputSourceAccess.currentID(),"selection":[snap.selection.location,snap.selection.length]]);lastText=snap.text}
+        if !InputFocusAccess.sameText(lastText,snap.text){log("text",["text":snap.text,"source":InputSourceAccess.currentID(),"selection":[snap.selection.location,snap.selection.length]]);lastText=snap.text}
         guard let candidate=plan else{incidentTrace.decision(.sample,.noCandidate);return}
         if ProcessInfo.processInfo.systemUptime-planStart>5{incidentTrace.decision(.sample,.candidateExpired);log("candidate_cancelled",["reason":"timeout"]);plan=nil;return}
         let verified=candidate.matches(text:snap.text,selection:snap.selection) ? candidate :

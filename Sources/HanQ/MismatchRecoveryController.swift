@@ -21,7 +21,7 @@ final class MismatchRecoveryController: NSObject {
     }
     func tick(){
         guard active else{return}
-        let probe=NSWorkspace.shared.runningApplications.contains{$0.bundleIdentifier=="taek.in.hanq.auto-recovery-probe"}
+        let probe = !NSRunningApplication.runningApplications(withBundleIdentifier:"taek.in.hanq.auto-recovery-probe").isEmpty
         guard canRun(),!probe,permissionReady(),
               !ProcessInfo.processInfo.arguments.contains("--disable-mismatch-recovery") else {
             if engine.enabled{engine.suspend("input_unavailable")}

@@ -162,16 +162,27 @@ struct InputIncidentAXEvidence:Codable,Equatable {
         return CFStringFindCharacterFromSet(text,nonNewline,range,[],nil) ? 3:2
     }
     static func match(_ value:String,_ attributes:[String?])->Int {
-        let available=attributes.compactMap{$0};guard !available.isEmpty else{return 1}
-        let meaningful=available.filter{!$0.trimmingCharacters(in:whitespace).isEmpty}
-        guard !meaningful.isEmpty else{return 2}
-        let trimmed=value.trimmingCharacters(in:whitespace)
-        return meaningful.contains{same(trimmed,$0.trimmingCharacters(in:whitespace))} ? 4:3
+        var trimmed:String?
+        return match(value,attributes,trimmed:&trimmed)
+    }
+    private static func match(_ value:String,_ attributes:[String?],trimmed:inout String?)->Int {
+        var available=false,meaningful=false
+        for attribute in attributes {
+            guard let attribute else{continue};available=true
+            let candidate=attribute.trimmingCharacters(in:whitespace)
+            guard !candidate.isEmpty else{continue};meaningful=true
+            if trimmed==nil{trimmed=value.trimmingCharacters(in:whitespace)}
+            if same(trimmed!,candidate){return 4}
+        }
+        return meaningful ? 3:(available ? 2:1)
     }
     static func attributes(_ list:[AnyObject],value:String,verified:String,route:Int)->(InputIncidentAXEvidence,AXUIElement?) {
         var result=InputIncidentAXEvidence();result.route=route;result.representation=same(value,verified) ? 1:2
-        result.placeholder=list.count==9 ? match(value,[list[4] as? String]):1
-        result.label=list.count==9 ? match(value,[list[5] as? String,list[6] as? String]):1
+        if list.count==9 {
+            var trimmed:String?
+            result.placeholder=match(value,[list[4] as? String],trimmed:&trimmed)
+            result.label=match(value,[list[5] as? String,list[6] as? String],trimmed:&trimmed)
+        }else{result.placeholder=1;result.label=1}
         result.characterCount=1
         if list.count==9,let number=list[7] as? NSNumber,CFGetTypeID(number) != CFBooleanGetTypeID(),number.intValue>=0,number.doubleValue==Double(number.intValue) {
             result.characterCount=number.intValue==value.utf16.count ? 2:3
