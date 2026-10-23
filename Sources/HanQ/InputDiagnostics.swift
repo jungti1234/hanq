@@ -1160,23 +1160,23 @@ final class InputIncidentTrace {
     }
     // Freeze the export's event boundary on the decision queue. New incidents
     // do not extend this wait; already requested post-captures finish first.
-    func prepareExport(to directory:URL,completion:@escaping(Result<Void,Error>)->Void){
+    func prepareExport(to directory:URL,reviewMetadata:Bool=false,completion:@escaping(Result<Void,Error>)->Void){
         decisionQueue.async{[self] in
             let incidents=Set(windows.keys)
-            finishExport(incidents:incidents,to:directory,deadline:DispatchTime.now()+15,completion:completion)
+            finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,deadline:DispatchTime.now()+15,completion:completion)
         }
     }
-    private func finishExport(incidents:Set<Int>,to directory:URL,deadline:DispatchTime,completion:@escaping(Result<Void,Error>)->Void){
+    private func finishExport(incidents:Set<Int>,to directory:URL,reviewMetadata:Bool,deadline:DispatchTime,completion:@escaping(Result<Void,Error>)->Void){
         let pending=windows.values.filter{incidents.contains($0.before.incident) && !$0.submitted}
         if !pending.isEmpty {
             guard DispatchTime.now()<deadline else{completion(.failure(DiagnosticLogExport.Failure.busy));return}
-            decisionQueue.asyncAfter(deadline:.now()+0.05){[self] in finishExport(incidents:incidents,to:directory,deadline:deadline,completion:completion)}
+            decisionQueue.asyncAfter(deadline:.now()+0.05){[self] in finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,deadline:deadline,completion:completion)}
             return
         }
         queue.async{[self] in
             do {
                 guard let storage else{throw DiagnosticLogExport.Failure.noLogs}
-                try storage.copyExportSnapshot(to:directory)
+                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata)
                 completion(.success(()))
             }catch{completion(.failure(error))}
         }
@@ -1221,6 +1221,14 @@ enum DiagnosticLogExport {
         }
     }
     private static let worker=DispatchQueue(label:"hanq.diagnostics.export",qos:.utility)
+    static func compress(_ directory:URL,to archive:URL)throws {
+        let process=Process()
+        process.executableURL=URL(fileURLWithPath:"/usr/bin/ditto")
+        process.arguments=["-c","-k","--keepParent","--norsrc",directory.path,archive.path]
+        process.standardOutput=FileHandle.nullDevice;process.standardError=FileHandle.nullDevice
+        try process.run();process.waitUntilExit()
+        guard process.terminationStatus==0 else{throw Failure.compression}
+    }
     static func export(_ trace:InputIncidentTrace,to desktop:URL,date:Date=Date(),completion:@escaping(Result<URL,Error>)->Void){
         worker.async {
             let fm=FileManager.default
@@ -1234,12 +1242,7 @@ enum DiagnosticLogExport {
                 do{
                     try result.get()
                     let archive=temporary.appendingPathComponent("diagnostics.zip")
-                    let process=Process()
-                    process.executableURL=URL(fileURLWithPath:"/usr/bin/ditto")
-                    process.arguments=["-c","-k","--keepParent","--norsrc",logs.path,archive.path]
-                    process.standardOutput=FileHandle.nullDevice;process.standardError=FileHandle.nullDevice
-                    try process.run();process.waitUntilExit()
-                    guard process.terminationStatus==0 else{throw Failure.compression}
+                    try compress(logs,to:archive)
                     let formatter=DateFormatter();formatter.locale=Locale(identifier:"en_US_POSIX")
                     formatter.calendar=Calendar(identifier:.gregorian);formatter.dateFormat="yyyyMMdd-HHmmss"
                     let name="HanQ-Diagnostics-"+formatter.string(from:date)
@@ -1775,7 +1778,7 @@ final class DiagnosticLogStore {
         var info=stat()
         return fstatat(fd,file.name,&info,AT_SYMLINK_NOFOLLOW)==0 && matches(file.identity,info)
     }
-    func copyExportSnapshot(to destination:URL)throws {
+    func copyExportSnapshot(to destination:URL,reviewMetadata:Bool=false)throws {
         prepareOwnership()
         guard ownershipHealthy,let dir=openDirectory() else{throw DiagnosticLogExport.Failure.unavailable}
         defer{close(dir)}
@@ -1798,6 +1801,14 @@ final class DiagnosticLogStore {
         if let data=try? JSONEncoder().encode(StatusDocument(status:status)) {
             let path=destination.appendingPathComponent("storage-status.json")
             try data.write(to:path,options:.withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+        }
+        // Local review-only ordering metadata. These are source file creation
+        // times (not claimed incident times); never exported as an ownership index.
+        if reviewMetadata {
+            let dates=Dictionary(uniqueKeysWithValues:captures.map{($0.name,Double($0.identity.st_birthtimespec.tv_sec)+Double($0.identity.st_birthtimespec.tv_nsec)/1_000_000_000)})
+            let path=destination.appendingPathComponent("review-dates.json")
+            try JSONEncoder().encode(dates).write(to:path,options:.withoutOverwriting)
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
         }
     }

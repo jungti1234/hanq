@@ -197,9 +197,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let loginItem = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     let inputDiagnosticsItem = NSMenuItem(title:"진단 기록 활성화",action:#selector(toggleInputDiagnostics),keyEquivalent:"")
     let inputIncidentItem = NSMenuItem(title:"방금 발생한 문제 기록",action:#selector(markInputIncident),keyEquivalent:"")
-    let inputDiagnosticExportItem = NSMenuItem(title:"진단 로그 내보내기",action:#selector(exportInputDiagnostics),keyEquivalent:"")
+    let inputDiagnosticExportItem = NSMenuItem(title:"진단 기록 내보내기…",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
-    private var exportingInputDiagnostics=false
+    private var diagnosticReview:DiagnosticReviewController?
     private var hasDiagnosticLogs=false
     let menuStatus = NSMenuItem(title: "준비 중", action: nil, keyEquivalent: "")
 
@@ -267,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         inputIncidentItem.attributedTitle=NSAttributedString(string:inputIncidentItem.title,attributes:[.font:NSFont.boldSystemFont(ofSize:NSFont.systemFontSize)])
         inputIncidentItem.toolTip="최근 입력 처리 상태를 로컬에 저장합니다. 입력 본문·키 값·클립보드는 저장하지 않습니다."
         inputDiagnosticExportItem.target=self
-        inputDiagnosticExportItem.toolTip="보관 중인 진단 로그를 ZIP으로 압축해 바탕화면에 저장합니다."
+        inputDiagnosticExportItem.toolTip="보관 중인 최근 기록을 선택하고 파일 미리보기를 확인한 뒤 ZIP 파일로 저장합니다."
         diagnostics.addItem(inputDiagnosticsItem)
         diagnostics.addItem(.separator())
         diagnostics.addItem(inputIncidentItem)
@@ -804,28 +804,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     @objc func exportInputDiagnostics(){
-        guard !exportingInputDiagnostics,
-              let desktop=FileManager.default.urls(for:.desktopDirectory,in:.userDomainMask).first else{return}
-        exportingInputDiagnostics=true;refreshStatus()
-        DiagnosticLogExport.export(InputIncidentTrace.shared,to:desktop){[weak self] result in
-            DispatchQueue.main.async{
-                self?.exportingInputDiagnostics=false;self?.refreshStatus()
-                switch result {
-                case .success(let archive):NSWorkspace.shared.activateFileViewerSelecting([archive])
-                case .failure(let error):
-                    let alert=NSAlert();alert.messageText="진단 로그를 내보내지 못했어요"
-                    alert.informativeText=error.localizedDescription;alert.runModal()
-                }
-            }
+        if let diagnosticReview {
+            NSApp.activate(ignoringOtherApps:true)
+            if diagnosticReview.window?.isMiniaturized == true {diagnosticReview.window?.deminiaturize(nil)}
+            diagnosticReview.window?.makeKeyAndOrderFront(nil);return
         }
+        let review=DiagnosticReviewController(environment:diagnosticReviewEnvironment())
+        diagnosticReview=review
+        review.onClose={ [weak self] in self?.diagnosticReview=nil }
+        review.onFeedback={ [weak self] in self?.openFeedback() }
+        review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
+        review.load(from:InputIncidentTrace.shared)
+    }
+    private func diagnosticReviewEnvironment()->DiagnosticReviewEnvironment {
+        let defaults=UserDefaults.standard,info=Bundle.main.infoDictionary ?? [:]
+        let os=ProcessInfo.processInfo.operatingSystemVersion
+        let source=InputSourceAccess.currentID()
+        let layouts:[DiagnosticReviewEnvironment.KeyboardLayout]=[.twoSet,.threeSet,.threeSet390,.gongjinRoman,.hancomRoman]
+        let layout=KoreanKeyboardLayout.supportedIDs.firstIndex(of:source).map{layouts[$0]} ?? .unknownOrOther
+        let login:DiagnosticReviewEnvironment.LoginItemState
+        switch SMAppService.mainApp.status {
+        case .enabled:login = .enabled
+        case .requiresApproval:login = .requiresApproval
+        case .notRegistered:login = .notRegistered
+        default:login = .unknown
+        }
+        return DiagnosticReviewEnvironment(
+            appVersion:info["HanQReleaseVersion"] as? String ?? "unknown",
+            build:info["CFBundleVersion"] as? String ?? "unknown",
+            macOSVersion:"\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
+            modelIdentifier:FeedbackForm.modelIdentifier(),keyboardLayout:layout,
+            koreanKeyEnabled:defaults.bool(forKey:"koreanKeyEnabled"),
+            hanjaKeyEnabled:defaults.bool(forKey:"hanjaKeyEnabled"),hudEnabled:defaults.bool(forKey:"hudEnabled"),
+            capsLockSwitchEnabled:try? RomanSwitchController.isEnabled(),loginItemState:login,
+            diagnosticsEnabled:InputIncidentTrace.shared.enabled,inputMonitoringEnabled:enabled,
+            cachedAccessibilityPermission:permissionGranted,updateRestricted:updateRestricted)
     }
     @objc func markInputIncident(){InputIncidentTrace.shared.mark();refreshDiagnosticLogAvailability()}
     @objc func copyMismatchInput(){mismatchRecovery.copyRetained();refreshStatus()}
     func refreshStatus() {
         inputDiagnosticsItem.state=changingInputDiagnostics ? .mixed:(InputIncidentTrace.shared.enabled ? .on:.off)
-        inputDiagnosticsItem.isEnabled = !changingInputDiagnostics && !exportingInputDiagnostics
+        inputDiagnosticsItem.isEnabled = !changingInputDiagnostics
         inputIncidentItem.isEnabled=InputIncidentTrace.shared.enabled
-        inputDiagnosticExportItem.isEnabled=hasDiagnosticLogs && !exportingInputDiagnostics && !changingInputDiagnostics
+        inputDiagnosticExportItem.isEnabled=hasDiagnosticLogs && !changingInputDiagnostics
         retainedMismatchItem.isHidden=mismatchRecovery.engine.retained.isEmpty
         retainedMismatchItem.isEnabled = !mismatchRecovery.busy
 

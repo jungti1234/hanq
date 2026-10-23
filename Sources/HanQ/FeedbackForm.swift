@@ -29,7 +29,7 @@ enum FeedbackForm {
         return components?.url
     }
 
-    private static func modelIdentifier() -> String? {
+    static func modelIdentifier() -> String? {
         // Product model only; never read the serial number or hardware UUID.
         var size = 0
         guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 0, size < 1024 else { return nil }
