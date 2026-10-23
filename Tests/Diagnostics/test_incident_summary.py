@@ -148,6 +148,10 @@ class IncidentSummaryTests(unittest.TestCase):
         result=summary.summarize_storage_document(dict(schema=1,build='244',status=current))
         self.assertEqual(result['storage_after_write']['last_failure_stage_name'],'publication')
         self.assertEqual(result['storage_after_write']['evictedFiles'],2)
+        manual=dict(current,maximumManualBytes=16777216,manualFiles=2,manualBytes=100)
+        self.assertEqual(summary.storage_status(manual)['manualBytes'],100)
+        for changed in [dict(manual,manualBytes=16777217),dict(manual,manualFiles=None),dict(current,maximumManualBytes=16777216)]:
+            with self.assertRaises(ValueError):summary.storage_status(changed)
         for key,n in [('text','PRIVATE'),('attempts',True),('automaticBytes',67108865),('saved',4),('lastResult',0),('lastFailureStage',0),('lastAutomatic',1),('lastWriteMicros',60000001),('statusWriteFailures',4),('lastErrno',2147483648)]:
             with self.assertRaises(ValueError):summary.summarize_storage_document(dict(schema=1,build='244',status=dict(current,**{key:n})))
         for doc in [dict(schema=1,build='private text',status=current),dict(schema=True,build='244',status=current),dict(schema=1,build='244',status=current,text='PRIVATE')]:

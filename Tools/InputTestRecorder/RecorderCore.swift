@@ -172,8 +172,17 @@ struct RecorderObservationDelivery: Codable {
 struct RecorderStorageStatus:Codable {
     let maximumAutomaticFiles,maximumAutomaticBytes,automaticFiles,automaticBytes,attempts,saved,limited,retired,unavailable,encodingFailures,evictedGroups,evictedFiles,evictedBytes,lastIncident,lastPhase,lastResult,lastFailureStage,lastErrno,lastWriteMicros,maxWriteMicros,writeTimingClipped,statusWriteFailures:Int
     let lastAutomatic:Bool
+    let maximumManualBytes:Int?,manualFiles:Int?,manualBytes:Int?
+    static let optionalKeys=Set(["maximumManualBytes","manualFiles","manualBytes"])
+    static func accepts(_ object:[String:Any])->Bool {
+        let names=Set(object.keys)
+        return names==keys || (names==keys.union(optionalKeys) && optionalKeys.allSatisfy{!(object[$0] is NSNull)})
+    }
     static let keys=Set(["maximumAutomaticFiles", "maximumAutomaticBytes", "automaticFiles", "automaticBytes", "attempts", "saved", "limited", "retired", "unavailable", "encodingFailures", "evictedGroups", "evictedFiles", "evictedBytes", "lastIncident", "lastPhase", "lastAutomatic", "lastResult", "lastFailureStage", "lastErrno", "lastWriteMicros", "maxWriteMicros", "writeTimingClipped", "statusWriteFailures"])
     var valid:Bool {
+        if maximumManualBytes != nil || manualFiles != nil || manualBytes != nil {
+            guard let limit=maximumManualBytes,let files=manualFiles,let bytes=manualBytes,limit>0,files>=0,bytes>=0,bytes<=limit else{return false}
+        }
         let values=[maximumAutomaticFiles,maximumAutomaticBytes,automaticFiles,automaticBytes,attempts,saved,limited,retired,unavailable,encodingFailures,evictedGroups,evictedFiles,evictedBytes,lastIncident,lastPhase,lastResult,lastFailureStage,lastErrno,lastWriteMicros,maxWriteMicros,writeTimingClipped,statusWriteFailures]
         guard values.allSatisfy({$0>=0}),maximumAutomaticFiles>0,maximumAutomaticBytes>0,
               automaticFiles<=maximumAutomaticFiles,automaticBytes<=maximumAutomaticBytes,
@@ -196,7 +205,7 @@ struct RecorderStorageDocument:Codable {
     static func decode(_ data:Data)throws->RecorderStorageDocument {
         guard data.count<=16*1024,let object=try JSONSerialization.jsonObject(with:data) as? [String:Any],
               Set(object.keys)==Set(["schema","build","status"]),
-              let status=object["status"] as? [String:Any],Set(status.keys)==RecorderStorageStatus.keys else{throw RecorderError.invalidTrace}
+              let status=object["status"] as? [String:Any],RecorderStorageStatus.accepts(status) else{throw RecorderError.invalidTrace}
         let value=try JSONDecoder().decode(Self.self,from:data)
         guard value.schema==1,value.build.range(of:"^(?:[0-9]{1,9}|test)$",options:.regularExpression) != nil,value.status.valid else{throw RecorderError.invalidTrace}
         return value
@@ -313,7 +322,7 @@ struct RecorderTrace: Codable {
             guard let timing=object["captureTiming"] as? [String:Any],Set(timing.keys)==Set(["queueMicros","lockWaitMicros","contended","clipped"]) else{throw RecorderError.invalidTrace}
         }
         if object.keys.contains("storageBeforeWrite") {
-            guard let storage=object["storageBeforeWrite"] as? [String:Any],Set(storage.keys)==RecorderStorageStatus.keys else{throw RecorderError.invalidTrace}
+            guard let storage=object["storageBeforeWrite"] as? [String:Any],RecorderStorageStatus.accepts(storage) else{throw RecorderError.invalidTrace}
         }
         let keys = Set(["sequence", "milliseconds", "lane", "kind", "event", "edge", "category", "inputOrigin", "consumed", "durationMicros", "count", "selected", "field"])
         guard rows.allSatisfy({ row in

@@ -50,3 +50,9 @@ assert r['changed_shapes'][0]['caret_preceding_class_name']=='hangul_syllable'
 assert [h['stage'] for h in r['hud']]==['requested','ordered','first_appkit_draw']
 print('PASS switch timeline end-to-end summary; selection/drawing are not IME receipt')
 PY
+
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Export/main.swift -o "$stage/export-tests"
+hanq_test_run "$stage/export-tests"
+
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/Reboot/main.swift -o "$stage/reboot-tests"
+hanq_test_run "$stage/reboot-tests"

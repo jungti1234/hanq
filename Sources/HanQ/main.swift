@@ -195,10 +195,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let retainedMismatchItem = NSMenuItem(title:"복구 중 보관된 입력 복사", action:#selector(copyMismatchInput), keyEquivalent:"")
     let hudItem = NSMenuItem(title: "입력 소스 변경 시 화면에 표시", action: #selector(toggleHUD), keyEquivalent: "")
     let loginItem = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-    let inputDiagnosticsItem = NSMenuItem(title:"입력 이상 진단",action:#selector(toggleInputDiagnostics),keyEquivalent:"")
-    let inputIncidentItem = NSMenuItem(title:"방금 입력 누락 기록",action:#selector(markInputIncident),keyEquivalent:"")
-    let inputDiagnosticFolderItem = NSMenuItem(title:"진단 로그 폴더 열기",action:#selector(openInputDiagnosticFolder),keyEquivalent:"")
+    let inputDiagnosticsItem = NSMenuItem(title:"진단 기록 활성화",action:#selector(toggleInputDiagnostics),keyEquivalent:"")
+    let inputIncidentItem = NSMenuItem(title:"방금 발생한 문제 기록",action:#selector(markInputIncident),keyEquivalent:"")
+    let inputDiagnosticExportItem = NSMenuItem(title:"진단 로그 내보내기",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
+    private var exportingInputDiagnostics=false
+    private var hasDiagnosticLogs=false
     let menuStatus = NSMenuItem(title: "준비 중", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -254,14 +256,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.addItem(aboutItem)
         statusMenu.addItem(updater.checkItem)
         statusMenu.addItem(makeFeedbackItem())
+        statusMenu.addItem(.separator())
+        let diagnostics=NSMenu(title:"진단 및 로그")
+        diagnostics.autoenablesItems=false
+        let diagnosticsItem=NSMenuItem(title:"진단 및 로그",action:nil,keyEquivalent:"")
+        diagnosticsItem.submenu=diagnostics
         inputDiagnosticsItem.target=self
         inputDiagnosticsItem.toolTip="재실행·재부팅 후에도 설정을 유지합니다. 끄면 수집을 중단하고 기존 기록은 보존합니다."
         inputIncidentItem.target=self
+        inputIncidentItem.attributedTitle=NSAttributedString(string:inputIncidentItem.title,attributes:[.font:NSFont.boldSystemFont(ofSize:NSFont.systemFontSize)])
         inputIncidentItem.toolTip="최근 입력 처리 상태를 로컬에 저장합니다. 입력 본문·키 값·클립보드는 저장하지 않습니다."
-        inputDiagnosticFolderItem.target=self
-        statusMenu.addItem(inputDiagnosticsItem)
-        statusMenu.addItem(inputIncidentItem)
-        statusMenu.addItem(inputDiagnosticFolderItem)
+        inputDiagnosticExportItem.target=self
+        inputDiagnosticExportItem.toolTip="보관 중인 진단 로그를 ZIP으로 압축해 바탕화면에 저장합니다."
+        diagnostics.addItem(inputDiagnosticsItem)
+        diagnostics.addItem(.separator())
+        diagnostics.addItem(inputIncidentItem)
+        diagnostics.addItem(inputDiagnosticExportItem)
+        statusMenu.addItem(diagnosticsItem)
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "한Q 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         statusIcon.onRepeatedUserLaunch = { [weak self] in self?.statusReopenNotice.show() }
@@ -733,7 +744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshLaunchAtLogin()
         externalKeyboards.updateMenu()
     }
-    func menuWillOpen(_ menu: NSMenu) { statusIcon.setMenuOpen(true) }
+    func menuWillOpen(_ menu: NSMenu) { statusIcon.setMenuOpen(true);refreshDiagnosticLogAvailability() }
     func menuDidClose(_ menu: NSMenu) { statusIcon.setMenuOpen(false) }
     private func refreshLaunchAtLogin() {
         switch SMAppService.mainApp.status {
@@ -779,18 +790,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         refreshStatus()
     }
-    @objc func openInputDiagnosticFolder(){
-        guard let directory=InputIncidentTrace.shared.destinationDirectory,
-              FileManager.default.fileExists(atPath:directory.path) else{return}
-        NSWorkspace.shared.open(directory)
+    private func refreshDiagnosticLogAvailability(){
+        guard let directory=InputIncidentTrace.shared.destinationDirectory else{return}
+        DispatchQueue.global(qos:.utility).async{[weak self] in
+            let found=((try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []).contains{$0.hasPrefix("incident-") && $0.hasSuffix(".json")}
+            DispatchQueue.main.async{self?.hasDiagnosticLogs=found;self?.refreshStatus()}
+        }
     }
-    @objc func markInputIncident(){InputIncidentTrace.shared.mark()}
+    @objc func exportInputDiagnostics(){
+        guard !exportingInputDiagnostics,
+              let desktop=FileManager.default.urls(for:.desktopDirectory,in:.userDomainMask).first else{return}
+        exportingInputDiagnostics=true;refreshStatus()
+        DiagnosticLogExport.export(InputIncidentTrace.shared,to:desktop){[weak self] result in
+            DispatchQueue.main.async{
+                self?.exportingInputDiagnostics=false;self?.refreshStatus()
+                switch result {
+                case .success(let archive):NSWorkspace.shared.activateFileViewerSelecting([archive])
+                case .failure(let error):
+                    let alert=NSAlert();alert.messageText="진단 로그를 내보내지 못했어요"
+                    alert.informativeText=error.localizedDescription;alert.runModal()
+                }
+            }
+        }
+    }
+    @objc func markInputIncident(){InputIncidentTrace.shared.mark();refreshDiagnosticLogAvailability()}
     @objc func copyMismatchInput(){mismatchRecovery.copyRetained();refreshStatus()}
     func refreshStatus() {
         inputDiagnosticsItem.state=changingInputDiagnostics ? .mixed:(InputIncidentTrace.shared.enabled ? .on:.off)
-        inputDiagnosticsItem.isEnabled = !changingInputDiagnostics
+        inputDiagnosticsItem.isEnabled = !changingInputDiagnostics && !exportingInputDiagnostics
         inputIncidentItem.isEnabled=InputIncidentTrace.shared.enabled
-        inputDiagnosticFolderItem.isEnabled=InputIncidentTrace.shared.destinationDirectory.map{FileManager.default.fileExists(atPath:$0.path)} ?? false
+        inputDiagnosticExportItem.isEnabled=hasDiagnosticLogs && !exportingInputDiagnostics && !changingInputDiagnostics
         retainedMismatchItem.isHidden=mismatchRecovery.engine.retained.isEmpty
         retainedMismatchItem.isEnabled = !mismatchRecovery.busy
 

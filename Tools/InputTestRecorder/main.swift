@@ -56,7 +56,7 @@ final class RecorderApp: NSObject, NSApplicationDelegate {
         window.isReleasedWhenClosed = false
         let title = NSTextField(labelWithString: "ChatGPT 입력 진단 기록"); title.font = .boldSystemFont(ofSize: 22)
         let intro = NSTextField(wrappingLabelWithString: "시험 대상은 현재 대화용 ChatGPT 앱입니다.\nChatGPT에서 직접 입력하세요. 이 앱은 입력하거나 전송하지 않습니다.")
-        let instructions = NSTextField(wrappingLabelWithString: "누락이 보이면 한Q 메뉴의 ‘방금 입력 누락 기록’을 누르세요.\n이 앱이 이후 저장되는 처리 진단을 자동으로 모읍니다. ‘누락 관찰’은 관찰 시각만 표시합니다.")
+        let instructions = NSTextField(wrappingLabelWithString: "누락이 보이면 한Q 메뉴의 ‘진단 및 로그 → 방금 발생한 문제 기록’을 누르세요.\n이 앱이 이후 저장되는 처리 진단을 자동으로 모읍니다. ‘누락 관찰’은 관찰 시각만 표시합니다.")
         let privacy = NSTextField(wrappingLabelWithString: "입력 본문·누른 키·클립보드는 수집하지 않습니다.\n저장 결과는 사용자 관찰과 한Q 처리 기록이며, ChatGPT 수신을 자동 판정하지 않습니다."); privacy.textColor = .secondaryLabelColor
         scenario.addItems(withTitles: ["평소 입력", "입력창 재진입", "기존 문장 뒤 이어 쓰기", "선택 후 덮어쓰기", "한영 전환 뒤 입력"])
         scenario.target = self; scenario.action = #selector(scenarioChanged)
@@ -114,7 +114,7 @@ final class RecorderApp: NSObject, NSApplicationDelegate {
     @objc func scenarioChanged() { if active { observe("trial_started") } }
     @objc func trial() { observe("trial_started") }
     @objc func normal() { observe("observed_normal") }
-    @objc func loss() { observe("observed_loss"); detail.stringValue = "관찰 시각을 표시했습니다. 한Q 메뉴의 ‘방금 입력 누락 기록’도 눌러 직전 진단을 남기세요." }
+    @objc func loss() { observe("observed_loss"); detail.stringValue = "관찰 시각을 표시했습니다. 한Q 메뉴의 ‘진단 및 로그 → 방금 발생한 문제 기록’도 눌러 직전 진단을 남기세요." }
     @objc func stop() {
         guard active, !stopping else { return }; stopping = true; timer?.invalidate(); updateButtons(); status.stringValue = "마지막 진단을 저장하는 중…"; let id = scenarioID, exited = productEnded
         queue.asyncAfter(deadline: .now() + 2) {

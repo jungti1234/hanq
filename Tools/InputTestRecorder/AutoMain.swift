@@ -143,7 +143,7 @@ final class AutoInputApp: NSObject, NSApplicationDelegate {
         for monitor in monitors { NSEvent.removeMonitor(monitor) }; monitors.removeAll()
         editor = nil; running = false; update(); status.stringValue = message
         let saved = folder.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("auto-result.json").path) } ?? false
-        detail.stringValue = saved ? "결과를 저장했습니다. 불일치가 있었다면 한Q의 ‘방금 입력 누락 기록’으로 추가 진단을 남길 수 있습니다." : "시험 준비 또는 저장이 끝나지 않았습니다. 기존 초안을 지우지 않으며 폴더에 일부 기록이 있을 수 있습니다."
+        detail.stringValue = saved ? "결과를 저장했습니다. 불일치가 있었다면 한Q의 ‘진단 및 로그 → 방금 발생한 문제 기록’으로 추가 진단을 남길 수 있습니다." : "시험 준비 또는 저장이 끝나지 않았습니다. 기존 초안을 지우지 않으며 폴더에 일부 기록이 있을 수 있습니다."
         if saved { NSApp.requestUserAttention(.informationalRequest) }
     }
     @objc func stop() { editor?.cancel(); if countdown != nil { finishPending(outcome: "cancelled", message: "시작 전에 중단했습니다.") } }

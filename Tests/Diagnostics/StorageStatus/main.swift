@@ -89,6 +89,17 @@ let copy=try fm.contentsOfDirectory(at:session.directory,includingPropertiesForK
 check(try RecorderStorageDocument.decode(Data(contentsOf:copy)).status.evictedFiles==2,"sanitized status survives collector")
 var object=try JSONSerialization.jsonObject(with:statusData) as! [String:Any]
 var payload=object["status"] as! [String:Any]
+var oldPayload=payload
+for key in RecorderStorageStatus.optionalKeys{oldPayload.removeValue(forKey:key)}
+var oldDocument=object;oldDocument["status"]=oldPayload
+check((try? RecorderStorageDocument.decode(JSONSerialization.data(withJSONObject:oldDocument))) != nil,"legacy status without manual fields remains valid")
+var nullPayload=payload
+for key in RecorderStorageStatus.optionalKeys{nullPayload[key]=NSNull()}
+var nullDocument=object;nullDocument["status"]=nullPayload
+check((try? RecorderStorageDocument.decode(JSONSerialization.data(withJSONObject:nullDocument)))==nil,"null manual fields cannot masquerade as legacy absence")
+var partialPayload=payload;partialPayload.removeValue(forKey:"manualBytes")
+var partialDocument=object;partialDocument["status"]=partialPayload
+check((try? RecorderStorageDocument.decode(JSONSerialization.data(withJSONObject:partialDocument)))==nil,"manual status fields are all-or-none")
 let invalids:[(String,Any)]=[("text","PRIVATE"),("saved",-1),("attempts",true),("lastResult",9),("lastFailureStage",7),("automaticBytes",101),("lastAutomatic",1),("lastWriteMicros",60_000_001),("statusWriteFailures",8)]
 for (key,value) in invalids {
  var edited=payload;edited[key]=value;var doc=object;doc["status"]=edited

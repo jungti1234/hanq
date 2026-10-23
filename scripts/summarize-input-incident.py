@@ -9,12 +9,16 @@ import re
 
 STORAGE_FIELDS=set(['maximumAutomaticFiles', 'maximumAutomaticBytes', 'automaticFiles', 'automaticBytes', 'attempts', 'saved', 'limited', 'retired', 'unavailable', 'encodingFailures', 'evictedGroups', 'evictedFiles', 'evictedBytes', 'lastIncident', 'lastPhase', 'lastAutomatic', 'lastResult', 'lastFailureStage', 'lastErrno', 'lastWriteMicros', 'maxWriteMicros', 'writeTimingClipped', 'statusWriteFailures'])
 
+OPTIONAL_STORAGE_FIELDS={"maximumManualBytes","manualFiles","manualBytes"}
+
 def storage_status(value):
-    if not isinstance(value,dict) or set(value)!=STORAGE_FIELDS or type(value['lastAutomatic']) is not bool or any(type(n) is not int or n<0 for k,n in value.items() if k!='lastAutomatic'):
+    if not isinstance(value,dict) or set(value) not in (STORAGE_FIELDS,STORAGE_FIELDS|OPTIONAL_STORAGE_FIELDS) or type(value['lastAutomatic']) is not bool or any(type(n) is not int or n<0 for k,n in value.items() if k!='lastAutomatic'):
         raise ValueError('invalid storage status')
     v=value
     if v['maximumAutomaticFiles']<=0 or v['maximumAutomaticBytes']<=0 or v['automaticFiles']>v['maximumAutomaticFiles'] or v['automaticBytes']>v['maximumAutomaticBytes']:
         raise ValueError('invalid storage policy/usage')
+    if OPTIONAL_STORAGE_FIELDS<=set(v) and (v['maximumManualBytes']<=0 or v['manualBytes']>v['maximumManualBytes']):
+        raise ValueError('invalid manual storage policy/usage')
     counts=[v[k] for k in ['saved','limited','retired','unavailable','encodingFailures']]
     if sum(counts)!=v['attempts'] or v['evictedGroups']>v['evictedFiles'] or v['lastPhase']>1 or v['lastResult']>5 or v['lastFailureStage']>6 or v['lastErrno']>2147483647 or v['lastWriteMicros']>v['maxWriteMicros'] or v['maxWriteMicros']>60000000 or v['writeTimingClipped']>v['attempts'] or v['statusWriteFailures']>v['attempts']:
         raise ValueError('inconsistent storage status')

@@ -1,5 +1,6 @@
 import ApplicationServices
 import Foundation
+import CryptoKit
 import Darwin
 import Carbon
 
@@ -120,15 +121,19 @@ struct InputIncidentControl:Codable,Equatable {
 
 struct InputIncidentPreferences {
     static let key="inputIncidentDiagnosticsEnabled"
+    static let archiveBeforePruningKey="inputIncidentArchiveBeforePruning"
     static var defaultDirectory:URL {
         FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
             .appendingPathComponent("HanQ Diagnostics",isDirectory:true).appendingPathComponent("InputIncidents",isDirectory:true)
     }
-    static func launch(arguments:[String],defaults:UserDefaults)->(directory:URL,enabled:Bool,persistent:Bool) {
-        if let i=arguments.firstIndex(of:"--diagnose-input-incidents"),i+1<arguments.count,!arguments[i+1].hasPrefix("--") {
-            return (URL(fileURLWithPath:arguments[i+1]),true,false)
+    static func launch(arguments:[String],defaults:UserDefaults)->(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool) {
+        if let i=arguments.firstIndex(of:"--preserve-input-incidents"),i+1<arguments.count,arguments[i+1].hasPrefix("/") {
+            return (URL(fileURLWithPath:arguments[i+1]),true,true,true)
         }
-        return (defaultDirectory,defaults.bool(forKey:key),true)
+        if let i=arguments.firstIndex(of:"--diagnose-input-incidents"),i+1<arguments.count,!arguments[i+1].hasPrefix("--") {
+            return (URL(fileURLWithPath:arguments[i+1]),true,false,true)
+        }
+        return (defaultDirectory,defaults.bool(forKey:key),true,false)
     }
 }
 
@@ -458,7 +463,9 @@ final class InputIncidentTrace {
     }
     static let shared:InputIncidentTrace = {
         let option=InputIncidentPreferences.launch(arguments:ProcessInfo.processInfo.arguments,defaults:.standard)
-        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent)
+        let archive=UserDefaults.standard.bool(forKey:InputIncidentPreferences.archiveBeforePruningKey)
+            ? InputIncidentPreferences.defaultDirectory.deletingLastPathComponent().appendingPathComponent("InvestigationArchives"):nil
+        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive)
     }()
     private let runID=UUID().uuidString
     private let gate:DiagnosticCollectionGate
@@ -514,7 +521,7 @@ final class InputIncidentTrace {
     private var shapes:[Lane:Shape]=[:]
     private var fields:[UInt:Int]=[:]
     private var nextField=0,lastEdit = -Double.infinity,lastTrigger = -Double.infinity
-    private var captures=0,manualCaptures=0
+    private var captures=0
     private var reads:[UUID:(id:Int,began:Double)]=[:]
     private var readSequence=0
     private var timer:DispatchSourceTimer?
@@ -522,7 +529,7 @@ final class InputIncidentTrace {
     // aggregates. Input callers never wait for a metadata lock.
     private var skippedEvents:[Int:Int]=[:],skippedAuxiliary:[Int:Int]=[:]
     private let writer:((Capture)->Void)?
-    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},writer:((Capture)->Void)?=nil){
+    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},writer:((Capture)->Void)?=nil){
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
         eventCredits=DispatchSemaphore(value:self.observationCapacity/2)
         shapeCredits=DispatchSemaphore(value:max(1,self.observationCapacity/8))
@@ -539,11 +546,11 @@ final class InputIncidentTrace {
         routineCredits=DispatchSemaphore(value:self.decisionCapacity-important)
         overflowSignals=(destination != nil || writer != nil) ? (0..<310).map{_ in DispatchSemaphore(value:0)}:[]
         self.destinationDirectory=destination
-        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership)}
+        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory)}
         self.configured=destination != nil || writer != nil;self.gate=DiagnosticCollectionGate(self.configured && initiallyEnabled)
         self.capacity=max(1,min(capacity,16384));self.clock=clock;origin=clock();self.writer=writer
         ring=Array(repeating:nil,count:self.configured ? self.capacity:0)
-        if enabled{storage?.prepareOwnership();captures=storage?.lastCaptureIncident ?? 0}
+        if enabled{decisionQueue.async{[self] in storage?.prepareOwnership();captures=storage?.lastCaptureIncident ?? 0}}
     }
     // Main-thread UI control. Preparation/draining stays on background queues.
     func setCollectionEnabled(_ active:Bool,completion:(()->Void)?=nil){
@@ -707,9 +714,6 @@ final class InputIncidentTrace {
                 let (identifier,origin)=reference.map{eventIdentity($0)} ?? (0,0)
                 let request=CaptureRequest(trigger:reason.rawValue,milliseconds:Int(max(0,time-self.origin)*1000),afterSequence:sequence,lane:lane.rawValue,detail:detail,event:identifier,inputOrigin:origin)
                 captureRequested[reason.rawValue,default:0]+=1
-                if reason == .manual,manualCaptures>=32 {
-                    observationOmitted[observationCode(.capture,.main,17),default:0]+=1;return
-                }
                 if reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
                     window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
                     let code=reason == window.before.trigger ? reason.rawValue:reason.rawValue+8
@@ -729,7 +733,6 @@ final class InputIncidentTrace {
                     captureDeferred[reason.rawValue,default:0]+=1
                     observationOmitted[observationCode(.capture,.main,reason.rawValue+8),default:0]+=1
                 }else if reason != .manual{lastTrigger=clock()}
-                if reason == .manual{manualCaptures+=1}
                 captures+=1
                 let before=snapshot(reason,timing:timing,incident:captures)
                 let window=CaptureWindow(before,request,deferred:deferred,generation:generation)
@@ -1096,6 +1099,29 @@ final class InputIncidentTrace {
         _ = submit(.marker,.main,observedAt:time){[self] timing in append(.main,.marker,observedAt:time,observationTiming:timing)}
         requestCapture(.manual)
     }
+    // Freeze the export's event boundary on the decision queue. New incidents
+    // do not extend this wait; already requested post-captures finish first.
+    func prepareExport(to directory:URL,completion:@escaping(Result<Void,Error>)->Void){
+        decisionQueue.async{[self] in
+            let incidents=Set(windows.keys)
+            finishExport(incidents:incidents,to:directory,deadline:DispatchTime.now()+15,completion:completion)
+        }
+    }
+    private func finishExport(incidents:Set<Int>,to directory:URL,deadline:DispatchTime,completion:@escaping(Result<Void,Error>)->Void){
+        let pending=windows.values.filter{incidents.contains($0.before.incident) && !$0.submitted}
+        if !pending.isEmpty {
+            guard DispatchTime.now()<deadline else{completion(.failure(DiagnosticLogExport.Failure.busy));return}
+            decisionQueue.asyncAfter(deadline:.now()+0.05){[self] in finishExport(incidents:incidents,to:directory,deadline:deadline,completion:completion)}
+            return
+        }
+        queue.async{[self] in
+            do {
+                guard let storage else{throw DiagnosticLogExport.Failure.noLogs}
+                try storage.copyExportSnapshot(to:directory)
+                completion(.success(()))
+            }catch{completion(.failure(error))}
+        }
+    }
     #if HANQ_DIAGNOSTIC_TESTING
     func captureForTest(_ reason:Trigger){requestCapture(reason)}
     func flushCaptureWorkerForTest(){decisionQueue.sync{}}
@@ -1123,17 +1149,70 @@ final class InputIncidentTrace {
     }
     deinit{timer?.cancel()}
 }
+enum DiagnosticLogExport {
+    enum Failure:LocalizedError {
+        case noLogs,unavailable,busy,compression
+        var errorDescription:String? {
+            switch self {
+            case .noLogs:return "내보낼 진단 로그가 없습니다."
+            case .unavailable:return "진단 로그를 안전하게 읽을 수 없습니다. 기존 파일은 유지됩니다."
+            case .busy:return "요청한 진단 기록의 저장이 아직 끝나지 않았습니다. 잠시 후 다시 시도해 주세요."
+            case .compression:return "진단 로그를 압축하지 못했습니다."
+            }
+        }
+    }
+    private static let worker=DispatchQueue(label:"hanq.diagnostics.export",qos:.utility)
+    static func export(_ trace:InputIncidentTrace,to desktop:URL,date:Date=Date(),completion:@escaping(Result<URL,Error>)->Void){
+        worker.async {
+            let fm=FileManager.default
+            let temporary=fm.temporaryDirectory.appendingPathComponent("HanQ-Diagnostics-"+UUID().uuidString,isDirectory:true)
+            do{try fm.createDirectory(at:temporary,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
+            catch{completion(.failure(error));return}
+            let logs=temporary.appendingPathComponent("HanQ-Diagnostics",isDirectory:true)
+            trace.prepareExport(to:logs){result in worker.async{
+                let fm=FileManager.default
+                defer{try? fm.removeItem(at:temporary)}
+                do{
+                    try result.get()
+                    let archive=temporary.appendingPathComponent("diagnostics.zip")
+                    let process=Process()
+                    process.executableURL=URL(fileURLWithPath:"/usr/bin/ditto")
+                    process.arguments=["-c","-k","--keepParent","--norsrc",logs.path,archive.path]
+                    process.standardOutput=FileHandle.nullDevice;process.standardError=FileHandle.nullDevice
+                    try process.run();process.waitUntilExit()
+                    guard process.terminationStatus==0 else{throw Failure.compression}
+                    let formatter=DateFormatter();formatter.locale=Locale(identifier:"en_US_POSIX")
+                    formatter.calendar=Calendar(identifier:.gregorian);formatter.dateFormat="yyyyMMdd-HHmmss"
+                    let name="HanQ-Diagnostics-"+formatter.string(from:date)
+                    let publication=desktop.appendingPathComponent(".HanQ-Diagnostics-"+UUID().uuidString+".zip")
+                    try fm.copyItem(at:archive,to:publication)
+                    defer{try? fm.removeItem(at:publication)}
+                    try fm.setAttributes([.posixPermissions:0o600],ofItemAtPath:publication.path)
+                    for suffix in 0..<10000 {
+                        let destination=desktop.appendingPathComponent(name+(suffix==0 ? "":"-\(suffix+1)")+".zip")
+                        if link(publication.path,destination.path)==0{completion(.success(destination));return}
+                        guard errno==EEXIST else{throw NSError(domain:NSPOSIXErrorDomain,code:Int(errno))}
+                    }
+                    throw Failure.unavailable
+                }catch{completion(.failure(error))}
+            }}
+        }
+    }
+}
+
 // Reusable storage policy, separate from capture/trigger semantics and export UI.
 // The caller supplies privacy-screened data and serializes all calls off input
-// callbacks. Limits cover this store's automatic files and, in persistent mode,
-// its verified ownership index. Unmanaged files and manual captures are protected.
+// callbacks. Automatic and manual byte budgets rotate independently. Only
+// verified managed files may be removed; investigation archives never rotate.
 struct DiagnosticLogRetentionPolicy {
     let maximumAutomaticFiles:Int
     let maximumAutomaticBytes:Int
-    static let incidentDefault=Self(maximumAutomaticFiles:64,maximumAutomaticBytes:64*1024*1024)
-    init(maximumAutomaticFiles:Int,maximumAutomaticBytes:Int){
-        precondition(maximumAutomaticFiles>0 && maximumAutomaticBytes>0)
-        self.maximumAutomaticFiles=maximumAutomaticFiles;self.maximumAutomaticBytes=maximumAutomaticBytes
+    let maximumManualBytes:Int
+    static let incidentDefault=Self(maximumAutomaticFiles:64,maximumAutomaticBytes:32*1024*1024)
+    static let investigation=Self(maximumAutomaticFiles:Int.max,maximumAutomaticBytes:Int.max,maximumManualBytes:Int.max)
+    init(maximumAutomaticFiles:Int,maximumAutomaticBytes:Int,maximumManualBytes:Int=16*1024*1024){
+        precondition(maximumAutomaticFiles>0 && maximumAutomaticBytes>0 && maximumManualBytes>0)
+        self.maximumAutomaticFiles=maximumAutomaticFiles;self.maximumAutomaticBytes=maximumAutomaticBytes;self.maximumManualBytes=maximumManualBytes
     }
 }
 
@@ -1143,6 +1222,7 @@ final class DiagnosticLogStore {
     // Accessed exclusively by the serial writer; never by input callbacks.
     struct Status:Codable {
         var maximumAutomaticFiles:Int,maximumAutomaticBytes:Int
+        var maximumManualBytes:Int?,manualFiles:Int?,manualBytes:Int?
         var automaticFiles=0,automaticBytes=0
         var attempts=0,saved=0,limited=0,retired=0,unavailable=0,encodingFailures=0
         var evictedGroups=0,evictedFiles=0,evictedBytes=0
@@ -1157,35 +1237,49 @@ final class DiagnosticLogStore {
     struct Usage:Equatable {let files:Int;let bytes:Int}
     private struct File {
         let name:String;let phase:Int;let identity:stat
+        let digest:String?
+        init(name:String,phase:Int,identity:stat,digest:String?=nil){
+            self.name=name;self.phase=phase;self.identity=identity;self.digest=digest
+        }
         var bytes:Int{Int(identity.st_size)}
     }
-    private struct Group {let incident:Int;var files:[File]}
+    private struct Group {let incident:Int;var files:[File];var key:String=""}
     private let directory:URL,policy:DiagnosticLogRetentionPolicy
+    private let archiveDirectory:URL?
     private var directoryIdentity:stat?
     private var groups:[Group]=[]
+    private var manualGroups:[Group]=[]
     private var latestAutomatic=0
+    private var latestManual=0
     private(set) var status:Status
     private var statusName=".storage-"+UUID().uuidString+".status"
     private var statusFile:File?
     private var failureStage=0,failureErrno:Int32=0
     private func failed(_ stage:Int,_ code:Int32=0)->Result {failureStage=stage;failureErrno=code;return .unavailable}
     var usage:Usage {Usage(files:groups.reduce(0){$0+$1.files.count},bytes:groups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
+    var manualUsage:Usage {Usage(files:manualGroups.reduce(0){$0+$1.files.count},bytes:manualGroups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     private(set) var lastResult:Result?
-    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false){
+    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil){
         self.directory=directory;self.policy=policy;self.persistentOwnership=persistentOwnership
+        self.archiveDirectory=archiveDirectory
         status=Status(maximumAutomaticFiles:policy.maximumAutomaticFiles,maximumAutomaticBytes:policy.maximumAutomaticBytes)
+        status.maximumManualBytes=policy.maximumManualBytes;status.manualFiles=0;status.manualBytes=0
     }
 
-    // Only this opt-in persistent namespace resumes its own indexed automatic
-    // files. Historical CLI folders and all manual files remain unadopted.
+    // Device numbers and ctime are useful within one boot, not durable identity.
+    // Schema 3 also binds the volume, creation times and exact stored bytes.
     private struct Record:Codable {
         let incident:Int,name:String,phase:Int,device:Int64,inode:UInt64,size:Int64
         let mtime:Int64,mtimeNanos:Int64,ctime:Int64,ctimeNanos:Int64
-        init(_ file:File,incident:Int){
+        var manualKey:String?=nil
+        var birth:Int64?=nil,birthNanos:Int64?=nil,digest:String?=nil
+        init(_ file:File,incident:Int,manualKey:String?=nil){
+            self.manualKey=manualKey
             self.incident=incident;name=file.name;phase=file.phase
             let s=file.identity;device=Int64(s.st_dev);inode=s.st_ino;size=s.st_size
             mtime=Int64(s.st_mtimespec.tv_sec);mtimeNanos=Int64(s.st_mtimespec.tv_nsec)
             ctime=Int64(s.st_ctimespec.tv_sec);ctimeNanos=Int64(s.st_ctimespec.tv_nsec)
+            birth=Int64(s.st_birthtimespec.tv_sec);birthNanos=Int64(s.st_birthtimespec.tv_nsec);digest=file.digest
         }
         func matches(_ s:stat)->Bool {
             device==Int64(s.st_dev) && inode==s.st_ino && size==s.st_size &&
@@ -1193,24 +1287,71 @@ final class DiagnosticLogStore {
             ctime==s.st_ctimespec.tv_sec && ctimeNanos==s.st_ctimespec.tv_nsec &&
             s.st_mode&S_IFMT==S_IFREG && s.st_uid==getuid() && s.st_mode&0o077==0
         }
+        func matchesPersistent(_ s:stat)->Bool {
+            inode==s.st_ino && size==s.st_size &&
+            mtime==s.st_mtimespec.tv_sec && mtimeNanos==s.st_mtimespec.tv_nsec &&
+            birth==Int64(s.st_birthtimespec.tv_sec) && birthNanos==Int64(s.st_birthtimespec.tv_nsec) &&
+            s.st_mode&S_IFMT==S_IFREG && s.st_uid==getuid() && s.st_mode&0o077==0
+        }
+        // This check only authorizes preserving a whole legacy directory. It
+        // never authorizes adopting, replacing or pruning an individual file.
+        func matchesLegacyRemount(_ s:stat)->Bool {
+            inode==s.st_ino && size==s.st_size &&
+            mtime==s.st_mtimespec.tv_sec && mtimeNanos==s.st_mtimespec.tv_nsec &&
+            s.st_mode&S_IFMT==S_IFREG && s.st_uid==getuid() && s.st_mode&0o077==0
+        }
     }
     private struct Ownership:Codable {
         let schema:Int,device:Int64,inode:UInt64,lastIncident:Int
         let statusName:String,status:Status,files:[Record],statusFile:Record?
+        var manualFiles:[Record]?=nil
+        var volumeUUID:String?=nil,bootUUID:String?=nil
+        var birth:Int64?=nil,birthNanos:Int64?=nil
     }
     private let persistentOwnership:Bool
     private var ownershipPrepared=false,ownershipHealthy=true
     private let ownershipName=".automatic-ownership-v1.index"
     private var ownershipFile:File?
+    private var volumeUUID:String?
+    private(set) var legacyArchive:URL?
+    private static let bootUUID:String? = {
+        var bytes=[CChar](repeating:0,count:128),size=128
+        guard sysctlbyname("kern.bootsessionuuid",&bytes,&size,nil,0)==0,
+              let uuid=UUID(uuidString:String(cString:bytes)) else{return nil}
+        return uuid.uuidString
+    }()
+    private func prepareVolume(_ dir:Int32)->Bool {
+        if volumeUUID != nil{return true}
+        guard let raw=try? directory.resourceValues(forKeys:[.volumeUUIDStringKey]).volumeUUIDString,
+              let uuid=UUID(uuidString:raw),Self.bootUUID != nil else{return false}
+        var current=stat(),path=stat()
+        guard fstat(dir,&current)==0,lstat(directory.path,&path)==0,
+              current.st_dev==path.st_dev,current.st_ino==path.st_ino else{return false}
+        volumeUUID=uuid.uuidString;return true
+    }
+    private func verifiedFile(_ entry:Record,_ dir:Int32,schema:Int,sameBoot:Bool)->File? {
+        let fd=openat(dir,entry.name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+        guard fd>=0 else{return nil};defer{close(fd)}
+        var before=stat(),after=stat()
+        guard fstat(fd,&before)==0,before.st_size>=0,before.st_size<=16*1024*1024,
+              schema==3 ? entry.matchesPersistent(before):entry.matches(before),
+              schema != 3 || !sameBoot || entry.matches(before),
+              let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:Int(before.st_size)+1),
+              data.count==before.st_size,fstat(fd,&after)==0,matches(before,after) else{return nil}
+        let digest=Self.digest(data)
+        guard schema != 3 || entry.digest==digest else{return nil}
+        return File(name:entry.name,phase:entry.phase,identity:after,digest:digest)
+    }
+    private static func digest(_ data:Data)->String {SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()}
     private(set) var lastCaptureIncident=0
     func prepareOwnership(){
         guard persistentOwnership,!ownershipPrepared else{return}
         ownershipPrepared=true;ownershipHealthy=false
         guard let dir=openDirectory() else{return};defer{close(dir)}
+        guard prepareVolume(dir) else{return}
         var info=stat()
         if fstatat(dir,ownershipName,&info,AT_SYMLINK_NOFOLLOW) != 0 {
             guard errno==ENOENT else{return}
-            // Lost metadata never authorizes adoption/deletion of old evidence.
             let names=(try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []
             guard !names.contains(where:{$0.hasPrefix("incident-") || $0.hasPrefix(".storage-")}) else{return}
             ownershipHealthy=persistOwnership(dir);return
@@ -1218,51 +1359,224 @@ final class DiagnosticLogStore {
         let fd=openat(dir,ownershipName,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
         guard fd>=0 else{return};defer{close(fd)}
         guard fstat(fd,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,
-              info.st_size>0,info.st_size<=128*1024,
-              let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:128*1024+1),
-              let index=try? JSONDecoder().decode(Ownership.self,from:data),index.schema==1,
-              let identity=directoryIdentity,index.device==Int64(identity.st_dev),index.inode==identity.st_ino,
-              index.status.maximumAutomaticFiles==policy.maximumAutomaticFiles,index.status.maximumAutomaticBytes==policy.maximumAutomaticBytes,
-              index.files.count<=policy.maximumAutomaticFiles,index.lastIncident>=0,
-              validStatusName(index.statusName) else{return}
+              info.st_size>0,info.st_size<=8*1024*1024,
+              let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:8*1024*1024+1),
+              let index=try? JSONDecoder().decode(Ownership.self,from:data),(1...3).contains(index.schema),
+              let identity=directoryIdentity,index.inode==identity.st_ino,
+              index.status.maximumAutomaticFiles>0,index.status.maximumAutomaticBytes>0,
+              index.files.count<=index.status.maximumAutomaticFiles,index.lastIncident>=0,
+              validStatusName(index.statusName),validAttemptCounts(index.status) else{return}
+        if index.schema<3,index.device != Int64(identity.st_dev) {
+            if preserveLegacyRemount(index,info,dir) {
+                directoryIdentity=nil;volumeUUID=nil;ownershipPrepared=false
+                prepareOwnership()
+            }
+            return
+        }
+        let sameBoot=index.bootUUID==Self.bootUUID
+        if index.schema==3 {
+            guard index.volumeUUID==volumeUUID,let boot=index.bootUUID,UUID(uuidString:boot) != nil,
+                  index.birth==Int64(identity.st_birthtimespec.tv_sec),index.birthNanos==Int64(identity.st_birthtimespec.tv_nsec),
+                  !sameBoot || index.device==Int64(identity.st_dev) else{return}
+        }else{guard index.device==Int64(identity.st_dev) else{return}}
         var restored:[Int:[File]]=[:],names=Set<String>(),total=0
         for entry in index.files {
             guard entry.incident>0,entry.incident<=index.lastIncident,(0...1).contains(entry.phase),
-                  entry.name.hasPrefix("incident-\(entry.incident)-\(entry.phase)-"),entry.name.hasSuffix(".json"),
-                  UUID(uuidString:String(entry.name.dropFirst("incident-\(entry.incident)-\(entry.phase)-".count).dropLast(5))) != nil,
-                  names.insert(entry.name).inserted else{return}
-            var current=stat()
-            guard fstatat(dir,entry.name,&current,AT_SYMLINK_NOFOLLOW)==0,entry.matches(current),current.st_size>=0,
-                  current.st_size<=policy.maximumAutomaticBytes-total else{return}
-            total+=Int(current.st_size)
-            restored[entry.incident,default:[]].append(File(name:entry.name,phase:entry.phase,identity:current))
+                  validCaptureName(entry.name,incident:entry.incident,phase:entry.phase),names.insert(entry.name).inserted else{return}
+            guard let file=verifiedFile(entry,dir,schema:index.schema,sameBoot:sameBoot),
+                  file.bytes<=index.status.maximumAutomaticBytes-total else{return}
+            total+=file.bytes
+            restored[entry.incident,default:[]].append(file)
         }
-        for values in restored.values {
-            guard values.count<=2,Set(values.map{$0.phase}).count==values.count,values.contains(where:{$0.phase==0}) else{return}
+        guard restored.values.allSatisfy({validPair($0)}),index.status.automaticFiles==index.files.count,index.status.automaticBytes==total else{return}
+        var restoredManual:[String:Group]=[:]
+        for entry in index.manualFiles ?? [] {
+            guard index.schema>=2,let key=entry.manualKey,!key.isEmpty,entry.incident>0,entry.incident<=index.lastIncident,
+                  validCaptureName(entry.name,incident:entry.incident,phase:entry.phase),names.insert(entry.name).inserted else{return}
+            guard let file=verifiedFile(entry,dir,schema:index.schema,sameBoot:sameBoot) else{return}
+            if let previous=restoredManual[key],previous.incident != entry.incident{return}
+            if restoredManual[key]==nil{restoredManual[key]=Group(incident:entry.incident,files:[],key:key)}
+            restoredManual[key]!.files.append(file)
         }
         var previousStatus:File?
         if let entry=index.statusFile {
-            var current=stat()
-            guard entry.name==index.statusName,fstatat(dir,entry.name,&current,AT_SYMLINK_NOFOLLOW)==0,entry.matches(current),current.st_size<=16*1024 else{return}
-            previousStatus=File(name:entry.name,phase:0,identity:current)
-        } else {
+            guard entry.name==index.statusName,entry.size<=16*1024,
+                  let file=verifiedFile(entry,dir,schema:index.schema,sameBoot:sameBoot) else{return}
+            previousStatus=file
+        }else{
             var current=stat()
             guard fstatat(dir,index.statusName,&current,AT_SYMLINK_NOFOLLOW) != 0,errno==ENOENT else{return}
         }
-        let old=index.status
-        guard old.automaticFiles==index.files.count,old.automaticBytes==total,old.attempts>=0,old.saved>=0,
-              old.limited>=0,old.retired>=0,old.unavailable>=0,old.encodingFailures>=0,
-              validAttemptCounts(old) else{return}
-        // An interrupted publication may leave a complete automatic file outside
-        // the last index. Refuse growth; never adopt or delete ambiguous evidence.
         guard let diskNames=try? FileManager.default.contentsOfDirectory(atPath:directory.path) else{return}
-        for name in diskNames where name.hasPrefix("incident-") && !names.contains(name) {
-            guard isUntrackedManual(name,dir) else{return}
+        var last=index.lastIncident
+        for name in diskNames.sorted() where name.hasPrefix("incident-") && !names.contains(name) {
+            // Only the previous, verified index authorizes this one-time upgrade
+            // of valid private manual captures. Unknown/orphan evidence blocks growth.
+            guard index.schema==1,let legacy=readLegacyManual(name,dir) else{return}
+            if restoredManual[legacy.key]==nil{restoredManual[legacy.key]=Group(incident:legacy.incident,files:[],key:legacy.key)}
+            restoredManual[legacy.key]!.files.append(legacy.file);last=max(last,legacy.incident)
+        }
+        guard restoredManual.values.allSatisfy({validPair($0.files)}) else{return}
+        let manualTotal=restoredManual.values.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}}
+        if index.schema>=2 {
+            guard index.status.manualFiles==index.manualFiles?.count,index.status.manualBytes==manualTotal,
+                  let limit=index.status.maximumManualBytes,limit>0,manualTotal<=limit else{return}
         }
         groups=restored.keys.sorted().map{Group(incident:$0,files:restored[$0]!.sorted{$0.phase<$1.phase})}
-        latestAutomatic=index.lastIncident;lastCaptureIncident=index.lastIncident;status=old
-        statusName=index.statusName;statusFile=previousStatus
-        ownershipFile=File(name:ownershipName,phase:0,identity:info);ownershipHealthy=true
+        manualGroups=restoredManual.values.sorted{left,right in
+            func first(_ group:Group)->(Int,Int){
+                group.files.map{(Int($0.identity.st_mtimespec.tv_sec),Int($0.identity.st_mtimespec.tv_nsec))}.min(by:{$0<$1}) ?? (0,0)
+            }
+            let l=first(left),r=first(right)
+            return l==r ? left.key<right.key:l<r
+        }
+        latestAutomatic=index.lastIncident;latestManual=last;lastCaptureIncident=last;status=index.status
+        status.maximumAutomaticFiles=policy.maximumAutomaticFiles;status.maximumAutomaticBytes=policy.maximumAutomaticBytes
+        status.maximumManualBytes=policy.maximumManualBytes
+        statusName=index.statusName;statusFile=previousStatus;ownershipFile=File(name:ownershipName,phase:0,identity:info)
+        // Lowered limits and legacy manual data rotate before accepting new files.
+        guard trimRestored(dir) else{return}
+        updateUsage()
+        guard writeStatus(),persistOwnership(dir) else{return}
+        ownershipHealthy=true
+    }
+    // Legacy indexes contain neither a volume UUID nor content fingerprints.
+    // After a remount they cannot prove ownership. Preserve the entire private
+    // namespace with an exclusive, same-volume rename; never weaken the checks
+    // used for resuming/deleting managed records. No legacy bytes are rewritten.
+    private func preserveLegacyRemount(_ index:Ownership,_ indexIdentity:stat,_ dir:Int32)->Bool {
+        let records=index.files+(index.manualFiles ?? [])
+        var names=Set<String>(),pairs:[String:[Int]]=[:]
+        for entry in records {
+            guard entry.device==index.device,entry.incident>0,entry.incident<=index.lastIncident,
+                  validCaptureName(entry.name,incident:entry.incident,phase:entry.phase),names.insert(entry.name).inserted else{return false}
+            let manual=entry.manualKey
+            guard manual==nil || (index.schema==2 && !manual!.isEmpty) else{return false}
+            pairs[manual ?? "automatic:\(entry.incident)",default:[]].append(entry.phase)
+            var current=stat()
+            guard fstatat(dir,entry.name,&current,AT_SYMLINK_NOFOLLOW)==0,entry.matchesLegacyRemount(current) else{return false}
+        }
+        guard pairs.values.allSatisfy({$0.count<=2 && $0.contains(0) && Set($0).count==$0.count}) else{return false}
+        if let entry=index.statusFile {
+            var current=stat()
+            guard entry.name==index.statusName,entry.device==index.device,entry.size<=16*1024,
+                  fstatat(dir,entry.name,&current,AT_SYMLINK_NOFOLLOW)==0,entry.matchesLegacyRemount(current) else{return false}
+        }else{
+            var current=stat()
+            guard fstatat(dir,index.statusName,&current,AT_SYMLINK_NOFOLLOW) != 0,errno==ENOENT else{return false}
+        }
+        let parentURL=directory.deletingLastPathComponent(),base=directory.lastPathComponent
+        guard base != "InvestigationArchives",base != ".",base != ".." else{return false}
+        let parent=open(parentURL.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard parent>=0 else{return false};defer{close(parent)}
+        var info=stat()
+        guard fstat(parent,&info)==0,info.st_uid==getuid(),info.st_mode&0o077==0 else{return false}
+        if mkdirat(parent,"InvestigationArchives",S_IRWXU) != 0,errno != EEXIST{return false}
+        let archive=openat(parent,"InvestigationArchives",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard archive>=0 else{return false};defer{close(archive)}
+        guard let identity=directoryIdentity,fstat(archive,&info)==0,info.st_uid==getuid(),info.st_mode&0o077==0,
+              info.st_dev==identity.st_dev,info.st_ino != identity.st_ino,
+              fstatat(parent,base,&info,AT_SYMLINK_NOFOLLOW)==0,
+              info.st_dev==identity.st_dev,info.st_ino==identity.st_ino,
+              fstatat(dir,ownershipName,&info,AT_SYMLINK_NOFOLLOW)==0,matches(indexIdentity,info) else{return false}
+        let name="Legacy-"+base+"-"+UUID().uuidString
+        guard renameatx_np(parent,base,archive,name,UInt32(RENAME_EXCL))==0 else{return false}
+        guard fsync(archive)==0,fsync(parent)==0 else{return false}
+        legacyArchive=parentURL.appendingPathComponent("InvestigationArchives").appendingPathComponent(name)
+        return true
+    }
+    private func validCaptureName(_ name:String,incident:Int,phase:Int)->Bool {
+        let prefix="incident-\(incident)-\(phase)-"
+        return (0...1).contains(phase) && name.hasPrefix(prefix) && name.hasSuffix(".json") &&
+            UUID(uuidString:String(name.dropFirst(prefix.count).dropLast(5))) != nil
+    }
+    private func validPair(_ files:[File])->Bool {
+        !files.isEmpty && files.count<=2 && Set(files.map{$0.phase}).count==files.count && files.contains{$0.phase==0}
+    }
+    private func readLegacyManual(_ name:String,_ dir:Int32)->(key:String,incident:Int,file:File)? {
+        let fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+        guard fd>=0 else{return nil};defer{close(fd)}
+        var info=stat()
+        guard fstat(fd,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,
+              info.st_size>0,info.st_size<=16*1024*1024,
+              let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:16*1024*1024+1) else{return nil}
+        struct Header:Decodable {let schema:Int,trigger:Int,runID:String,incident:Int,phase:Int}
+        guard let header=try? JSONDecoder().decode(Header.self,from:data),header.schema==1,header.trigger==1,
+              UUID(uuidString:header.runID) != nil,header.incident>0,validCaptureName(name,incident:header.incident,phase:header.phase) else{return nil}
+        var after=stat()
+        guard fstat(fd,&after)==0,matches(info,after) else{return nil}
+        return (header.runID+":\(header.incident)",header.incident,File(name:name,phase:header.phase,identity:info,digest:Self.digest(data)))
+    }
+    private func updateUsage(){
+        status.automaticFiles=usage.files;status.automaticBytes=usage.bytes
+        status.manualFiles=manualUsage.files;status.manualBytes=manualUsage.bytes
+    }
+    private func trimRestored(_ dir:Int32)->Bool {
+        while usage.files>policy.maximumAutomaticFiles || usage.bytes>policy.maximumAutomaticBytes {
+            guard let group=groups.first,removeGroup(group,manual:false,dir:dir) else{return false}
+        }
+        while manualUsage.bytes>policy.maximumManualBytes {
+            guard let group=manualGroups.first,removeGroup(group,manual:true,dir:dir) else{return false}
+        }
+        return true
+    }
+    private func removeGroup(_ group:Group,manual:Bool,dir:Int32)->Bool {
+        guard group.files.allSatisfy({owned($0,dir)}) else{_ = failed(3);return false}
+        if let archiveDirectory {
+            do{try archive(group.files,from:dir,to:archiveDirectory)}
+            catch{_ = failed(5);return false}
+        }
+        for file in group.files {
+            guard owned(file,dir),unlinkat(dir,file.name,0)==0 else{_ = failed(5,errno);return false}
+            status.evictedFiles+=1;status.evictedBytes+=file.bytes
+            if manual {
+                if let i=manualGroups.firstIndex(where:{$0.key==group.key}){manualGroups[i].files.removeAll{$0.name==file.name}}
+            }else{
+                if let i=groups.firstIndex(where:{$0.incident==group.incident}){groups[i].files.removeAll{$0.name==file.name}}
+            }
+        }
+        groups.removeAll{$0.files.isEmpty};manualGroups.removeAll{$0.files.isEmpty};status.evictedGroups+=1
+        return true
+    }
+    // Investigation opt-in: content-addressed evidence lives outside rotation.
+    // Every file and its manifest are durable before any source is unlinked.
+    private func archive(_ files:[File],from source:Int32,to destination:URL)throws {
+        let fm=FileManager.default
+        if !fm.fileExists(atPath:destination.path){try fm.createDirectory(at:destination,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
+        let target=open(destination.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard target>=0 else{throw DiagnosticLogExport.Failure.unavailable};defer{close(target)}
+        var info=stat()
+        guard fstat(target,&info)==0,info.st_uid==getuid(),info.st_mode&0o077==0,
+              directoryIdentity.map({$0.st_dev != info.st_dev || $0.st_ino != info.st_ino}) ?? false else{throw DiagnosticLogExport.Failure.unavailable}
+        struct Entry:Encodable {let originalName:String,sha256:String,bytes:Int}
+        var entries:[Entry]=[]
+        for file in files {
+            let fd=openat(source,file.name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+            guard fd>=0 else{throw DiagnosticLogExport.Failure.unavailable};defer{close(fd)}
+            guard fstat(fd,&info)==0,matches(file.identity,info),
+                  let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:file.bytes+1),data.count==file.bytes,
+                  fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
+            let digest=SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()
+            let name=digest+".json"
+            let prior=openat(target,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+            if prior>=0 {
+                defer{close(prior)}
+                guard fstat(prior,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,
+                      let existing=try FileHandle(fileDescriptor:prior,closeOnDealloc:false).read(upToCount:data.count+1),existing==data else{throw DiagnosticLogExport.Failure.unavailable}
+            }else{
+                guard errno==ENOENT else{throw DiagnosticLogExport.Failure.unavailable}
+                try publishArchive(data,name:name,dir:target)
+            }
+            entries.append(Entry(originalName:file.name,sha256:digest,bytes:data.count))
+        }
+        try publishArchive(JSONEncoder().encode(entries),name:"manifest-"+UUID().uuidString+".json",dir:target)
+    }
+    private func publishArchive(_ data:Data,name:String,dir:Int32)throws {
+        let temporary=".partial-"+UUID().uuidString
+        let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
+        guard fd>=0 else{throw DiagnosticLogExport.Failure.unavailable}
+        defer{close(fd);unlinkat(dir,temporary,0)}
+        guard writeAll(data,fd),fsync(fd)==0,linkat(dir,temporary,dir,name,0)==0,fsync(dir)==0 else{throw DiagnosticLogExport.Failure.unavailable}
     }
     private func validAttemptCounts(_ status:Status)->Bool {
         var remaining=status.attempts
@@ -1271,26 +1585,16 @@ final class DiagnosticLogStore {
         }
         return remaining==0
     }
-    private func isUntrackedManual(_ name:String,_ dir:Int32)->Bool {
-        let fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
-        guard fd>=0 else{return false};defer{close(fd)}
-        var info=stat()
-        guard fstat(fd,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,
-              info.st_size>0,info.st_size<=16*1024*1024,
-              let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:16*1024*1024+1) else{return false}
-        struct Header:Decodable {let schema:Int,trigger:Int}
-        guard let header=try? JSONDecoder().decode(Header.self,from:data) else{return false}
-        return header.schema==1 && header.trigger==1
-    }
     private func validStatusName(_ name:String)->Bool {
         name.hasPrefix(".storage-") && name.hasSuffix(".status") && UUID(uuidString:String(name.dropFirst(9).dropLast(7))) != nil
     }
     private func persistOwnership(_ dir:Int32)->Bool {
-        guard let identity=directoryIdentity else{return false}
-        let index=Ownership(schema:1,device:Int64(identity.st_dev),inode:identity.st_ino,lastIncident:lastCaptureIncident,
+        guard let identity=directoryIdentity,prepareVolume(dir) else{return false}
+        let index=Ownership(schema:3,device:Int64(identity.st_dev),inode:identity.st_ino,lastIncident:lastCaptureIncident,
             statusName:statusName,status:status,files:groups.flatMap{group in group.files.map{Record($0,incident:group.incident)}},
-            statusFile:statusFile.map{Record($0,incident:0)})
-        guard let data=try? JSONEncoder().encode(index),data.count<=128*1024 else{return false}
+            statusFile:statusFile.map{Record($0,incident:0)},manualFiles:manualGroups.flatMap{group in group.files.map{Record($0,incident:group.incident,manualKey:group.key)}},
+            volumeUUID:volumeUUID,bootUUID:Self.bootUUID,birth:Int64(identity.st_birthtimespec.tv_sec),birthNanos:Int64(identity.st_birthtimespec.tv_nsec))
+        guard let data=try? JSONEncoder().encode(index),data.count<=8*1024*1024 else{return false}
         if let old=ownershipFile, !owned(old,dir){return false}
         let temporary=".partial-"+UUID().uuidString
         let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
@@ -1326,7 +1630,7 @@ final class DiagnosticLogStore {
         case 4:status.unavailable+=1
         default:status.encodingFailures+=1
         }
-        status.automaticFiles=usage.files;status.automaticBytes=usage.bytes
+        updateUsage()
         status.lastIncident=incident;status.lastPhase=phase;status.lastAutomatic=automatic
         status.lastResult=result;status.lastFailureStage=failureStage;status.lastErrno=Int(failureErrno)
         let ended=DispatchTime.now().uptimeNanoseconds,elapsed=ended>=began ? ended-began:0
@@ -1368,7 +1672,7 @@ final class DiagnosticLogStore {
             guard linkat(dir,temporary,dir,statusName,0)==0,unlinkat(dir,temporary,0)==0 else{return false}
         }
         var info=stat();guard fstat(fd,&info)==0 else{return false}
-        statusFile=File(name:statusName,phase:0,identity:info)
+        statusFile=File(name:statusName,phase:0,identity:info,digest:Self.digest(data))
         return true
     }
     private func writeAll(_ data:Data,_ fd:Int32)->Bool {
@@ -1412,62 +1716,85 @@ final class DiagnosticLogStore {
         var info=stat()
         return fstatat(fd,file.name,&info,AT_SYMLINK_NOFOLLOW)==0 && matches(file.identity,info)
     }
+    func copyExportSnapshot(to destination:URL)throws {
+        prepareOwnership()
+        guard ownershipHealthy,let dir=openDirectory() else{throw DiagnosticLogExport.Failure.unavailable}
+        defer{close(dir)}
+        let captures=(groups+manualGroups).flatMap{$0.files}
+        guard !captures.isEmpty else{throw DiagnosticLogExport.Failure.noLogs}
+        try FileManager.default.createDirectory(at:destination,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+        for file in captures {
+            guard owned(file,dir) else{throw DiagnosticLogExport.Failure.unavailable}
+            let fd=openat(dir,file.name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+            guard fd>=0 else{throw DiagnosticLogExport.Failure.unavailable}
+            defer{close(fd)}
+            var info=stat()
+            guard fstat(fd,&info)==0,matches(file.identity,info),
+                  let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:file.bytes+1),data.count==file.bytes,
+                  fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
+            let path=destination.appendingPathComponent(file.name)
+            try data.write(to:path,options:.withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+        }
+        if let data=try? JSONEncoder().encode(StatusDocument(status:status)) {
+            let path=destination.appendingPathComponent("storage-status.json")
+            try data.write(to:path,options:.withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+        }
+    }
     private func publish(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
         prepareOwnership()
-        guard !automatic || ownershipHealthy else{return failed(3)}
+        guard ownershipHealthy else{return failed(3)}
         guard incident>0,(0...1).contains(phase) else{return failed(1)}
-        var evictions:[Group]=[]
-        if automatic {
-            if phase==0 {
-                guard incident>latestAutomatic else{return .retired}
-                // Even a failed pre-capture cannot be resurrected by its post.
-                latestAutomatic=incident
-            } else {guard groups.contains(where:{$0.incident==incident && $0.files.count==1 && $0.files[0].phase==0}) else{return .retired}}
-            let current=groups.first(where:{$0.incident==incident})
-            guard data.count<=policy.maximumAutomaticBytes,
-                  (current?.files.count ?? 0)+1<=policy.maximumAutomaticFiles,
-                  (current?.files.reduce(0){$0+$1.bytes} ?? 0)<=policy.maximumAutomaticBytes-data.count else{return .limit}
-            var count=usage.files+1,bytes=usage.bytes+data.count
-            for group in groups where group.incident < incident {
-                if count<=policy.maximumAutomaticFiles && bytes<=policy.maximumAutomaticBytes{break}
-                evictions.append(group);count-=group.files.count;bytes-=group.files.reduce(0){$0+$1.bytes}
-            }
-            guard count<=policy.maximumAutomaticFiles,bytes<=policy.maximumAutomaticBytes else{return .limit}
+        struct Header:Decodable {let runID:String}
+        let run=(try? JSONDecoder().decode(Header.self,from:data).runID) ?? "current"
+        let key=run+":\(incident)"
+        let existing=automatic ? groups:manualGroups
+        if phase==0 {
+            guard incident>(automatic ? latestAutomatic:latestManual) else{return .retired}
+            if automatic{latestAutomatic=incident}else{latestManual=incident}
+        }else{
+            guard existing.contains(where:{(automatic ? $0.incident==incident:$0.key==key) && $0.files.count==1 && $0.files[0].phase==0}) else{return .retired}
         }
+        let current=existing.first(where:{automatic ? $0.incident==incident:$0.key==key})
+        let limit=automatic ? policy.maximumAutomaticBytes:policy.maximumManualBytes
+        let fileLimit=automatic ? policy.maximumAutomaticFiles:Int.max
+        guard data.count<=limit,(current?.files.count ?? 0)<fileLimit,
+              (current?.files.reduce(0){$0+$1.bytes} ?? 0)<=limit-data.count else{return .limit}
+        let used=automatic ? usage:manualUsage
+        var count=used.files+1,bytes=used.bytes+data.count,evictions:[Group]=[]
+        for group in existing {
+            if count<=fileLimit && bytes<=limit{break}
+            // A delayed post never evicts a newer pre-capture.
+            if group.incident>=incident{continue}
+            evictions.append(group);count-=group.files.count;bytes-=group.files.reduce(0){$0+$1.bytes}
+        }
+        guard count<=fileLimit,bytes<=limit else{return .limit}
         guard let dir=openDirectory() else{return .unavailable};defer{close(dir)}
-        var info=stat()
-        // A changed or replaced file is no longer ours to remove. Refuse a new
-        // automatic file instead of growing beyond the bound on pruning error.
-        guard !automatic || groups.allSatisfy({$0.files.allSatisfy{owned($0,dir)}}) else{return failed(3)}
+        guard existing.allSatisfy({$0.files.allSatisfy{owned($0,dir)}}) else{return failed(3)}
         let filename="incident-\(incident)-\(phase)-\(UUID().uuidString).json"
         let temporary=".partial-"+UUID().uuidString
         let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
         guard fd>=0 else{return failed(4,errno)}
         defer{close(fd);unlinkat(dir,temporary,0)}
         guard writeAll(data,fd),linkat(dir,temporary,dir,filename,0)==0 else{return failed(4,errno)}
-        // Capture identity after publication (link changes ctime). Close the
-        // temporary link before recording ctime, too.
+        var info=stat()
         guard unlinkat(dir,temporary,0)==0,fstat(fd,&info)==0 else{unlinkat(dir,filename,0);return failed(4,errno)}
-        let published=File(name:filename,phase:phase,identity:info)
+        let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data))
         for group in evictions {
-            for file in group.files {
-                guard owned(file,dir),unlinkat(dir,file.name,0)==0 else {
-                    // Roll back only our complete new file. Any surviving old
-                    // file remains tracked; partial cleanup never expands use.
-                    if owned(published,dir){unlinkat(dir,filename,0)}
-                    return failed(5,errno)
-                }
-                status.evictedFiles+=1;status.evictedBytes+=file.bytes
-                if let index=groups.firstIndex(where:{$0.incident==group.incident}) {
-                    groups[index].files.removeAll{$0.name==file.name}
-                    if groups[index].files.isEmpty{groups.remove(at:index);status.evictedGroups+=1}
-                }
+            guard removeGroup(group,manual:!automatic,dir:dir) else{
+                if owned(published,dir){unlinkat(dir,filename,0)}
+                return failed(5,errno)
             }
         }
         if automatic {
-            if let index=groups.firstIndex(where:{$0.incident==incident}){groups[index].files.append(published)}
+            if let i=groups.firstIndex(where:{$0.incident==incident}){groups[i].files.append(published)}
             else{groups.append(Group(incident:incident,files:[published]))}
+        }else{
+            if let i=manualGroups.firstIndex(where:{$0.key==key}){manualGroups[i].files.append(published)}
+            else{manualGroups.append(Group(incident:incident,files:[published],key:key))}
         }
         return .saved
     }
+
 }

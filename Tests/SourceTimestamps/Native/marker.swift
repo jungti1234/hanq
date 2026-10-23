@@ -11,8 +11,8 @@ func value(_ e:AXUIElement,_ attribute:String)->CFTypeRef? {
     return v
 }
 func find(_ e:AXUIElement,_ depth:Int)->AXUIElement? {
-    guard depth<5 else{return nil}
-    if value(e,"AXTitle") as? String=="방금 입력 누락 기록"{return e}
+    guard depth<8 else{return nil}
+    if let title=value(e,"AXTitle") as? String,["방금 발생한 문제 기록","방금 입력 누락 기록"].contains(title){return e}
     for child in (value(e,"AXChildren") as? [AXUIElement] ?? []).prefix(24){if let result=find(child,depth+1){return result}}
     return nil
 }
