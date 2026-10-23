@@ -24,6 +24,16 @@ struct RecorderEventEvidence:Codable {
     static let keys=Set(["observedAtMicros","timestampMicros","keyClass"])
     var valid:Bool {[observedAtMicros,timestampMicros].allSatisfy{(0...9_000_000_000_000_000).contains($0)} && (1...6).contains(keyClass)}
 }
+struct RecorderWorkEvidence:Codable {
+    let beganAtMicros,endedAtMicros,cpuState:Int;let clockValid:Bool;let cpuMicros:Int?
+    static let keys=Set(["beganAtMicros","endedAtMicros","cpuState","clockValid"])
+    var valid:Bool {
+        guard (0...5).contains(cpuState) else{return false}
+        if !clockValid{return beganAtMicros==0 && endedAtMicros==0 && cpuState==5 && cpuMicros==nil}
+        return cpuState != 5 && beganAtMicros>=0 && endedAtMicros>=beganAtMicros && endedAtMicros<=9_000_000_000_000_000 &&
+            ((cpuState==1 && cpuMicros.map{(0...9_000_000_000_000_000).contains($0)}==true) || (cpuState != 1 && cpuMicros==nil))
+    }
+}
 struct RecorderDecisionWaitStats: Codable {
     let processed, contended, totalLockWaitMicros, maxLockWaitMicros, maxQueueMicros, clipped: Int
     var valid: Bool {
@@ -91,7 +101,7 @@ struct RecorderAXEvidence:Codable {
     static let keys=Set(["valueClass","placeholder","label","characterCount","representation","route","owner","window","fieldRelation","windowRelation","identityEpoch"])
     var valid:Bool {(0...5).contains(valueClass) && (0...4).contains(placeholder) && (0...4).contains(label) && (0...3).contains(characterCount) && (0...2).contains(representation) && (0...3).contains(route) && owner>0 && window>=0 && (0...2).contains(fieldRelation) && (0...2).contains(windowRelation) && identityEpoch>0 && (window>0 || windowRelation==0)}
     static func fields(_ value:[String:Any])->Bool {
-        Set(value.keys).subtracting(["ax","caretPrecedingClass"])==RecorderShapeEvidence.keys && (!value.keys.contains("caretPrecedingClass") || value["caretPrecedingClass"] is NSNumber) && (!value.keys.contains("ax") || (value["ax"] as? [String:Any]).map{Set($0.keys)==keys}==true)
+        Set(value.keys).subtracting(["ax","caretPrecedingClass","selectionMotion"])==RecorderShapeEvidence.keys && (!value.keys.contains("selectionMotion") || value["selectionMotion"] is NSNumber) && (!value.keys.contains("caretPrecedingClass") || value["caretPrecedingClass"] is NSNumber) && (!value.keys.contains("ax") || (value["ax"] as? [String:Any]).map{Set($0.keys)==keys}==true)
     }
 }
 struct RecorderShapeEvidence:Codable {
@@ -100,9 +110,10 @@ struct RecorderShapeEvidence:Codable {
     let firstMilliseconds:Int;let lastMilliseconds:Int;let observations:Int;let coalesced:Int;let baselineSequence:Int
     var ax:RecorderAXEvidence?=nil
     var caretPrecedingClass:Int?=nil
+    var selectionMotion:Int?=nil
     static let keys=Set(["phase","comparisonKnown","contentChanged","selectionChanged","editingChanged","gap","editing","firstMilliseconds","lastMilliseconds","observations","coalesced","baselineSequence"])
     var valid:Bool {
-        (caretPrecedingClass.map{(0...5).contains($0)} ?? true) && (ax?.valid ?? true) && (1...3).contains(phase) && firstMilliseconds>=0 && lastMilliseconds>=firstMilliseconds && lastMilliseconds<=9_000_000_000_000_000 && observations>0 && coalesced>=0 && coalesced<observations && baselineSequence>0 &&
+        (selectionMotion.map{(0...7).contains($0) && (comparisonKnown || $0==0)} ?? true) && (caretPrecedingClass.map{(0...5).contains($0)} ?? true) && (ax?.valid ?? true) && (1...3).contains(phase) && firstMilliseconds>=0 && lastMilliseconds>=firstMilliseconds && lastMilliseconds<=9_000_000_000_000_000 && observations>0 && coalesced>=0 && coalesced<observations && baselineSequence>0 &&
         (comparisonKnown || (!contentChanged && !selectionChanged)) && (!gap || !comparisonKnown) &&
         (phase != 1 || (observations==1 && coalesced==0 && firstMilliseconds==lastMilliseconds))
     }
@@ -130,6 +141,7 @@ struct RecorderFrame: Codable {
     var shapeEvidence:RecorderShapeEvidence?=nil
     var controlEvidence:RecorderControlEvidence?=nil
     var eventEvidence:RecorderEventEvidence?=nil
+    var workEvidence:RecorderWorkEvidence?=nil
 }
 
 struct RecorderDecisionDelivery: Codable {
@@ -253,6 +265,9 @@ struct RecorderTrace: Codable {
 
     private static func validFrame(_ row:RecorderFrame)->Bool {
                   guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...12).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
+                  if let work=row.workEvidence {
+                      guard work.valid,((row.kind==1 && (1...4).contains(row.lane) && row.edge==1 && work.cpuState != 0) || (row.kind==2 && (6...7).contains(row.lane) && row.category==2 && [0,5].contains(work.cpuState))),(!work.clockValid || work.endedAtMicros/1000<=row.milliseconds) else{return false}
+                  }
                   if let evidence=row.eventEvidence {
                       guard evidence.valid,[1,11].contains(row.kind),[1,2].contains(row.lane),row.event>0,evidence.observedAtMicros/1000==row.milliseconds else{return false}
                   }
@@ -326,7 +341,10 @@ struct RecorderTrace: Codable {
         }
         let keys = Set(["sequence", "milliseconds", "lane", "kind", "event", "edge", "category", "inputOrigin", "consumed", "durationMicros", "count", "selected", "field"])
         guard rows.allSatisfy({ row in
-            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence"])==keys else{return false}
+            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence"])==keys else{return false}
+            if row.keys.contains("workEvidence") {
+                guard let value=row["workEvidence"] as? [String:Any],Set(value.keys).subtracting(["cpuMicros"])==RecorderWorkEvidence.keys else{return false}
+            }
             if row.keys.contains("eventEvidence") {
                 guard let value=row["eventEvidence"] as? [String:Any],Set(value.keys)==RecorderEventEvidence.keys else{return false}
             }

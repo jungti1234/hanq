@@ -22,6 +22,7 @@ final class InputDeliveryOrigin {
         UInt64(bitPattern:value) >> 48 == 0x4852
     }
     var diagnosticEvent:((CGEventType,CGEvent,Bool)->Void)?
+    var diagnosticReceive:((CGEventType,CGEvent,()->Unmanaged<CGEvent>?)->Unmanaged<CGEvent>?)?
     private let lock=NSLock()
     private var entries:[Int64:Origin]=[:]
     private var next:UInt64=0
@@ -159,6 +160,7 @@ final class InputDeliveryOrigin {
                     else {
                         owner.forgetMirroredRelease(type,event)
                         return KeyboardStateMirror.shared.preserve(type,event) {
+                            if let measured=owner.diagnosticReceive{return measured(type,event){owner.receive(type,event)}}
                             let result=owner.receive(type,event)
                             owner.diagnosticEvent?(type,event,result==nil)
                             return result

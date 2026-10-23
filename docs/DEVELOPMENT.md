@@ -320,6 +320,14 @@ KeyboardStateMirror는 소비한 키를 별도 표식의 새 상태 전용 이�
 
 SourceSwitchBarrier는 주 입력 경로에서 앞선 문자·선택의 예상 상태를 추적하고, 한Q 전환 요청 뒤 후속 키를 보관한다. 같은 입력칸의 실제 상태와 보정 완료를 확인한 뒤 소스를 전환하고 키를 하나씩 전달한다. 조회 실패와 다른 입력칸의 확인을 구분한다. `bash scripts/test-source-switch-barrier.sh`는 키 전송 대역으로 이전 입력 반영 지연, 새 소스 입력, 부분·전체 선택, 연속 전환, 키 놓음, 다른 보정의 진행, 일시 조회 실패, 포커스 변경과 시간 초과를 검사한다. 실제 Spotlight 시험과 구분하며, 자판표를 읽는 실행 환경이 필요하다.
 
+### 내용 비수집 간접 영향 진단
+
+진단 메뉴를 켠 실행은 기존 사건 JSON의 `workEvidence`에 keyDown 처리 구간/스레드 CPU와 기존 snapshot 조회 구간을 기록한다. 기존 `durationMicros`의 처리 범위는 유지한다. `selectionMotion`은 커서 좌표 없이 이전 snapshot 대비 방향/선택 변화를 나타내며 문맥 변경·샘플 누락은 unknown이다. CPU 계측은 keyDown에만 수행하고 유휴 AX 감시에서는 이미 확보한 시각을 재사용한다. 진단 OFF에서는 추가 시계 조회를 하지 않는다.
+
+`python3 scripts/summarize-input-incident.py <사건.json>`의 `callback_work_timelines`에서 처리 wall/CPU·그 차이·snapshot 조회 중첩의 합집합과 100ms 내 본문 변화 단서를 대조한다. 중첩은 인과관계가 아니며 wall−CPU를 순수 OS/IME 대기로 해석하지 않는다. 한Q 전체 프로세스 CPU·계측하지 않은 탭 사이 구간·편집기 내부 조합/수신은 미확인이다. 오래된 기록은 빈 미계측 목록이며 실패/다른 스레드/역전된 시각을 0 비용 성공으로 처리하지 않는다.
+
+`bash scripts/test-diagnostics.sh`는 같은 스레드 CPU/미계측·역전/스레드 변경, 커서 방향·선택/문맥·누락, strict 수집/요약·개인정보 제외를 검사한다. 입력 내용/키 값을 포함한 합성 event도 숫자 메타데이터만 직렬화한다. 성능 대조는 동일 대역 입력과 진단 ON/OFF를 사용하고 실제 앱·물리 키 확인과 구분한다.
+
 ### 검증 수준과 확인 범위
 
 | 검증 | 방법 | 확인 범위 |

@@ -9,6 +9,29 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_indirect_timing_and_overlap_are_not_causality(self):
+        w=dict(beganAtMicros=10000,endedAtMicros=30000,clockValid=True,cpuState=1,cpuMicros=2000)
+        row=dict(frame(2,1,event=1,ms=30),sequence=1,workEvidence=w)
+        reads=[dict(frame(6,2,event=2,category=2,ms=25),sequence=2,workEvidence=dict(beganAtMicros=15000,endedAtMicros=25000,clockValid=True,cpuState=0)),
+               dict(frame(7,2,event=3,category=2,ms=40),sequence=3,workEvidence=dict(beganAtMicros=20000,endedAtMicros=40000,clockValid=True,cpuState=0))]
+        r=summary.summarize(dict(schema=1,trigger=1,frames=[row]+reads))['callback_work_timelines'][0]
+        self.assertEqual(r['wall_us'],20000)
+        self.assertEqual(r['wall_minus_thread_cpu_us'],18000)
+        self.assertEqual(r['snapshot_query_overlap_us'],15000)
+        self.assertIn('unverified',r['interpretation'])
+        for bad in [dict(w,text='private'),dict(w,cpuMicros=True),dict(w,cpuState=True),dict(w,clockValid=1),dict(w,endedAtMicros=-1),dict(w,cpuState=2),dict(w,clockValid=False)]:
+            with self.assertRaises(ValueError):summary.work_evidence(bad)
+        old=summary.summarize(dict(schema=1,trigger=1,frames=[dict(frame(2,1,ms=30),sequence=1)]))
+        self.assertEqual(old['callback_work_timelines'],[])
+        for patch in [dict(kind=3),dict(lane=5),dict(edge=2),dict(milliseconds=29)]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
+        invalid=dict(beganAtMicros=0,endedAtMicros=0,clockValid=False,cpuState=5)
+        r=summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,workEvidence=invalid)]))['callback_work_timelines'][0]
+        self.assertIsNone(r['wall_us']);self.assertIsNone(r['wall_minus_thread_cpu_us'])
+        excessive=dict(w,cpuMicros=25000)
+        r=summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,workEvidence=excessive)]))['callback_work_timelines'][0]
+        self.assertTrue(r['cpu_exceeds_wall']);self.assertIsNone(r['wall_minus_thread_cpu_us'])
+
     def test_switch_evidence_and_hud_privacy(self):
         timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
         evidence=dict(observedAtMicros=20000,timestampMicros=100020000,keyClass=1)

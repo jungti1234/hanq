@@ -1252,10 +1252,11 @@ final class MismatchRecoveryEngine:NSObject {
         let mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}
         tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.tailAppendEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
             let owner=Unmanaged<MismatchRecoveryEngine>.fromOpaque(ref!).takeUnretainedValue()
+            let incidentStart=InputIncidentTrace.shared.beginCallback(type)
             return KeyboardStateMirror.shared.preserve(type,event) {
                 let began=InputIncidentTrace.shared.enabled ? ProcessInfo.processInfo.systemUptime:nil
                 let result=owner.event(type,event)
-                if let began{InputIncidentTrace.shared.event(.mismatch,type,event,consumed:result==nil,duration:ProcessInfo.processInfo.systemUptime-began)}
+                if let began{InputIncidentTrace.shared.event(.mismatch,type,event,consumed:result==nil,duration:ProcessInfo.processInfo.systemUptime-began,started:incidentStart)}
                 return result
             }
         },userInfo:Unmanaged.passUnretained(self).toOpaque())

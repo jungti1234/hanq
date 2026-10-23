@@ -548,7 +548,7 @@ final class OnsetRecoveryEngine:NSObject {
         AXUIElementSetMessagingTimeout(systemAX,0.05);accessibilityRequested=false;lastFocusRoute="";lastAXFailure=""
         let gate=OnsetInputGate(marker:marker);if InputDiagnostics.shared.isEnabled{gate.enableReentryTrace()};self.gate=gate;postedToGate=0;unacknowledgedPosts=[];acknowledgmentWaitBegan=nil
         if InputIncidentTrace.shared.enabled {
-            gate.diagnosticEvent={type,event,consumed,duration in InputIncidentTrace.shared.event(.onset,type,event,consumed:consumed,duration:duration)}
+            gate.diagnosticEvent={type,event,consumed,duration,started in InputIncidentTrace.shared.event(.onset,type,event,consumed:consumed,duration:duration,started:started)}
         }
         gate.didProcessPhysicalKey = { [weak self] event,passed in self?.didProcessPhysicalKey(event,passed) }
         gate.deliver={[weak self,weak gate] event in guard let self,let gate,self.gate === gate,self.enabled,!self.recovering else{return};_ = self.event(event.type,event)}

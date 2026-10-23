@@ -59,10 +59,41 @@ def describe_ax(value):
                 document_truth='unverified_AX_provider_only')
 
 
+SELECTION_MOTIONS={0:'unknown',1:'unchanged',2:'backward',3:'forward',4:'selection_started',5:'selection_collapsed',6:'selection_changed',7:'invalid_range'}
+
+def work_evidence(value):
+    fields={'beganAtMicros','endedAtMicros','cpuState','clockValid'}
+    if not isinstance(value,dict) or set(value)-{'cpuMicros'}!=fields or type(value['clockValid']) is not bool or any(type(value[k]) is not int for k in fields-{'clockValid'}) or value['cpuState'] not in range(6):raise ValueError('invalid work evidence')
+    if not value['clockValid']:
+        if value['beganAtMicros']!=0 or value['endedAtMicros']!=0 or value['cpuState']!=5 or 'cpuMicros' in value:raise ValueError('invalid clock evidence')
+    elif value['cpuState']==5 or not 0<=value['beganAtMicros']<=value['endedAtMicros']<=9_000_000_000_000_000 or ('cpuMicros' in value)!=(value['cpuState']==1) or ('cpuMicros' in value and (type(value['cpuMicros']) is not int or not 0<=value['cpuMicros']<=9_000_000_000_000_000)):raise ValueError('invalid CPU evidence')
+    return value
+
+def work_timelines(rows,shapes):
+    # Intersections are temporal coincidence, never causality or IME receipt.
+    reads=[r for r in rows if r['kind']==2 and r['clockValid']]
+    result=[]
+    for row in rows:
+        if row['kind']!=1:continue
+        r=dict(row);valid=r['clockValid'];wall=r['endedAtMicros']-r['beganAtMicros'] if valid else None
+        r['wall_us']=wall;r['cpu_status']=['unmeasured','measured','unavailable','different_thread','counter_reversed','invalid_wall'][r['cpuState']]
+        cpu=r.get('cpuMicros');r['wall_minus_thread_cpu_us']=wall-cpu if wall is not None and cpu is not None and cpu<=wall else None
+        r['cpu_exceeds_wall']=wall is not None and cpu is not None and cpu>wall
+        intervals=sorted((max(q['beganAtMicros'],r['beganAtMicros']),min(q['endedAtMicros'],r['endedAtMicros'])) for q in reads if valid and q['beganAtMicros']<r['endedAtMicros'] and q['endedAtMicros']>r['beganAtMicros'])
+        total=0;end=-1
+        for a,b in intervals:
+            total+=max(0,b-max(a,end));end=max(end,b)
+        r['snapshot_query_overlap_us']=total if valid else None
+        r['nearby_changed_shapes']=[{k:s[k] for k in ['sequence','milliseconds','field','count','selected','selectionMotion'] if k in s} for s in shapes if valid and s['phase']==1 and s['contentChanged'] and 0<=s['milliseconds']*1000-r['endedAtMicros']<=100_000][:16]
+        r['interpretation']='partial_HanQ_callback_and_snapshot_intervals_only; overlap_not_causality; editor_IME_receipt_and_indirect_influence_unverified'
+        result.append(r)
+    return result
+
 def shape_evidence(value):
     flags={'comparisonKnown','contentChanged','selectionChanged','editingChanged','gap','editing'}
     numbers={'phase','firstMilliseconds','lastMilliseconds','observations','coalesced','baselineSequence'}
-    if not isinstance(value,dict) or set(value)-{'ax','caretPrecedingClass'}!=flags|numbers:raise ValueError('invalid shape evidence fields')
+    if not isinstance(value,dict) or set(value)-{'ax','caretPrecedingClass','selectionMotion'}!=flags|numbers:raise ValueError('invalid shape evidence fields')
+    if 'selectionMotion' in value and (type(value['selectionMotion']) is not int or value['selectionMotion'] not in SELECTION_MOTIONS or (not value.get('comparisonKnown') and value['selectionMotion']!=0)):raise ValueError('invalid selection motion')
     if 'caretPrecedingClass' in value and (type(value['caretPrecedingClass']) is not int or not 0<=value['caretPrecedingClass']<=5):raise ValueError('invalid caret class')
     if any(type(value[k]) is not bool for k in flags) or any(type(value[k]) is not int for k in numbers):raise ValueError('invalid shape evidence types')
     if value['phase'] not in [1,2,3] or not 0<=value['firstMilliseconds']<=value['lastMilliseconds']<=9_000_000_000_000_000 or not 0<=value['coalesced']<value['observations'] or value['baselineSequence']<=0:raise ValueError('invalid shape span')
@@ -309,10 +340,17 @@ def summarize(data):
     shape_rows=[]
     key_rows=[]
     hud_rows=[]
+    work_rows=[]
     baselines=shape_baselines(data['shapeBaselines']) if 'shapeBaselines' in data else None
     source_actions=dict(enumerate(["observed","requested","committed","deferred","resumed","rejected","roman_skipped"],start=1))
     for frame in data['frames']:
         lane=lanes.get(frame['lane'],'unknown')
+        if 'workEvidence' in frame:
+            work=work_evidence(frame['workEvidence'])
+            callback=frame['kind']==1 and frame['lane'] in [1,2,3,4] and frame['edge']==1 and work['cpuState']!=0
+            read=frame['kind']==2 and frame['lane'] in [6,7] and frame['category']==2 and work['cpuState'] in [0,5]
+            if not (callback or read) or (work['clockValid'] and work['endedAtMicros']//1000>frame['milliseconds']):raise ValueError('invalid work frame')
+            work_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,kind=frame['kind'],event=frame['event'],**work))
         if 'eventEvidence' in frame:
             value=event_evidence(frame['eventEvidence'])
             if frame['kind'] not in [1,11] or frame['lane'] not in [1,2] or frame['event']<=0 or value['observedAtMicros']//1000!=frame['milliseconds']:raise ValueError('invalid event evidence frame')
@@ -325,6 +363,7 @@ def summarize(data):
             evidence=shape_evidence(frame['shapeEvidence'])
             if frame['kind']!=3 or frame.get('field',0)<=0 or evidence['baselineSequence']>frame['sequence'] or frame['milliseconds']!=evidence['lastMilliseconds'] or (evidence['phase']==1 and evidence['baselineSequence']!=frame['sequence']):raise ValueError('invalid shape frame')
             shape_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,field=frame['field'],count=frame['count'],selected=frame['selected'],**evidence,**({'ax_interpretation':describe_ax(evidence['ax'])} if 'ax' in evidence else {})))
+            if 'selectionMotion' in evidence:shape_rows[-1]['selection_motion_name']=SELECTION_MOTIONS[evidence['selectionMotion']]
             if 'caretPrecedingClass' in evidence:shape_rows[-1]['caret_preceding_class_name']=CARET_CLASSES[evidence['caretPrecedingClass']]
         maxima[lane]=max(maxima[lane],frame['durationMicros'])
         timing=frame.get('decisionTiming')
@@ -405,6 +444,7 @@ def summarize(data):
             'observed_keydown_counts':dict(counts),'maximum_correlated_hid_to_stage_ms':dict(transport_max),'maximum_observed_duration_us':dict(maxima),
             'peak_observed_ax_reads':peak,'cross_lane_ax_overlap_starts':overlap_starts,
             'open_or_unpaired_ax_reads':len(active)+unpaired_ends,'recovery_state_counts':dict(state_counts),'maximum_observed_owned_pending_events':dict(pending_max),
+            'callback_work_timelines':work_timelines(work_rows,shape_rows),'work_interval_evidence':work_rows,
             'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,

@@ -56,3 +56,7 @@ hanq_test_run "$stage/export-tests"
 
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/Reboot/main.swift -o "$stage/reboot-tests"
 hanq_test_run "$stage/reboot-tests"
+
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/IndirectInfluence/main.swift -o "$stage/indirect-tests"
+hanq_test_run "$stage/indirect-tests" "$stage/indirect.json"
+python3 -B scripts/summarize-input-incident.py "$stage/indirect.json" > "$stage/indirect-summary.json"

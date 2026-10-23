@@ -193,9 +193,10 @@ final class OnsetInputGate {
     }
     func healthy()->Bool{lock.lock();defer{lock.unlock()};return !stopped}
     func fail(_ reason:String){diagnosticFailure=reason;stopped=true;holdUntil=0;early=nil;deferred=nil;passedInput=nil;hintUntil=0;DispatchQueue.main.async{self.failed?(reason)}}
-    var diagnosticEvent:((CGEventType,CGEvent,Bool,Double)->Void)?
+    var diagnosticEvent:((CGEventType,CGEvent,Bool,Double,InputIncidentTrace.CallbackStart?)->Void)?
     var didProcessPhysicalKey:((CGEvent,Bool)->Void)?
     func receive(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
+        let incidentStart=diagnosticEvent == nil ? nil:incidentTrace.beginCallback(type)
         let began=diagnosticEvent == nil ? nil:ProcessInfo.processInfo.systemUptime
         var control=InputIncidentControl.begin(incidentTrace,type,event)
         var route=InputIncidentControl.Route.onsetPassed
@@ -203,7 +204,7 @@ final class OnsetInputGate {
         // The gate's existing lock has been released before diagnostics enqueue.
         control?.route=route.rawValue
         if let control{incidentTrace.control(.onset,type,event,control,consumed:result==nil)}
-        if let began{diagnosticEvent?(type,event,result==nil,ProcessInfo.processInfo.systemUptime-began)}
+        if let began{diagnosticEvent?(type,event,result==nil,ProcessInfo.processInfo.systemUptime-began,incidentStart)}
         if type == .keyDown,!Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
            didProcessPhysicalKey != nil,let copy=event.copy() {
             let passed=result != nil

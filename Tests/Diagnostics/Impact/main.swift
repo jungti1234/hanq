@@ -22,7 +22,7 @@ engine.testSource={sourceReads+=1;return sourceMode=="roman" ? "com.apple.keylay
 engine.testSnapshot={reads+=1;return .init(element:field,text:text,selection:NSRange(location:text.utf16.count,length:0))}
 engine.testPost={_ in failures+=1};engine.testPostAtTap={_,_ in failures+=1};engine.testSelectSource={_ in failures+=1;return -1}
 gate.deliver={_ in observerCopies+=1};gate.failed={_ in failures+=1}
-if enabled{gate.diagnosticEvent={type,event,consumed,duration in trace.event(.onset,type,event,consumed:consumed,duration:duration)}}
+if enabled{gate.diagnosticEvent={type,event,consumed,duration,started in trace.event(.onset,type,event,consumed:consumed,duration:duration,started:started)}}
 var filter=CommandFilter(),latencies:[UInt64]=[],lateness:[UInt64]=[],blockedCaller:[UInt64]=[]
 var stagePassed=[0,0,0],submitted=0
 let codes:[CGKeyCode]=[2,0,14,15,40,3,5,1,6,7,8,9,11,12,13,17]
@@ -35,16 +35,19 @@ func event(_ key:Int,_ down:Bool)->CGEvent {
 let events=(0..<(count+128)).map{[event($0,true),event($0,false)]}
 func process(_ e:CGEvent,_ measured:Bool,hold:Bool=false){
  let began=DispatchTime.now().uptimeNanoseconds
- if enabled{trace.event(.hid,e.type,e)}
+ let hidStart=trace.beginCallback(e.type)
+ if enabled{trace.event(.hid,e.type,e,started:hidStart)}
+ let mainStart=trace.beginCallback(e.type)
  let mainBegan=enabled ? ProcessInfo.processInfo.systemUptime:0
  let f=filter.process(type:e.type,key:e.getIntegerValueField(.keyboardEventKeycode),flags:e.flags,acceptNewPress:true);e.flags=f.flags
- if enabled{trace.event(.main,e.type,e,consumed:f.consume,duration:ProcessInfo.processInfo.systemUptime-mainBegan)}
+ if enabled{trace.event(.main,e.type,e,consumed:f.consume,duration:ProcessInfo.processInfo.systemUptime-mainBegan,started:mainStart)}
  let onset=gate.receive(e.type,e) != nil
  var passed=onset
  if onset {
+  let mismatchStart=trace.beginCallback(e.type)
   let mismatchBegan=enabled ? ProcessInfo.processInfo.systemUptime:0
   passed=engine.event(e.type,e) != nil
-  if enabled{trace.event(.mismatch,e.type,e,consumed:!passed,duration:ProcessInfo.processInfo.systemUptime-mismatchBegan)}
+  if enabled{trace.event(.mismatch,e.type,e,consumed:!passed,duration:ProcessInfo.processInfo.systemUptime-mismatchBegan,started:mismatchStart)}
  }
  if passed,enabled{trace.event(.boundary,e.type,e)}
  if enabled,e.type == .keyDown {

@@ -253,6 +253,21 @@ struct InputIncidentShapeProbe {
         let known=sameField && !changedWindow
         let content=known && !Self.sameContent(self.text!,text)
         let cursor=known && self.selection != selection
+        let motion:Int
+        if !known{motion=0}
+        else if !cursor{motion=1}
+        else {
+            // Only range scalars from existing snapshots; no scan on unchanged polling.
+            let count=CFStringGetLength(text as CFString),priorCount=CFStringGetLength(self.text! as CFString)
+            let valid=selection.location>=0 && selection.length>=0 && selection.location<=count && selection.length<=count-selection.location
+            let prior=self.selection!
+            let priorValid=prior.location>=0 && prior.length>=0 && prior.location<=priorCount && prior.length<=priorCount-prior.location
+            if !valid || !priorValid{motion=7}
+            else if prior.length==0 && selection.length>0{motion=4}
+            else if prior.length>0 && selection.length==0{motion=5}
+            else if selection.length>0{motion=6}
+            else{motion=selection.location<prior.location ? 2:3}
+        }
         var evidence=ax
         if evidence != nil {
             if valueClass==0 || !known || content{valueClass=InputIncidentAXEvidence.classify(text)}
@@ -265,7 +280,7 @@ struct InputIncidentShapeProbe {
         }
         if !known || content || cursor{caretPrecedingClass=Self.precedingClass(text,selection)}
         sample+=1;self.text=text;self.selection=selection;field=identity
-        return .init(sample:sample,known:known,content:content,selection:cursor,ax:evidence,caretPrecedingClass:caretPrecedingClass)
+        return .init(sample:sample,known:known,content:content,selection:cursor,ax:evidence,caretPrecedingClass:caretPrecedingClass,selectionMotion:motion)
     }
 }
 
@@ -381,7 +396,43 @@ final class InputIncidentTrace {
         let confirmedAgeMicros:Int?;let targetAgeMicros:Int?
         let committed:Bool;let deferred:Bool;let candidatePreserved:Bool;let historyPreserved:Bool
     }
-    struct ShapeChange {let sample:Int;let known:Bool;let content:Bool;let selection:Bool;var ax:InputIncidentAXEvidence?=nil;var caretPrecedingClass:Int?=nil}
+    // Wall bounds and same-thread CPU only. Never stores a thread ID or event payload.
+    struct WorkEvidence:Codable {
+        let beganAtMicros:Int;let endedAtMicros:Int;let clockValid:Bool
+        let cpuState:Int // 0 unmeasured(AX), 1 measured, 2 unavailable, 3 other thread, 4 counter reversed, 5 invalid wall
+        let cpuMicros:Int?
+    }
+    static func callbackThreadCPU()->UInt64? {
+        var value=timespec()
+        guard clock_gettime(CLOCK_THREAD_CPUTIME_ID,&value)==0,value.tv_sec>=0,value.tv_nsec>=0 else{return nil}
+        return UInt64(value.tv_sec)*1_000_000_000+UInt64(value.tv_nsec)
+    }
+    struct CallbackStart {
+        fileprivate let began:Double,cpu:UInt64?,thread:pthread_t,generation:Int32
+    }
+    private func workEvidence(began:Double,ended:Double,cpuState:Int=0,cpuMicros:Int?=nil)->WorkEvidence {
+        let valid=began.isFinite && ended.isFinite && began>=origin && ended>=began && (ended-origin)*1_000_000<=9_000_000_000_000_000
+        return WorkEvidence(beganAtMicros:valid ? Int((began-origin)*1_000_000):0,endedAtMicros:valid ? Int((ended-origin)*1_000_000):0,clockValid:valid,cpuState:valid ? cpuState:5,cpuMicros:valid ? cpuMicros:nil)
+    }
+    // Only keyDown is sampled. OFF/secure input returns before either clock.
+    func beginCallback(_ type:CGEventType)->CallbackStart? {
+        let generation=gate.generation
+        guard generation>0,type == .keyDown,!IsSecureEventInputEnabled() else{return nil}
+        let began=clock(),cpu=callbackCPU()
+        return CallbackStart(began:began,cpu:cpu,thread:pthread_self(),generation:generation)
+    }
+    private func finishCallback(_ span:CallbackStart?)->WorkEvidence? {
+        guard let span,gate.generation==span.generation else{return nil}
+        let same=pthread_equal(span.thread,pthread_self()) != 0
+        let endCPU=same ? callbackCPU():nil,ended=clock()
+        var state=2,value:Int?
+        if !same{state=3}
+        else if let start=span.cpu,let end=endCPU {
+            if end>=start{state=1;value=Int(min((end-start)/1000,9_000_000_000_000_000))}else{state=4}
+        }
+        return workEvidence(began:span.began,ended:ended,cpuState:state,cpuMicros:value)
+    }
+    struct ShapeChange {let sample:Int;let known:Bool;let content:Bool;let selection:Bool;var ax:InputIncidentAXEvidence?=nil;var caretPrecedingClass:Int?=nil;var selectionMotion:Int?=nil}
     struct ShapeEvidence:Codable {
         // phase 1=new baseline, 2=checkpoint/current capture, 3=closed span.
         let phase:Int;let comparisonKnown:Bool;let contentChanged:Bool;let selectionChanged:Bool
@@ -390,6 +441,7 @@ final class InputIncidentTrace {
         var baselineSequence:Int
         var ax:InputIncidentAXEvidence?=nil
         var caretPrecedingClass:Int?=nil
+        var selectionMotion:Int?=nil
     }
     struct ShapePoint:Codable {let field:Int;let count:Int;let selected:Bool;var evidence:ShapeEvidence}
     struct ShapeBaseline:Codable {let lane:Lane;let active:Bool;let current:ShapePoint;let previous:ShapePoint?}
@@ -403,6 +455,7 @@ final class InputIncidentTrace {
         var shapeEvidence:ShapeEvidence?=nil
         var controlEvidence:InputIncidentControl?=nil
         var eventEvidence:EventEvidence?=nil
+        var workEvidence:WorkEvidence?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -512,6 +565,7 @@ final class InputIncidentTrace {
     private var observationWaits:[Int:DecisionWaitStats]=[:]
     private let storage:DiagnosticLogStore?
     private let clock:()->Double
+    private let callbackCPU:()->UInt64?
     private let origin:Double
     private var ring:[Frame?]
     private var position=0,stored=0,sequence=0,overwritten=0,eventSequence=0
@@ -529,7 +583,7 @@ final class InputIncidentTrace {
     // aggregates. Input callers never wait for a metadata lock.
     private var skippedEvents:[Int:Int]=[:],skippedAuxiliary:[Int:Int]=[:]
     private let writer:((Capture)->Void)?
-    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},writer:((Capture)->Void)?=nil){
+    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
         eventCredits=DispatchSemaphore(value:self.observationCapacity/2)
         shapeCredits=DispatchSemaphore(value:max(1,self.observationCapacity/8))
@@ -548,7 +602,7 @@ final class InputIncidentTrace {
         self.destinationDirectory=destination
         self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory)}
         self.configured=destination != nil || writer != nil;self.gate=DiagnosticCollectionGate(self.configured && initiallyEnabled)
-        self.capacity=max(1,min(capacity,16384));self.clock=clock;origin=clock();self.writer=writer
+        self.capacity=max(1,min(capacity,16384));self.clock=clock;self.callbackCPU=callbackCPU;origin=clock();self.writer=writer
         ring=Array(repeating:nil,count:self.configured ? self.capacity:0)
         if enabled{decisionQueue.async{[self] in storage?.prepareOwnership();captures=storage?.lastCaptureIncident ?? 0}}
     }
@@ -815,8 +869,9 @@ final class InputIncidentTrace {
         } catch {storage.encodingFailed(incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual)}
     }
     // No extra event tag, AX call, event copy, key post or source selection.
-    func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0){
+    func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0,started:CallbackStart?=nil){
         guard enabled,!IsSecureEventInputEnabled() else{return}
+        let work=finishCallback(started),workGeneration=started?.generation
         let time=clock(),reference=EventReference(event,type)
         let evidence = lane == .hid || lane == .main ? EventEvidence(time:time,origin:origin,type:type,event:event):nil
         let code=event.getIntegerValueField(.keyboardEventKeycode)
@@ -828,6 +883,7 @@ final class InputIncidentTrace {
             if editing || pointer{lastEdit=time;invalidateShapes()}
             let (identifier,origin)=eventIdentity(reference)
             append(lane,.event,observedAt:time,observationTiming:timing,event:identifier,edge:edge,category:category,inputOrigin:origin,consumed:consumed,duration:duration)
+            ring[(position-1+capacity)%capacity]?.workEvidence=workGeneration==gate.generation ? work:nil
             ring[(position-1+capacity)%capacity]?.eventEvidence=evidence
             updatePreservedLastFrame()
         }
@@ -935,6 +991,7 @@ final class InputIncidentTrace {
         guard let span else{if enabled{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         guard span.reserveEnd() else{if gate.generation==span.generation{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         let ended=clock(),duration=ended-span.began
+        let work=workEvidence(began:span.began,ended:ended)
         let enqueued=observationClock()
         decisionQueue.async{[self,span] in
             defer{span.finish()}
@@ -944,6 +1001,8 @@ final class InputIncidentTrace {
                 observationOmitted[observationCode(.readEnd,lane),default:0]+=1;return
             }
             append(lane,.read,observedAt:ended,observationTiming:timing,event:read.id,category:2,duration:duration)
+            ring[(position-1+capacity)%capacity]?.workEvidence=work
+            updatePreservedLastFrame()
             }
         }
         if gate.generation==span.generation,duration>=0.05{requestCapture(.axDelay,lane:lane)}
@@ -982,7 +1041,7 @@ final class InputIncidentTrace {
         }
     }
     private func shapeEvidence(_ value:ShapeEvidence,phase:Int)->ShapeEvidence {
-        ShapeEvidence(phase:phase,comparisonKnown:value.comparisonKnown,contentChanged:value.contentChanged,selectionChanged:value.selectionChanged,editingChanged:value.editingChanged,gap:value.gap,editing:value.editing,firstMilliseconds:value.firstMilliseconds,lastMilliseconds:value.lastMilliseconds,observations:value.observations,coalesced:value.coalesced,baselineSequence:value.baselineSequence,ax:value.ax,caretPrecedingClass:value.caretPrecedingClass)
+        ShapeEvidence(phase:phase,comparisonKnown:value.comparisonKnown,contentChanged:value.contentChanged,selectionChanged:value.selectionChanged,editingChanged:value.editingChanged,gap:value.gap,editing:value.editing,firstMilliseconds:value.firstMilliseconds,lastMilliseconds:value.lastMilliseconds,observations:value.observations,coalesced:value.coalesced,baselineSequence:value.baselineSequence,ax:value.ax,caretPrecedingClass:value.caretPrecedingClass,selectionMotion:value.selectionMotion)
     }
     private func appendShape(_ lane:Lane,_ point:ShapePoint,phase:Int,time:Double,timing:DecisionTiming?=nil){
         append(lane,.shape,observedAt:time,observationTiming:timing,count:point.count,selected:point.selected,field:point.field)
@@ -1011,7 +1070,7 @@ final class InputIncidentTrace {
                 if let previous,previous.active,previous.point.evidence.observations>previous.reportedObservations {
                     appendShape(lane,previous.point,phase:3,time:origin+Double(previous.point.evidence.lastMilliseconds)/1000)
                 }
-                let evidence=ShapeEvidence(phase:1,comparisonKnown:known,contentChanged:known && change?.content==true,selectionChanged:known && change?.selection==true,editingChanged:sameField && previous?.editing != editing,gap:gap,editing:editing,firstMilliseconds:ms,lastMilliseconds:ms,observations:1,coalesced:0,baselineSequence:sequence+1,ax:change?.ax,caretPrecedingClass:change?.caretPrecedingClass)
+                let evidence=ShapeEvidence(phase:1,comparisonKnown:known,contentChanged:known && change?.content==true,selectionChanged:known && change?.selection==true,editingChanged:sameField && previous?.editing != editing,gap:gap,editing:editing,firstMilliseconds:ms,lastMilliseconds:ms,observations:1,coalesced:0,baselineSequence:sequence+1,ax:change?.ax,caretPrecedingClass:change?.caretPrecedingClass,selectionMotion:change?.selectionMotion.map{known ? $0:0})
                 let point=ShapePoint(field:fields[identity]!,count:count,selected:selected,evidence:evidence)
                 appendShape(lane,point,phase:1,time:time,timing:timing)
                 shapes[lane]=Shape(field:identity,count:count,selected:selected,editing:editing,active:true,sample:change?.sample,point:point,previous:previous.map{value in var point=value.point;point.evidence=shapeEvidence(point.evidence,phase:3);return point},checkpointAt:time,reportedObservations:1)

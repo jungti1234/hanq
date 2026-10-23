@@ -513,6 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 | (CGEventMask(1) << CGEventType.rightMouseDown.rawValue)
                 | (CGEventMask(1) << CGEventType.otherMouseDown.rawValue)
             let callback: CGEventTapCallBack = { proxy, type, event, context in
+                let incidentStart=InputIncidentTrace.shared.beginCallback(type)
                 let owner = Unmanaged<AppDelegate>.fromOpaque(context!).takeUnretainedValue()
                 var control=InputIncidentControl.begin(.shared,type,event)
                 control?.runtime=(owner.enabled ? 1:0) | (owner.permissionGranted ? 2:0) | (owner.updateRestricted ? 4:0) | (owner.koreanEnabled ? 8:0) | (owner.hanjaEnabled ? 16:0) | (owner.sourceSwitchBarrier.busy ? 32:0) | (owner.mismatchRecovery.busy ? 64:0)
@@ -665,7 +666,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let began=InputIncidentTrace.shared.enabled ? ProcessInfo.processInfo.systemUptime:nil
                     let result=process()
                     if let control{InputIncidentTrace.shared.control(.main,type,event,control,consumed:result==nil)}
-                    if let began{InputIncidentTrace.shared.event(.main,type,event,consumed:result==nil,duration:ProcessInfo.processInfo.systemUptime-began)}
+                    if let began{InputIncidentTrace.shared.event(.main,type,event,consumed:result==nil,duration:ProcessInfo.processInfo.systemUptime-began,started:incidentStart)}
                     return result
                 }
                 if !processed,var value=control {
@@ -705,7 +706,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // after it so capture remains ahead of all main-run-loop input work.
         inputDeliveryOrigin?.stop()
         let routing=InputDeliveryOrigin()
-        routing.diagnosticEvent={type,event,consumed in InputIncidentTrace.shared.event(.hid,type,event,consumed:consumed)}
+        routing.diagnosticReceive={type,event,process in
+            let started=InputIncidentTrace.shared.beginCallback(type)
+            let result=process()
+            InputIncidentTrace.shared.event(.hid,type,event,consumed:result==nil,started:started)
+            return result
+        }
         inputDeliveryOrigin=routing;routing.start()
     }
 
