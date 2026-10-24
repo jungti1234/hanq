@@ -479,13 +479,13 @@ final class MismatchRecoveryEngine:NSObject {
         let handlerStart=ProcessInfo.processInfo.systemUptime
         let beganRecovering=recovering
         defer{if traceLatency{log("event_handler_finished",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"beganRecovering":beganRecovering,"isProbeEvent":event.getIntegerValueField(.eventSourceUserData)==marker,"durationMs":(ProcessInfo.processInfo.systemUptime-handlerStart)*1000])}}
-        if !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),event.getIntegerValueField(.eventSourceUserData) != 0x454F5448 {
+        if !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),event.getIntegerValueField(.eventSourceUserData) != SyntheticInputMarker.manualEdit {
             if type == .keyUp,passedSourceMenuKeys.remove(event.getIntegerValueField(.keyboardEventKeycode)) != nil{return Unmanaged.passUnretained(event)}
             if type == .keyDown,passedSourceMenuKeys.contains(event.getIntegerValueField(.keyboardEventKeycode)){return Unmanaged.passUnretained(event)}
         }
         if enabled,!suspended,type != .tapDisabledByTimeout,type != .tapDisabledByUserInput,
            !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
-           event.getIntegerValueField(.eventSourceUserData) != 0x454F5448,skipRomanObservation(site:.event,event:event){
+           event.getIntegerValueField(.eventSourceUserData) != SyntheticInputMarker.manualEdit,skipRomanObservation(site:.event,event:event){
             // Skipping Korean detection must not forget a press already passed
             // to the editor, or a later repair could delay its physical release.
             let code=event.getIntegerValueField(.keyboardEventKeycode)
@@ -494,7 +494,7 @@ final class MismatchRecoveryEngine:NSObject {
             return Unmanaged.passUnretained(event)
         }
         if enabled{followFrontmost(event:event)}
-        if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==0x454F5448{return Unmanaged.passUnretained(event)}
+        if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             InputDiagnostics.shared.record("mismatch.tap_disabled kind=1 type=\(type.rawValue)")
             monitorTapFailed(1)

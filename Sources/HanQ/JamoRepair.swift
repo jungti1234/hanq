@@ -13,7 +13,6 @@ final class JamoRepair {
     // Only a verified full result may become the next switching baseline.
     var beginTextEdit:(AXUIElement,String)->Int? = {_,_ in 0}
     var endTextEdit:(Int,AXUIElement,String?,NSRange?)->Void = {_,_,_,_ in}
-    private let marker: Int64 = 0x454F5448
     private var hanjaWatchID = 0
     private var watchingHanja = false
     private var confirmationRevision: Int?
@@ -287,6 +286,14 @@ final class JamoRepair {
         let isHanja: Bool
         if case .hanja = action { isHanja = true } else { isHanja = false }
         InputDiagnostics.shared.record("변환 선택 준비: hanja=\(isHanja) selected=\(originalSelection.length > 0)")
+        let pasteKey: CGKeyCode?
+        if case .paste = action {
+            guard let code = PasteShortcut.currentKeyCode() else {
+                InputDiagnostics.shared.record("변환 중단: 현재 자판의 붙여넣기 키를 확인하지 못함")
+                return
+            }
+            pasteKey = code
+        } else { pasteKey = nil }
         var writable: DarwinBoolean = false
         guard AXIsProcessTrusted(),
               AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &writable) == .success,
@@ -317,7 +324,7 @@ final class JamoRepair {
         let expectedRevision = revision
         waitForSelection(element, app: app, pid: pid, text: text, range: range,
                          originalSelection: originalSelection, action: action,
-                         expectedRevision: expectedRevision, inputSourceID: inputSourceID, editToken:editToken, attempt: 0)
+                         expectedRevision: expectedRevision, inputSourceID: inputSourceID, editToken:editToken, pasteKey:pasteKey, attempt: 0)
     }
 
     /// Chromium/Electron may not publish their editable accessibility tree until
@@ -345,7 +352,7 @@ final class JamoRepair {
 
     private func waitForSelection(_ element: AXUIElement, app: AXUIElement, pid: pid_t,
                                   text: String, range: NSRange, originalSelection: NSRange,
-                                  action: Action, expectedRevision: Int, inputSourceID: String?, editToken:Int?, attempt: Int) {
+                                  action: Action, expectedRevision: Int, inputSourceID: String?, editToken:Int?, pasteKey:CGKeyCode?, attempt: Int) {
         // AX selection setters can return before the editor reflects the new range.
         // Do not abandon the transaction with only its selection step applied.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
@@ -366,7 +373,7 @@ final class JamoRepair {
                 switch action {
                 case .paste(let replacement):
                     self.pasteReplacement(element, app:app, pid: pid, text: text, range: range,
-                                          originalSelection: originalSelection, replacement: replacement,inputSourceID:inputSourceID,editToken:editToken)
+                                          originalSelection: originalSelection, replacement: replacement,inputSourceID:inputSourceID,editToken:editToken,pasteKey:pasteKey)
                 case .hanja:
                     // Wait for AX to reflect the selection before opening the
                     // native candidates. The IME owns replacement and Escape.
@@ -378,7 +385,7 @@ final class JamoRepair {
             } else if attempt < 10 {
                 self.waitForSelection(element, app: app, pid: pid, text: text, range: range,
                                       originalSelection: originalSelection, action: action,
-                                      expectedRevision: expectedRevision, inputSourceID: inputSourceID, editToken:editToken, attempt: attempt + 1)
+                                      expectedRevision: expectedRevision, inputSourceID: inputSourceID, editToken:editToken, pasteKey:pasteKey, attempt: attempt + 1)
             } else {
                 NSLog("변환 중단: 선택 반영 시간 초과")
                 _ = self.setSelection(element, originalSelection)
@@ -450,9 +457,16 @@ final class JamoRepair {
     }
 
     private func pasteReplacement(_ element: AXUIElement, app:AXUIElement, pid: pid_t, text: String,
-                                  range: NSRange, originalSelection: NSRange, replacement: String,inputSourceID:String?,editToken:Int?) {
+                                  range: NSRange, originalSelection: NSRange, replacement: String,inputSourceID:String?,editToken:Int?,pasteKey:CGKeyCode?) {
         guard let editToken else{busy=false;return}
         guard AXIsProcessTrusted() else { busy = false;endTextEdit(editToken,element,nil,nil);return }
+        guard let pasteKey, PasteShortcut.currentKeyCode() == pasteKey else {
+            InputDiagnostics.shared.record("변환 중단: 현재 자판의 붙여넣기 키를 확인하지 못함")
+            _ = setSelection(element, originalSelection)
+            busy = false
+            endTextEdit(editToken, element, nil, nil)
+            return
+        }
         let expectedRevision=revision
         let clipboard = NSPasteboard.general
         let saved = (clipboard.pasteboardItems ?? []).map { item in
@@ -473,7 +487,7 @@ final class JamoRepair {
         }
         let ownedChange = clipboard.changeCount
         busy = true
-        postKey(9, flags: .maskCommand, pid: pid)
+        postKey(pasteKey, flags: .maskCommand, pid: pid)
         let expected = (text as NSString).replacingCharacters(in: range, with: replacement)
         // Restore only our clipboard generation, after the editor has consumed it.
         func finish(_ attempt: Int) {
@@ -510,7 +524,7 @@ final class JamoRepair {
         for down in [true, false] {
             guard let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down) else { continue }
             event.flags = flags
-            event.setIntegerValueField(.eventSourceUserData, value: marker)
+            event.setIntegerValueField(.eventSourceUserData, value: SyntheticInputMarker.manualEdit)
             event.postToPid(pid)
         }
     }

@@ -229,7 +229,7 @@ final class OnsetInputGate {
         // Old-session replay must pass, but cannot acknowledge this session or
         // be captured again as physical input.
         if Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)){route = .replayMarker;return Unmanaged.passUnretained(event)}
-        if event.getIntegerValueField(.eventSourceUserData)==0x454F5448{route = .manualMarker;return Unmanaged.passUnretained(event)}
+        if event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{route = .manualMarker;return Unmanaged.passUnretained(event)}
         guard !stopped else{route = .onsetStopped;if type == .keyDown{traceReentry(.key,.stopped)};return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{route = .tapDisabled;fail("tap_disabled");return Unmanaged.passUnretained(event)}
         let now=ProcessInfo.processInfo.systemUptime

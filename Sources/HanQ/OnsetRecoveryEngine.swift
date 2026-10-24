@@ -575,7 +575,7 @@ final class OnsetRecoveryEngine:NSObject {
 
     }
     func event(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
-        if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==0x454F5448{return Unmanaged.passUnretained(event)}
+        if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{emergencyStop("event_tap_disabled");return Unmanaged.passUnretained(event)}
         guard enabled else{return Unmanaged.passUnretained(event)}
         requestImmediateObservation()

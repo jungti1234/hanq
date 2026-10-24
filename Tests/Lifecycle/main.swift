@@ -43,6 +43,41 @@ precondition(String(describing: before) == String(describing: [prefs.object(forK
 owner.statusIcon.stop()
 print("PASS: mandatory-update restriction disables input, blocks reactivation and preserves preferences")
 
+// Exercise the real notice and status rendering without a global event tap.
+let interrupted = AppDelegate()
+interrupted.permissionGranted = true
+interrupted.noteInputInterruption(.timeout)
+precondition(interrupted.inputInterruption == .timeout)
+precondition(interrupted.menuStatus.title.contains("응답 시간 초과"))
+precondition(interrupted.menuStatus.toolTip?.contains("다시 켜세요") == true)
+let notice = interrupted.inputMonitoringNotice.alert!
+precondition(notice.window.isVisible && notice.informativeText.contains("응답 시간 초과"))
+if let path = ProcessInfo.processInfo.environment["HANQ_NOTICE_PREVIEW"],
+   let view = notice.window.contentView,
+   let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+    try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+}
+interrupted.inputMonitoringNotice.closeNotice()
+precondition(!notice.window.isVisible && interrupted.inputInterruption == .timeout)
+interrupted.noteInputInterruption(.timeout)
+precondition(!notice.window.isVisible, "repeat notification must not reopen a dismissed notice")
+interrupted.noteInputInterruption(.systemInput)
+precondition(notice.window.isVisible && interrupted.menuStatus.title.contains("시스템에서 중단"))
+interrupted.inputMonitoringNotice.closeNotice()
+interrupted.setUpdateRestricted(true)
+interrupted.startMapping()
+precondition(interrupted.inputInterruption == .systemInput && interrupted.tap == nil)
+precondition(interrupted.menuStatus.title.contains("업데이트") && interrupted.menuStatus.toolTip == nil)
+interrupted.updateRestricted = false
+interrupted.permissionGranted = false
+interrupted.refreshStatus()
+precondition(interrupted.menuStatus.title.contains("손쉬운 사용") && interrupted.menuStatus.toolTip == nil)
+precondition(InputMonitoringInterruption(eventType: .tapDisabledByTimeout) == .timeout)
+precondition(InputMonitoringInterruption(eventType: .tapDisabledByUserInput) == .systemInput)
+precondition(InputMonitoringInterruption(eventType: .keyDown) == nil)
+print("PASS: interruption reason, nonmodal notice, dismissed/repeated notice, failed restart and permission/policy precedence")
+
 precondition(owner.updater.responds(to: NSSelectorFromString("updater:didFinishLoadingAppcast:")))
 precondition(owner.updater.responds(to: NSSelectorFromString("allowedChannelsForUpdater:")))
 print("PASS: Sparkle optional delegate callbacks use the expected Objective-C selectors")

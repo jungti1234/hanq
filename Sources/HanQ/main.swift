@@ -178,6 +178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     var permissionGranted = false
     var pendingActivation = true
+    private(set) var inputInterruption: InputMonitoringInterruption?
+    let inputMonitoringNotice = InputMonitoringNotice()
     let status = NSTextField(wrappingLabelWithString: "한영키·한자키 꺼짐")
     var tap: CFMachPort?
     var inputDeliveryOrigin: InputDeliveryOrigin?
@@ -426,6 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             permissionRecovery.exitAfterPermissionLoss()
         }
         if !granted {
+            inputMonitoringNotice.closeNotice()
             if permissionGranted || tap != nil {
                 NSLog("입력 감지 해제: 손쉬운 사용 권한 없음")
             }
@@ -455,6 +458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard updateRestricted != restricted else { return }
         updateRestricted = restricted
         if restricted {
+            inputMonitoringNotice.closeNotice()
             pendingActivation = false
             stopMapping()
             hud.hide()
@@ -529,9 +533,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         owner.hanjaEnabled = false
                         owner.pendingActivation = false
                         NSLog("입력 감지 중단: %u; 콜백 반환 후 해제", type.rawValue)
+                        let stoppedTap = owner.tap
                         DispatchQueue.main.async {
+                            // Ignore a queued notification from a replaced tap.
+                            guard let stoppedTap, owner.tap === stoppedTap else { return }
                             owner.stopMapping()
                             owner.updatePermission()
+                            if let reason = InputMonitoringInterruption(eventType: type) {
+                                owner.noteInputInterruption(reason)
+                            }
                         }
                         return Unmanaged.passUnretained(event)
                     }
@@ -541,8 +551,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         DispatchQueue.main.async { owner.stopMapping() }
                         return Unmanaged.passUnretained(event)
                     }
-                    if event.getIntegerValueField(.eventSourceUserData) == 0x454F5448 || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) {
-                        control?.route=(event.getIntegerValueField(.eventSourceUserData)==0x454F5448 ? InputIncidentControl.Route.manualMarker:.replayMarker).rawValue
+                    if event.getIntegerValueField(.eventSourceUserData) == SyntheticInputMarker.manualEdit || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) {
+                        control?.route=(event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit ? InputIncidentControl.Route.manualMarker:.replayMarker).rawValue
                         return Unmanaged.passUnretained(event)
                     }
                     let originalRecipient=owner.inputDeliveryOrigin?.take(type,event)
@@ -697,7 +707,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mismatchRecovery.start()
         if inputDeliveryOrigin == nil {refreshInputDeliveryOrigin()}
 
+        inputInterruption = nil
+        inputMonitoringNotice.closeNotice()
         refreshStatus()
+    }
+
+    func noteInputInterruption(_ reason: InputMonitoringInterruption) {
+        guard inputInterruption != reason else { return }
+        inputInterruption = reason
+        refreshStatus()
+        if permissionGranted && !updateRestricted { inputMonitoringNotice.show(reason) }
     }
 
     func refreshInputDeliveryOrigin() {
@@ -866,7 +885,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hanjaItem.isEnabled = permissionGranted && !updateRestricted
         hudItem.isEnabled = permissionGranted && !updateRestricted
         menuStatus.title = permissionGranted ? status.stringValue : "손쉬운 사용 권한을 기다리고 있어요"
+        menuStatus.toolTip = nil
+        if let reason = inputInterruption, permissionGranted {
+            menuStatus.title = reason.status
+            menuStatus.toolTip = reason.explanation + "\n" + reason.guidance
+        }
         if updateRestricted { menuStatus.title = "업데이트가 필요해요 · 한Q 기능 중단" }
+        if updateRestricted { menuStatus.toolTip = nil }
         statusIcon.setDisabled(!koreanEnabled && !hanjaEnabled)
     }
     @objc func toggleKorean() {

@@ -3,6 +3,9 @@ var checks=0
 func check(_ value:Bool,_ name:String){if !value{FileHandle.standardError.write(Data("FAIL: \(name)\n".utf8));exit(1)};checks+=1}
 func event(_ code:UInt16=13,_ down:Bool=true)->CGEvent{CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!}
 let g=OnsetInputGate(marker:99);g.beat()
+let manualGate=OnsetInputGate(marker:99);manualGate.beat();_ = manualGate.begin()
+let manualEvent=event();manualEvent.setIntegerValueField(.eventSourceUserData,value:SyntheticInputMarker.manualEdit)
+check(manualGate.receive(.keyDown,manualEvent) != nil && manualGate.take().isEmpty,"manual edit is not retained or replayed as original input")
 check(g.receive(.keyDown,event()) != nil,"idle passes input")
 check(g.begin(),"hold begins")
 for i in 0..<100 {check(g.receive(i%2==0 ? .keyDown:.keyUp,event(UInt16(i%40),i%2==0)) == nil,"held")}

@@ -6,7 +6,7 @@ source scripts/test-workspace.sh
 stage=$(hanq_test_stage control-impact)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p .build/hanq/module-cache
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/InputSourceObserver.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/Diagnostics/Controls/Impact/main.swift -o "$stage/tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/InputSourceObserver.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/Diagnostics/Controls/Impact/main.swift -o "$stage/tests"
 python3 - "$stage/tests" "$output" <<'PY'
 import json,pathlib,statistics,subprocess,sys
 exe=pathlib.Path(sys.argv[1]);out=pathlib.Path(sys.argv[2]).resolve();out.mkdir(exist_ok=False,parents=True)

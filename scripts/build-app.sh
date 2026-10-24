@@ -85,6 +85,7 @@ cp Tests/MismatchRecovery/NativeLayoutExpectations.json "$test_stage/Tests/Misma
 (cd "$test_stage"; ./filter-tests)
 bash scripts/test-hanja-candidates.sh
 bash scripts/test-external-keyboards.sh
+bash scripts/test-paste-shortcut.sh
 bash scripts/test-input-focus.sh
 bash scripts/test-input-delivery-origin.sh
 bash scripts/test-keyboard-state-mirror.sh
