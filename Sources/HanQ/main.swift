@@ -179,7 +179,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var permissionGranted = false
     var pendingActivation = true
     private(set) var inputInterruption: InputMonitoringInterruption?
-    let inputMonitoringNotice = InputMonitoringNotice()
+    lazy var inputMonitoringNotice: InputMonitoringNotice = {
+        let notice = InputMonitoringNotice()
+        notice.onReport = { [weak self] in self?.reportInputInterruption() }
+        notice.onClose = { [weak self] in
+            self?.interruptionFeedbackRequest = nil
+            self?.interruptionFeedbackLoading = false
+        }
+        return notice
+    }()
+    private var interruptionFeedbackRequest: UUID?
+    private var interruptionFeedbackLoading = false
+    var interruptionSnapshotLoader: (@escaping (Result<DiagnosticReviewSnapshot, Error>) -> Void) -> Void = {
+        DiagnosticReviewController.loadSnapshot(from: .shared, completion: $0)
+    }
+    var feedbackPageOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     let status = NSTextField(wrappingLabelWithString: "한영키·한자키 꺼짐")
     var tap: CFMachPort?
     var inputDeliveryOrigin: InputDeliveryOrigin?
@@ -201,7 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let inputIncidentItem = NSMenuItem(title:"방금 발생한 문제 기록",action:#selector(markInputIncident),keyEquivalent:"")
     let inputDiagnosticExportItem = NSMenuItem(title:"진단 기록 내보내기…",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
-    private var diagnosticReview:DiagnosticReviewController?
+    private(set) var diagnosticReview:DiagnosticReviewController?
     private var hasDiagnosticLogs=false
     let menuStatus = NSMenuItem(title: "준비 중", action: nil, keyEquivalent: "")
 
@@ -812,6 +826,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         changingInputDiagnostics=true
         InputIncidentTrace.shared.setCollectionEnabled(active){[weak self] in
             self?.changingInputDiagnostics=false;self?.refreshStatus()
+            self?.continueInterruptionFeedback()
         }
         refreshStatus()
     }
@@ -828,12 +843,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if diagnosticReview.window?.isMiniaturized == true {diagnosticReview.window?.deminiaturize(nil)}
             diagnosticReview.window?.makeKeyAndOrderFront(nil);return
         }
+        let review=makeDiagnosticReview()
+        review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
+        review.load(from:InputIncidentTrace.shared)
+    }
+    private func makeDiagnosticReview() -> DiagnosticReviewController {
         let review=DiagnosticReviewController(environment:diagnosticReviewEnvironment())
         diagnosticReview=review
         review.onClose={ [weak self] in self?.diagnosticReview=nil }
         review.onFeedback={ [weak self] in self?.openFeedback() }
-        review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
-        review.load(from:InputIncidentTrace.shared)
+        return review
+    }
+    func reportInputInterruption() {
+        guard interruptionFeedbackRequest == nil, inputMonitoringNotice.alert?.window.isVisible == true else { return }
+        interruptionFeedbackRequest=UUID()
+        inputMonitoringNotice.setReporting(true)
+        continueInterruptionFeedback()
+    }
+    private func continueInterruptionFeedback() {
+        guard let request=interruptionFeedbackRequest, !changingInputDiagnostics, !interruptionFeedbackLoading else { return }
+        interruptionFeedbackLoading=true
+        interruptionSnapshotLoader { [weak self] result in
+            guard let self, self.interruptionFeedbackRequest == request else { return }
+            self.inputMonitoringNotice.closeNotice()
+            switch result {
+            case .success(let snapshot) where snapshot.incidents.isEmpty:
+                self.openFeedback()
+            case .failure(let error) where (error as? DiagnosticLogExport.Failure) == .noLogs:
+                self.openFeedback()
+            default:
+                let review=self.diagnosticReview ?? self.makeDiagnosticReview()
+                if !review.hasRecords { review.installLoadResult(result) }
+                if review.window?.isMiniaturized == true { review.window?.deminiaturize(nil) }
+                review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
+            }
+        }
     }
     private func diagnosticReviewEnvironment()->DiagnosticReviewEnvironment {
         let defaults=UserDefaults.standard,info=Bundle.main.infoDictionary ?? [:]
@@ -938,7 +982,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openFeedback() {
-        guard let url = FeedbackForm.url(), NSWorkspace.shared.open(url) else {
+        guard let url = FeedbackForm.url(), feedbackPageOpener(url) else {
             let alert = NSAlert()
             alert.messageText = "피드백 페이지를 열 수 없어요."
             alert.informativeText = "기본 웹 브라우저를 확인한 뒤 다시 시도해 주세요."

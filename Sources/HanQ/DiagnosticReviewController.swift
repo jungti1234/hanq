@@ -33,6 +33,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     private static let worker = DispatchQueue(label: "hanq.diagnostics.review", qos: .utility)
     private let environment: DiagnosticReviewEnvironment
     private var snapshot: DiagnosticReviewSnapshot?
+    var hasRecords: Bool { snapshot?.incidents.isEmpty == false }
     private var selected = Set<String>()
     private var archive: DiagnosticReviewArchive?
     private var generation = 0
@@ -74,21 +75,33 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         generation += 1
         let request = generation
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("HanQ-Review-" + UUID().uuidString)
-        trace.prepareExport(to: directory, reviewMetadata: true) { [weak self] result in
-            Self.worker.async {
+        Self.loadSnapshot(from: trace, directory: directory) { [weak self] result in
+            guard let self, !self.closed, self.generation == request else { return }
+            self.installLoadResult(result)
+        }
+    }
+
+    /// Share the writer's immutable snapshot with the interruption report route.
+    /// Pending post-captures finish before this decides whether logs exist.
+    static func loadSnapshot(from trace: InputIncidentTrace,
+                             directory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("HanQ-Review-" + UUID().uuidString),
+                             completion: @escaping (Result<DiagnosticReviewSnapshot, Error>) -> Void) {
+        trace.prepareExport(to: directory, reviewMetadata: true) { result in
+            worker.async {
                 let loaded: Result<DiagnosticReviewSnapshot, Error>
                 do { try result.get(); loaded = .success(try DiagnosticReviewSnapshot(directory: directory)) }
                 catch { try? FileManager.default.removeItem(at: directory); loaded = .failure(error) }
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, !self.closed, self.generation == request else { return }
-                    switch loaded {
-                    case .success(let snapshot): self.install(snapshot)
-                    case .failure:
-                        self.countLabel.stringValue = "기록을 불러오지 못했습니다."
-                        self.statusLabel.stringValue = "기록을 안전하게 읽을 수 없습니다. 원본은 유지됩니다. 창을 닫고 다시 시도해 주세요."
-                    }
-                }
+                DispatchQueue.main.async { completion(loaded) }
             }
+        }
+    }
+    func installLoadResult(_ result: Result<DiagnosticReviewSnapshot, Error>) {
+        guard !closed else { return }
+        switch result {
+        case .success(let snapshot): install(snapshot)
+        case .failure:
+            countLabel.stringValue = "기록을 불러오지 못했습니다."
+            statusLabel.stringValue = "기록을 안전하게 읽을 수 없습니다. 원본은 유지됩니다. 창을 닫고 다시 시도해 주세요."
         }
     }
     /// Also used by an isolated UI fixture; no app singleton is needed.

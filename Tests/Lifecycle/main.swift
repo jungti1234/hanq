@@ -78,6 +78,72 @@ precondition(InputMonitoringInterruption(eventType: .tapDisabledByUserInput) == 
 precondition(InputMonitoringInterruption(eventType: .keyDown) == nil)
 print("PASS: interruption reason, nonmodal notice, dismissed/repeated notice, failed restart and permission/policy precedence")
 
+// The report button uses a fresh immutable snapshot rather than the menu's
+// cached availability. All files are synthetic; the browser is intercepted.
+do {
+ let fm=FileManager.default
+ let root=fm.temporaryDirectory.appendingPathComponent("hanq-interruption-feedback-"+UUID().uuidString)
+ try fm.createDirectory(at:root,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+ defer {try? fm.removeItem(at:root)}
+ let store=DiagnosticLogStore(directory:root.appendingPathComponent("store"),policy:.incidentDefault)
+ let data=try JSONSerialization.data(withJSONObject:["schema":1,"incident":1,"phase":0,"trigger":5,"frames":[]] as [String:Any])
+ precondition(store.save(data,incident:1,phase:0,automatic:true) == .saved)
+ let directory=root.appendingPathComponent("snapshot")
+ try store.copyExportSnapshot(to:directory,reviewMetadata:true)
+ let snapshot=try DiagnosticReviewSnapshot(directory:directory)
+ let app=AppDelegate()
+ app.permissionGranted=true
+ var opened=0,loads=0
+ var complete:((Result<DiagnosticReviewSnapshot,Error>)->Void)?
+ app.feedbackPageOpener={_ in opened+=1;return true}
+ app.interruptionSnapshotLoader={loads+=1;complete=$0}
+ func show(){app.noteInputInterruption(.timeout);app.inputMonitoringNotice.show(.timeout)}
+ func click(){app.inputMonitoringNotice.alert!.buttons[1].performClick(nil)}
+ show()
+ let notice=app.inputMonitoringNotice.alert!
+ precondition(notice.informativeText.contains("진단 기록과 함께"))
+ precondition(notice.buttons.count==2 && notice.buttons[0].title=="닫기" && notice.buttons[0].keyEquivalent=="\r")
+ precondition(notice.buttons[1].title=="문제 알리기…")
+ // A menu can still be disabled before its asynchronous refresh sees a log.
+ precondition(!app.inputDiagnosticExportItem.isEnabled)
+ click();app.reportInputInterruption()
+ precondition(loads==1 && !notice.buttons[1].isEnabled)
+ complete?(.success(snapshot))
+ precondition(opened==0 && app.diagnosticReview?.hasRecords==true && app.diagnosticReview?.window?.isVisible==true)
+ precondition(!notice.window.isVisible && !app.enabled && app.tap==nil)
+ func waitForWindow(_ ready:()->Bool) {
+  let deadline=Date().addingTimeInterval(5)
+  while !ready() && Date()<deadline {RunLoop.current.run(until:Date().addingTimeInterval(0.01))}
+  precondition(ready(), "window animation did not settle")
+ }
+ app.diagnosticReview?.window?.miniaturize(nil)
+ waitForWindow {app.diagnosticReview?.window?.isMiniaturized==true}
+ show();click();complete?(.success(snapshot))
+ waitForWindow {app.diagnosticReview?.window?.isMiniaturized==false}
+ precondition(opened==0)
+ app.diagnosticReview?.close()
+ precondition(app.diagnosticReview==nil)
+ show();click();complete?(.failure(DiagnosticLogExport.Failure.noLogs))
+ precondition(opened==1 && app.diagnosticReview==nil && !notice.window.isVisible)
+ show();click();complete?(.failure(DiagnosticLogExport.Failure.unavailable))
+ precondition(opened==1 && app.diagnosticReview?.window?.isVisible==true)
+ precondition(app.diagnosticReview?.hasRecords==false)
+ // A previously failed review can be reused when fresh records become available.
+ show();click();complete?(.success(snapshot))
+ precondition(app.diagnosticReview?.hasRecords==true)
+ app.diagnosticReview?.close()
+ show();click();let stale=complete
+ app.inputMonitoringNotice.closeNotice()
+ show();click()
+ stale?(.failure(DiagnosticLogExport.Failure.noLogs))
+ precondition(opened==1 && notice.window.isVisible && !notice.buttons[1].isEnabled)
+ app.setUpdateRestricted(true)
+ complete?(.success(snapshot))
+ precondition(opened==1 && app.diagnosticReview==nil && !notice.window.isVisible)
+ precondition(app.inputInterruption == .timeout && app.tap==nil)
+ print("PASS: interruption report button, fresh records/review reuse, empty-store feedback, read failure and cancelled stale results")
+}
+
 precondition(owner.updater.responds(to: NSSelectorFromString("updater:didFinishLoadingAppcast:")))
 precondition(owner.updater.responds(to: NSSelectorFromString("allowedChannelsForUpdater:")))
 print("PASS: Sparkle optional delegate callbacks use the expected Objective-C selectors")

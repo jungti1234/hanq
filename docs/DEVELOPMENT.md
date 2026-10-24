@@ -500,7 +500,7 @@ macOS `proc_pid_rusage`의 CPU 누계는 Mach tick이므로 `mach_timebase_info`
 빌드 스크립트는 `Tests/main.swift`의 로직 검사와 다음 검사를 실행한다.
 
 - `scripts/test-diagnostics.sh`: 진단 모드에서만 메시지 평가·기록
-- `scripts/test-lifecycle.sh`: 이벤트 탭 해제
+- `scripts/test-lifecycle.sh`: 이벤트 탭 해제·중단 안내·문제 알리기의 기록 유무 분기, 읽기 실패·중복 클릭·닫힌 안내의 지연 결과 배제
 - `scripts/test-watchdog.sh`: 응답 중단 시 종료
 - `scripts/test-permission-monitor.sh`: 권한 감시 실패·중단 경로
 - `scripts/test-recovery.sh`: 권한 상실 후 재실행과 반복 방지
