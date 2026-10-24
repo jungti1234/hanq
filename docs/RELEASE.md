@@ -93,6 +93,8 @@ GitHub의 Pre-release 표시는 Sparkle 채널을 분리하지 않는다. 베타
 
 다음은 유지관리자가 수행할 배포 절차다. 로컬 준비와 GitHub Draft 생성은 별도 명령이다.
 
+후보 생성 전에 확정한 배포 커밋으로 [기본 Swift·최신 안정 Swift 추가 검사](DEVELOPMENT.md#기본-swift와-최신-안정-swift로-추가-검사)를 수행한다. 실행 당시 공식 최신판과 각 Mac의 기본 컴파일러를 자동 선택하며, 두 빌드·자동 검사의 결과와 동일 입력 해시를 확인한다. 다운로드·호환성 실패나 미실행을 통과로 기록하지 않는다. 호환성 검사용 ad-hoc 앱은 배포하지 않으며 아래에서 동일 인증서의 배포 후보를 별도로 만든다.
+
 ```sh
 bash scripts/build-app.sh --candidate --signing-identity <인증서의-40자리-SHA1>
 python3 -m pip install --target .build/dmg-design-tools -r packaging/dmg/requirements.txt
