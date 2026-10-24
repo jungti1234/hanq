@@ -151,6 +151,86 @@ enum JamoComposer {
         return NSRange(location: start, length: contentsEnd - start)
     }
 
+    struct Edit: Equatable {
+        var range: NSRange
+        var replacement: String
+    }
+
+    /// Manual-edit provenance only. The hot composition path above is unchanged.
+    /// Retain every unchanged source character, including islands between edits.
+    static func edits(in text: String, range: NSRange) -> [Edit]? {
+        let ns = text as NSString
+        guard range.location >= 0, range.length >= 0, range.location <= ns.length,
+              range.length <= ns.length - range.location, Range(range, in: text) != nil else { return nil }
+        if range.length > 0 {
+            guard ns.rangeOfComposedCharacterSequences(for: range) == range else { return nil }
+        } else if range.location < ns.length {
+            guard ns.rangeOfComposedCharacterSequence(at: range.location).location == range.location else { return nil }
+        }
+        let original = ns.substring(with: range)
+        struct Cell { let character: Character; let range: NSRange }
+        var cells: [Cell] = [], offset = 0, boundaries: Set<Int> = [0]
+        for character in original {
+            let value = String(character), span = NSRange(location: offset, length: value.utf16.count)
+            let normalized = character.unicodeScalars.contains { (0x1100...0x11FF).contains($0.value) }
+                ? compose(value) : value
+            cells += normalized.map { Cell(character: $0, range: span) }
+            offset += span.length
+            boundaries.insert(offset)
+        }
+        var pieces: [Edit] = [], i = 0
+        func vowel(_ index: Int) -> Bool { index < cells.count && vowelIndexes[cells[index].character] != nil }
+        func emit(_ end: Int, _ value: String) {
+            let span = NSRange(location: cells[i].range.location,
+                               length: NSMaxRange(cells[end - 1].range) - cells[i].range.location)
+            if let last = pieces.last, span.location < NSMaxRange(last.range) {
+                pieces[pieces.count - 1].range.length = max(NSMaxRange(last.range), NSMaxRange(span)) - last.range.location
+                pieces[pieces.count - 1].replacement += value
+            } else { pieces.append(Edit(range: span, replacement: value)) }
+        }
+        while i < cells.count {
+            guard let initial = initialIndexes[cells[i].character], vowel(i + 1) else {
+                emit(i + 1, String(cells[i].character)); i += 1; continue
+            }
+            var v = cells[i + 1].character, next = i + 2
+            if next < cells.count, let combined = vowelPairs[String([v, cells[next].character])] {
+                v = combined; next += 1
+            }
+            if next < cells.count, vowel(next + 1), let pair = splitFinals[cells[next].character] {
+                let span = cells[next].range
+                cells.replaceSubrange(next...next, with: pair.map { Cell(character: $0, range: span) })
+            }
+            var final = 0
+            if next < cells.count, let candidate = finalIndexes[cells[next].character], candidate > 0, !vowel(next + 1) {
+                final = candidate; next += 1
+                if next < cells.count, !vowel(next + 1),
+                   let combined = finalPairs[String([finals[final], cells[next].character])],
+                   let combinedIndex = finalIndexes[combined] { final = combinedIndex; next += 1 }
+            }
+            let code = 0xAC00 + (initial * 21 + vowelIndexes[v]!) * 28 + final
+            emit(next, String(Unicode.Scalar(code)!)); i = next
+        }
+        let source = original as NSString
+        var edits: [Edit] = []
+        for piece in pieces where !source.substring(with: piece.range).utf8.elementsEqual(piece.replacement.utf8) {
+            if let last = edits.last, NSMaxRange(last.range) == piece.range.location {
+                edits[edits.count - 1].range.length += piece.range.length
+                edits[edits.count - 1].replacement += piece.replacement
+            } else { edits.append(piece) }
+        }
+        var verified = "", cursor = 0
+        for edit in edits {
+            guard boundaries.contains(edit.range.location), boundaries.contains(NSMaxRange(edit.range)),
+                  edit.range.location >= cursor else { return nil }
+            verified += source.substring(with: NSRange(location: cursor, length: edit.range.location - cursor))
+            verified += edit.replacement
+            cursor = NSMaxRange(edit.range)
+        }
+        verified += source.substring(from: cursor)
+        guard verified.utf8.elementsEqual(compose(original).utf8) else { return nil }
+        return edits.map { Edit(range: NSRange(location: range.location + $0.range.location, length: $0.range.length), replacement: $0.replacement) }
+    }
+
     /// Select the Hangul immediately before the caret so the IME receives a
     /// replacement range, not an insertion point. AX ranges use UTF-16 offsets.
     static func hanjaTargetRange(in text: String, selection: NSRange) -> NSRange? {

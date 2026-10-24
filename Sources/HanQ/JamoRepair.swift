@@ -29,7 +29,20 @@ final class JamoRepair {
 
     private enum Action {
         case paste(String)
+        case compose(Composition)
         case hanja
+
+        var isPaste: Bool { if case .hanja = self { return false }; return true }
+        func ranges(_ fallback: NSRange) -> [NSRange] {
+            if case .compose(let plan) = self { return plan.edits.map(\.range) }
+            return [fallback]
+        }
+    }
+
+    private struct Composition {
+        let edits: [JamoComposer.Edit]
+        let pasteboard: JamoPasteboard
+        let expected: String
     }
 
     func inputDidChange(type: CGEventType? = nil, key: Int64 = -1, flags: CGEventFlags = []) {
@@ -100,6 +113,36 @@ final class JamoRepair {
             AXValueCreate(.cfRange, &value)!) == .success
     }
 
+    private func selections(_ element: AXUIElement) -> [NSRange]? {
+        guard let values = attribute(element, kAXSelectedTextRangesAttribute) as? [AnyObject], !values.isEmpty else { return nil }
+        var result: [NSRange] = []
+        for value in values {
+            var range = CFRange()
+            guard CFGetTypeID(value) == AXValueGetTypeID(),
+                  AXValueGetValue(value as! AXValue, .cfRange, &range), range.location >= 0, range.length >= 0 else { return nil }
+            result.append(NSRange(location: range.location, length: range.length))
+        }
+        return result
+    }
+
+    private func setSelections(_ element: AXUIElement, _ ranges: [NSRange]) -> Bool {
+        if ranges.count == 1 { return setSelection(element, ranges[0]) }
+        var writable: DarwinBoolean = false
+        guard !ranges.isEmpty,
+              AXUIElementIsAttributeSettable(element, kAXSelectedTextRangesAttribute as CFString, &writable) == .success,
+              writable.boolValue else { return false }
+        let values = ranges.map { range -> AXValue in
+            var value = CFRange(location: range.location, length: range.length)
+            return AXValueCreate(.cfRange, &value)!
+        }
+        return AXUIElementSetAttributeValue(element, kAXSelectedTextRangesAttribute as CFString, values as CFArray) == .success
+    }
+
+    private func selectionMatches(_ element: AXUIElement, _ ranges: [NSRange]) -> Bool {
+        if ranges.count == 1 { return selection(element) == ranges[0] }
+        return selections(element) == ranges
+    }
+
     private func perform(pid: pid_t, allowHanja: Bool, inputSourceID: String?, readAttempt: Int = 0) {
         guard AXIsProcessTrusted(), !busy, InputSourceSnapshot.read()?.id == inputSourceID else { return }
         InputDiagnostics.shared.record("자모 요청: 접근성 읽기 시작")
@@ -141,7 +184,14 @@ final class JamoRepair {
             range = hanjaRange
             action = .hanja
         } else {
-            action = .paste(replacement)
+            guard let edits = JamoComposer.edits(in: text, range: range), let first = edits.first,
+                  let pasteboard = JamoPasteboard.make(edits.map(\.replacement)) else {
+                InputDiagnostics.shared.record("자모 변환 중단: 변경 구간 검증 실패")
+                return
+            }
+            action = .compose(Composition(edits: edits, pasteboard: pasteboard,
+                expected: (text as NSString).replacingCharacters(in: range, with: replacement)))
+            range = first.range
         }
         let isHanja: Bool
         if case .hanja = action { isHanja = true } else { isHanja = false }
@@ -287,7 +337,7 @@ final class JamoRepair {
         if case .hanja = action { isHanja = true } else { isHanja = false }
         InputDiagnostics.shared.record("변환 선택 준비: hanja=\(isHanja) selected=\(originalSelection.length > 0)")
         let pasteKey: CGKeyCode?
-        if case .paste = action {
+        if action.isPaste {
             guard let code = PasteShortcut.currentKeyCode() else {
                 InputDiagnostics.shared.record("변환 중단: 현재 자판의 붙여넣기 키를 확인하지 못함")
                 return
@@ -311,12 +361,13 @@ final class JamoRepair {
         // its boundary before the first asynchronous wait, so a source request
         // cannot overtake selection and cancel the pending paste.
         let editToken:Int?
-        if case .paste = action {
+        if action.isPaste {
             guard let inputSourceID,let token=beginTextEdit(element,inputSourceID) else{return}
             editToken=token
         }else{editToken=nil}
-        guard setSelection(element,range) else {
+        guard setSelections(element, action.ranges(range)) else {
             InputDiagnostics.shared.record("변환 중단: 선택 설정 또는 입력 상태 재확인 실패")
+            _ = setSelection(element, originalSelection)
             if let editToken{endTextEdit(editToken,element,nil,nil)}
             return
         }
@@ -369,11 +420,15 @@ final class JamoRepair {
                 if let editToken{self.endTextEdit(editToken,element,nil,nil)}
                 return
             }
-            if self.selection(element) == range {
+            if self.selectionMatches(element, action.ranges(range)) {
                 switch action {
                 case .paste(let replacement):
                     self.pasteReplacement(element, app:app, pid: pid, text: text, range: range,
                                           originalSelection: originalSelection, replacement: replacement,inputSourceID:inputSourceID,editToken:editToken,pasteKey:pasteKey)
+                case .compose(let plan):
+                    self.pasteReplacement(element, app: app, pid: pid, text: text, range: range,
+                        originalSelection: originalSelection, replacement: plan.pasteboard.string,
+                        inputSourceID: inputSourceID, editToken: editToken, pasteKey: pasteKey, composition: plan)
                 case .hanja:
                     // Wait for AX to reflect the selection before opening the
                     // native candidates. The IME owns replacement and Escape.
@@ -457,7 +512,7 @@ final class JamoRepair {
     }
 
     private func pasteReplacement(_ element: AXUIElement, app:AXUIElement, pid: pid_t, text: String,
-                                  range: NSRange, originalSelection: NSRange, replacement: String,inputSourceID:String?,editToken:Int?,pasteKey:CGKeyCode?) {
+                                  range: NSRange, originalSelection: NSRange, replacement: String,inputSourceID:String?,editToken:Int?,pasteKey:CGKeyCode?, composition:Composition? = nil) {
         guard let editToken else{busy=false;return}
         guard AXIsProcessTrusted() else { busy = false;endTextEdit(editToken,element,nil,nil);return }
         guard let pasteKey, PasteShortcut.currentKeyCode() == pasteKey else {
@@ -479,16 +534,34 @@ final class JamoRepair {
             }
             if !items.isEmpty{clipboard.writeObjects(items)}
         }
+        guard revision == expectedRevision, AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              InputSourceSnapshot.read()?.id == inputSourceID,
+              attribute(app, kAXFocusedUIElementAttribute).map({ CFEqual($0, element) }) == true,
+              (attribute(element, kAXValueAttribute) as? String)?.utf8.elementsEqual(text.utf8) == true,
+              selectionMatches(element, composition?.edits.map(\.range) ?? [range]) else {
+            busy = false; endTextEdit(editToken, element, nil, nil); return
+        }
         clipboard.clearContents()
         let clearedChange=clipboard.changeCount
         guard clipboard.setString(replacement, forType: .string) else {
             if clipboard.changeCount==clearedChange{restoreClipboard()}
             _ = setSelection(element, originalSelection); busy = false;endTextEdit(editToken,element,nil,nil);return
         }
+        if let metadata = composition?.pasteboard.multipleSelection {
+            let stringChange = clipboard.changeCount
+            guard clipboard.setData(metadata, forType: .multipleTextSelection) else {
+                if clipboard.changeCount == stringChange { restoreClipboard() }
+                _ = setSelection(element, originalSelection); busy = false; endTextEdit(editToken, element, nil, nil); return
+            }
+        }
         let ownedChange = clipboard.changeCount
         busy = true
         postKey(pasteKey, flags: .maskCommand, pid: pid)
-        let expected = (text as NSString).replacingCharacters(in: range, with: replacement)
+        let expected = composition?.expected ?? (text as NSString).replacingCharacters(in: range, with: replacement)
+        // Preserve the editor's native paste caret, including its Undo/Redo
+        // history. A later AX-only move would not belong to that undo action.
+        let expectedCaret = range.location + (composition?.edits.first?.replacement ?? replacement).utf16.count
         // Restore only our clipboard generation, after the editor has consumed it.
         func finish(_ attempt: Int) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
@@ -496,14 +569,15 @@ final class JamoRepair {
                 let value = self.attribute(element, kAXValueAttribute) as? String
                 let unchanged = value.map { $0.utf8.elementsEqual(text.utf8) } == true
                 let caret=self.selection(element)
-                let expectedCaret=range.location+replacement.utf16.count
                 let matched=value.map{$0.utf8.elementsEqual(expected.utf8)} == true
                 let validCaret=caret==NSRange(location:expectedCaret,length:0)
                 let contextUnchanged=self.revision==expectedRevision && AXIsProcessTrusted()
                     && !IsSecureEventInputEnabled() && NSWorkspace.shared.frontmostApplication?.processIdentifier==pid
+                    && InputSourceSnapshot.read()?.id==inputSourceID
+                    && self.attribute(app,kAXFocusedUIElementAttribute).map{CFEqual($0,element)} == true
                 if contextUnchanged,(unchanged || (matched && !validCaret)),attempt<30 {finish(attempt+1);return}
                 if clipboard.changeCount == ownedChange {restoreClipboard()}
-                if unchanged, self.selection(element) == range,
+                if unchanged, self.selectionMatches(element, composition?.edits.map(\.range) ?? [range]),
                    NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
                     _ = self.setSelection(element, originalSelection)
                 }

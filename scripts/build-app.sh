@@ -83,6 +83,7 @@ swiftc -target "$swift_target" -module-cache-path .build/hanq/module-cache Sourc
 mkdir -p "$test_stage/Tests/MismatchRecovery"
 cp Tests/MismatchRecovery/NativeLayoutExpectations.json "$test_stage/Tests/MismatchRecovery/"
 (cd "$test_stage"; ./filter-tests)
+bash scripts/test-jamo-edits.sh --native
 bash scripts/test-hanja-candidates.sh
 bash scripts/test-external-keyboards.sh
 bash scripts/test-paste-shortcut.sh
