@@ -2,9 +2,17 @@ import AppKit
 import Carbon
 import CryptoKit
 
+final class ClipboardObservedTextView: NSTextView {
+    var beforePaste: (() -> Void)?
+    override func paste(_ sender: Any?) {
+        beforePaste?()
+        super.paste(sender)
+    }
+}
+
 final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let root: URL
-    let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 850, height: 260))
+    let view = ClipboardObservedTextView(frame: NSRect(x: 0, y: 0, width: 850, height: 260))
     var window: NSWindow!
     var timer: Timer?
     var prior: NSRunningApplication?
@@ -20,6 +28,8 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let marker = "HanQ issue4 owned clipboard marker"
     let names: [String]
     let nativeControl: Bool
+    let clipboardProtection: Bool
+    var seededClipboard: [[NSPasteboard.PasteboardType: Data]] = []
     let nativeExpected: [[String: Any]]
     var rejected = false, changed = false, clipboardInjected = false
     var observer: NSObjectProtocol?
@@ -29,7 +39,8 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
     init(_ root: URL) {
         self.root = root
         nativeControl = FileManager.default.fileExists(atPath: root.appendingPathComponent("native-control").path)
-        let common = ["single", "separated", "selected", "nfd", "emoji", "laughter"]
+        clipboardProtection = FileManager.default.fileExists(atPath: root.appendingPathComponent("clipboard-protection").path)
+        let common = ["single", "separated", "selected", "nfd", "emoji", "laughter"] + (clipboardProtection ? ["roman"] : [])
         names = nativeControl ? common : common + ["late-clipboard", "rejected-multi", "context-change"]
         let data = try? Data(contentsOf: root.appendingPathComponent("native-expected.json"))
         let result = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
@@ -58,7 +69,8 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         item.submenu = edit; menu.addItem(item); NSApp.mainMenu = menu
         savedClipboard = (NSPasteboard.general.pasteboardItems ?? []).map { item in item.types.compactMap { type in item.data(forType: type).map { (type, $0) } } }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(marker, forType: .string)
+        seedClipboard()
+        view.beforePaste = { [weak self] in self?.observeTemporaryClipboard() }
         view.isRichText = true; view.importsGraphics = true; view.allowsUndo = true; view.font = .systemFont(ofSize: 20)
         view.isAutomaticLinkDetectionEnabled = false
         view.backgroundColor = .white; view.textColor = .black; view.appearance = NSAppearance(named: .aqua)
@@ -92,7 +104,7 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let value = NSMutableAttributedString(string: prefix, attributes: [.font: NSFont.systemFont(ofSize: 20), .foregroundColor: NSColor.black])
         value.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 20), range: NSRange(location: 0, length: 3))
         value.addAttribute(.link, value: URL(string: "https://example.invalid/before")!, range: (value.string as NSString).range(of: "링크앞"))
-        let jamo = name == "nfd" ? "각" : name == "laughter" ? "ㅇㅏㅋㅋㅋㄴㅏ" : "ㅇㅏㄴㄴㅕㅇ"
+        let jamo = name == "roman" ? "dkssud" : name == "nfd" ? "각" : name == "laughter" ? "ㅇㅏㅋㅋㅋㄴㅏ" : "ㅇㅏㄴㄴㅕㅇ"
         value.append(NSAttributedString(string: jamo + " ", attributes: [.font: NSFont.systemFont(ofSize: 20), .foregroundColor: NSColor.black]))
         if name == "laughter" {
             let laugh = (value.string as NSString).range(of: "ㅋㅋㅋ")
@@ -163,16 +175,25 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard index < names.count else { finish(true, "all synthetic rich-text cases observed"); return }
         let board = NSPasteboard.general
         guard board.string(forType: .string) == marker || board.string(forType: .string) == externalMarker else { finish(false, "clipboard changed outside owned test"); return }
-        if board.string(forType: .string) == externalMarker { board.clearContents(); board.setString(marker, forType: .string) }
+        if clipboardProtection || board.string(forType: .string) == externalMarker { seedClipboard() }
         rejected = false; changed = false; clipboardInjected = false
         initial = sample(names[index]); view.textStorage?.setAttributedString(initial); view.undoManager?.removeAllActions()
-        let selection = names[index] == "selected" ? (view.string as NSString).range(of: "ㅇㅏㄴㄴㅕㅇ") : NSRange(location: 1, length: 0)
+        let selection = names[index] == "roman" ? (view.string as NSString).range(of: "dkssud") : names[index] == "selected" ? (view.string as NSString).range(of: "ㅇㅏㄴㄴㅕㅇ") : NSRange(location: 1, length: 0)
         view.setSelectedRange(selection); window.makeFirstResponder(view)
         let range = JamoComposer.targetRange(in: view.string, selection: selection)!
         view.layoutManager?.ensureLayout(for: view.textContainer!)
         initial = NSAttributedString(attributedString: view.textStorage!)
-        plannedEdits = JamoComposer.edits(in: view.string, range: range)!
-        expected = (view.string as NSString).replacingCharacters(in: range, with: JamoComposer.compose((view.string as NSString).substring(with: range)))
+        if names[index] == "roman" {
+            let remembered = UserDefaults(suiteName: "taek.in.hanq")?.string(forKey: "lastKoreanSourceID")
+            let source = KoreanEnglishSwitch.romanSourceID(current: InputSourceSnapshot.read(), available: InputSourceSnapshot.available(), rememberedKorean: remembered)
+            guard let replacement = JamoComposer.selectedRomanReplacement(in: view.string, selection: selection, layout: KoreanKeyboardLayout.resolve(sourceID: source)),
+                  replacement != "dkssud" else { finish(false, "roman fixture cannot resolve converted text"); return }
+            plannedEdits = [JamoComposer.Edit(range: selection, replacement: replacement)]
+            expected = (view.string as NSString).replacingCharacters(in: selection, with: replacement)
+        } else {
+            plannedEdits = JamoComposer.edits(in: view.string, range: range)!
+            expected = (view.string as NSString).replacingCharacters(in: range, with: JamoComposer.compose((view.string as NSString).substring(with: range)))
+        }
         expectedFinalCaret = plannedEdits[0].range.location + plannedEdits[0].replacement.utf16.count
         expectedRedoCaret = nil
         if !nativeControl, !["rejected-multi", "context-change"].contains(names[index]) {
@@ -214,13 +235,17 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let wanted = changed ? "사용자변경 " + initial.string : initial.string
             guard view.string.utf8.elementsEqual(wanted.utf8), NSPasteboard.general.string(forType: .string) == marker else { finish(false, "unsafe edit after rejected selection/context change"); return }
             current["safeNoPaste"] = true; current["selectionAcknowledgmentRejected"] = rejected; current["changedContextPreserved"] = changed
+            if clipboardProtection {
+                current["clipboardFormatsRestored"] = clipboardSnapshot() == seededClipboard
+                current["temporaryPayloadNotPublished"] = current["temporaryProtectionObserved"] == nil
+            }
             current["after"] = metrics(view.textStorage!); rows.append(current); index += 1; begin(); return
         }
         if stage == 1, completed(), view.string.utf8.elementsEqual(expected.utf8) {
             if nativeControl {
                 let board = NSPasteboard.general
                 guard board.changeCount == controlGeneration else { finish(false, "native control clipboard ownership changed"); return }
-                board.clearContents(); board.setString(marker, forType: .string)
+                seedClipboard()
             }
             settled = now(); stage = 2; return
         }
@@ -232,6 +257,9 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
             current["unchangedFormattingPreserved"] = unchangedFormatting()
             current["caretAfter"] = [view.selectedRange().location, view.selectedRange().length]
             current["clipboardMarkerRestored"] = NSPasteboard.general.string(forType: .string) == marker
+            if clipboardProtection {
+                current["clipboardFormatsRestored"] = clipboardSnapshot() == seededClipboard
+            }
             current["externalClipboardPreserved"] = clipboardInjected && NSPasteboard.general.string(forType: .string) == externalMarker
             current["finalCaretPreserved"] = view.selectedRange() == NSRange(location: expectedFinalCaret, length: 0)
             saveView("after"); stage = 3; request(6, command: true); return
@@ -253,6 +281,40 @@ final class RichFixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func windowWillClose(_ note: Notification) { finish(false, "window closed by user") }
+    func clipboardSnapshot() -> [[NSPasteboard.PasteboardType: Data]] {
+        (NSPasteboard.general.pasteboardItems ?? []).map { item in
+            Dictionary(uniqueKeysWithValues: item.types.compactMap { type in item.data(forType: type).map { (type, $0) } })
+        }
+    }
+    func seedClipboard() {
+        let board = NSPasteboard.general
+        board.clearContents()
+        guard clipboardProtection else { board.setString(marker, forType: .string); return }
+        let text = NSPasteboardItem(), binary = NSPasteboardItem()
+        text.setString(marker, forType: .string)
+        let attributed = NSAttributedString(string: "owned synthetic clipboard", attributes: [.font: NSFont.boldSystemFont(ofSize: 16)])
+        text.setData(attributed.rtf(from: NSRange(location: 0, length: attributed.length), documentAttributes: [:])!, forType: .rtf)
+        // Also preserve an existing transient marker, without inventing one on restoration.
+        if index < names.count, names[index] == "nfd" { text.setData(Data([7]), forType: TemporaryPasteboard.transientType) }
+        let image = NSImage(size: NSSize(width: 8, height: 8))
+        image.lockFocus(); NSColor.blue.setFill(); NSBezierPath(rect: NSRect(x: 0, y: 0, width: 8, height: 8)).fill(); image.unlockFocus()
+        binary.setData(image.tiffRepresentation!, forType: .tiff)
+        binary.setData(Data([0, 1, 127, 255]), forType: .init("in.hanq.owned-synthetic-binary"))
+        guard board.writeObjects([text, binary]) else { finish(false, "synthetic clipboard setup failed"); return }
+        seededClipboard = clipboardSnapshot()
+    }
+    func observeTemporaryClipboard() {
+        guard clipboardProtection, !nativeControl, index < names.count, stage == 1,
+              let payload = JamoPasteboard.make(plannedEdits.map(\.replacement)) else { return }
+        let board = NSPasteboard.general
+        let marked = board.data(forType: TemporaryPasteboard.transientType) == Data()
+        current["temporaryProtectionObserved"] = marked && board.pasteboardItems?.count == 1
+            && board.string(forType: .string) == payload.string
+            && board.data(forType: .multipleTextSelection) == payload.multipleSelection
+        // A cooperating history reader skips by type presence. This is not an
+        // installed third-party history manager or a cross-device test.
+        current["cooperatingHistoryReaderSkips"] = board.types?.contains(TemporaryPasteboard.transientType) == true
+    }
     func finish(_ passed: Bool, _ reason: String) {
         timer?.invalidate()
         let clipboard = NSPasteboard.general
