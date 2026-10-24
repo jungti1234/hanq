@@ -523,6 +523,11 @@ final class JamoRepair {
             return
         }
         let expectedRevision=revision
+        guard let payload = TemporaryPasteboard(string: replacement,
+                                                multipleSelection: composition?.pasteboard.multipleSelection) else {
+            _ = setSelection(element, originalSelection)
+            busy = false; endTextEdit(editToken, element, nil, nil); return
+        }
         let clipboard = NSPasteboard.general
         let saved = (clipboard.pasteboardItems ?? []).map { item in
             item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
@@ -542,20 +547,10 @@ final class JamoRepair {
               selectionMatches(element, composition?.edits.map(\.range) ?? [range]) else {
             busy = false; endTextEdit(editToken, element, nil, nil); return
         }
-        clipboard.clearContents()
-        let clearedChange=clipboard.changeCount
-        guard clipboard.setString(replacement, forType: .string) else {
-            if clipboard.changeCount==clearedChange{restoreClipboard()}
-            _ = setSelection(element, originalSelection); busy = false;endTextEdit(editToken,element,nil,nil);return
+        guard let ownedChange = payload.publish(to: clipboard, restore: restoreClipboard) else {
+            _ = setSelection(element, originalSelection)
+            busy = false; endTextEdit(editToken, element, nil, nil); return
         }
-        if let metadata = composition?.pasteboard.multipleSelection {
-            let stringChange = clipboard.changeCount
-            guard clipboard.setData(metadata, forType: .multipleTextSelection) else {
-                if clipboard.changeCount == stringChange { restoreClipboard() }
-                _ = setSelection(element, originalSelection); busy = false; endTextEdit(editToken, element, nil, nil); return
-            }
-        }
-        let ownedChange = clipboard.changeCount
         busy = true
         postKey(pasteKey, flags: .maskCommand, pid: pid)
         let expected = composition?.expected ?? (text as NSString).replacingCharacters(in: range, with: replacement)

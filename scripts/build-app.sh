@@ -84,6 +84,7 @@ mkdir -p "$test_stage/Tests/MismatchRecovery"
 cp Tests/MismatchRecovery/NativeLayoutExpectations.json "$test_stage/Tests/MismatchRecovery/"
 (cd "$test_stage"; ./filter-tests)
 bash scripts/test-jamo-edits.sh --native
+bash scripts/test-temporary-pasteboard.sh
 bash scripts/test-hanja-candidates.sh
 bash scripts/test-external-keyboards.sh
 bash scripts/test-paste-shortcut.sh
