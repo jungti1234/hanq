@@ -51,6 +51,9 @@ precondition(interrupted.inputInterruption == .timeout)
 precondition(interrupted.menuStatus.title.contains("응답 시간 초과"))
 precondition(interrupted.menuStatus.toolTip?.contains("다시 켜세요") == true)
 let notice = interrupted.inputMonitoringNotice.alert!
+precondition(notice.messageText == "한영·한자키 기능이 중단됐어요")
+precondition(notice.window.title == "한Q 기능 안내")
+precondition(!notice.informativeText.contains("입력 감시") && !interrupted.menuStatus.title.contains("입력 감시"))
 precondition(notice.window.isVisible && notice.informativeText.contains("응답 시간 초과"))
 if let path = ProcessInfo.processInfo.environment["HANQ_NOTICE_PREVIEW"],
    let view = notice.window.contentView,

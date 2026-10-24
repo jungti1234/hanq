@@ -15,14 +15,14 @@ enum InputMonitoringInterruption: Equatable {
 
     var status: String {
         switch self {
-        case .timeout: return "입력 감시 중단 · 응답 시간 초과"
-        case .systemInput: return "입력 감시 중단 · 시스템에서 중단"
+        case .timeout: return "한영·한자키 중단 · 응답 시간 초과"
+        case .systemInput: return "한영·한자키 중단 · 시스템에서 중단"
         }
     }
     var explanation: String {
         switch self {
-        case .timeout: return "macOS가 입력 감시의 응답 시간 초과를 감지해 한Q의 입력 감시를 중단했어요."
-        case .systemInput: return "macOS가 한Q의 입력 감시를 중단했어요."
+        case .timeout: return "macOS가 한Q의 응답 시간 초과를 감지해 한영·한자키 기능을 중단했어요."
+        case .systemInput: return "macOS가 한Q의 한영·한자키 기능을 중단했어요."
         }
     }
     var guidance: String { "한Q 메뉴에서 ‘한영키 사용’ 또는 ‘한자키 사용’을 다시 켜세요." }
@@ -46,7 +46,7 @@ final class InputMonitoringNotice: NSObject {
         if alert == nil {
             let alert = NSAlert()
             alert.alertStyle = .informational
-            alert.messageText = "한Q 입력 감시가 중단됐어요"
+            alert.messageText = "한영·한자키 기능이 중단됐어요"
             let close = alert.addButton(withTitle: "닫기")
             close.target = self
             close.action = #selector(closeNotice)
@@ -55,7 +55,7 @@ final class InputMonitoringNotice: NSObject {
             report.target = self
             report.action = #selector(reportIssue)
             reportButton = report
-            alert.window.title = "한Q - 입력 감시 안내"
+            alert.window.title = "한Q 기능 안내"
             alert.window.isReleasedWhenClosed = false
             self.alert = alert
         }
