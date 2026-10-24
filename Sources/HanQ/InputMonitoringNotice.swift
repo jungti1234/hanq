@@ -21,11 +21,11 @@ enum InputMonitoringInterruption: Equatable {
     }
     var explanation: String {
         switch self {
-        case .timeout: return "macOS가 한Q의 응답 시간 초과를 감지해 한영·한자키 기능을 중단했어요."
+        case .timeout: return "macOS가 한Q의 응답 시간 초과를 감지해\n한영·한자키 기능을 중단했어요."
         case .systemInput: return "macOS가 한Q의 한영·한자키 기능을 중단했어요."
         }
     }
-    var guidance: String { "한Q 메뉴에서 ‘한영키 사용’ 또는 ‘한자키 사용’을 다시 켜세요." }
+    var guidance: String { "한Q 메뉴에서 ‘한영키 사용’\n또는 ‘한자키 사용’을 다시 켜세요." }
 }
 
 /// A nonmodal notice shown only after the input path has been torn down.
@@ -60,7 +60,7 @@ final class InputMonitoringNotice: NSObject {
             self.alert = alert
         }
         alert?.informativeText = reason.explanation + "\n\n" + reason.guidance
-            + "\n\n진단 기록과 함께 문제를 알려주시면 개선에 도움이 돼요."
+            + "\n\n진단 기록과 함께 문제를 알려주시면\n개선에 도움이 돼요."
         alert?.layout()
         alert?.window.center()
         alert?.window.makeKeyAndOrderFront(nil)
