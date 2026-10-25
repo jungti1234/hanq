@@ -273,6 +273,11 @@ final class DiagnosticReviewSnapshot {
             // Read starts carry a placeholder zero; only completed, valid spans
             // can supply a duration. Legacy completed spans have no workEvidence.
             if kind == 2, code == 2, validWall, let duration { maxRead = max(maxRead ?? 0, duration) }
+            if kind == 2,code == 2 {
+                let label=integer(frame["readOutcome"]).flatMap{InputIncidentTrace.ReadOutcome(rawValue:$0)}?.label ?? "조회 결과 미측정"
+                let lane=integer(frame["lane"]) == 6 ? "첫 자음" : "불일치"
+                counts["\(lane) 조회: \(label)",default:0]+=1
+            }
             // Counts simplify the preview. The exported file retains all original
             // frames, times, links, classifications and other diagnostic evidence.
             if kind == 6 { counts[states[code] ?? "해석하지 못한 처리 상태", default: 0] += 1 }

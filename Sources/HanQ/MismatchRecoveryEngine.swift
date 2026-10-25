@@ -355,7 +355,8 @@ final class MismatchRecoveryEngine:NSObject {
     }
     func snapshot(includeContent:Bool=true,allowComboBox:Bool=false)->MismatchSnapshot?{
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
-        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead)}
+        var incidentMeasured=false
+        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason,includesContent:includeContent):nil)}
         let queryStart=ProcessInfo.processInfo.systemUptime,previousID=activeSnapshotID
         traceSequence+=1;let id=traceSequence;activeSnapshotID=id
         if traceLatency{log("snapshot_started",["id":id,"stage":snapshotStage,"includeContent":includeContent,"uptime":queryStart])}
@@ -365,7 +366,7 @@ final class MismatchRecoveryEngine:NSObject {
             lastCompletedSnapshotID=id
         }
         if let testSnapshot{return testSnapshot()}
-        unavailableReason=""
+        unavailableReason="";incidentMeasured=incidentRead != nil
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
         guard !IsSecureEventInputEnabled() else{unavailableReason="secure_input";return nil}
         guard let target,!target.isTerminated,focusAccess.currentPID()==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}

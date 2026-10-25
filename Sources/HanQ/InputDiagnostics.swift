@@ -456,6 +456,7 @@ final class InputIncidentTrace {
         var controlEvidence:InputIncidentControl?=nil
         var eventEvidence:EventEvidence?=nil
         var workEvidence:WorkEvidence?=nil
+        var readOutcome:ReadOutcome?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -951,6 +952,54 @@ final class InputIncidentTrace {
             append(.mismatch,.detectionDecision,observedAt:observedAt,decisionTiming:timing,event:identifier,edge:site.rawValue,category:reason.rawValue,inputOrigin:origin)
         }
     }
+    // Existing snapshot guard results only. No AX values, coordinates or extra reads.
+    enum ReadOutcome:Int,Codable,CaseIterable {
+        case success=1,accessibilityPermission,secureInput,targetNotFrontmost,focusedElementUnreadable
+        case secureField,roleUnreadable,unsupportedTextField,activeComposition,textUnreadable
+        case selectionUnreadable,selectionInvalid,focusChanged,attributeBatchUnreadable,editorCoordinatesUnverified
+        case metadataOnly,other
+        static func snapshot(_ reason:String,includesContent:Bool=true)->ReadOutcome {
+            switch reason {
+            case "":return includesContent ? .success:.metadataOnly
+            case "accessibility_permission":return .accessibilityPermission
+            case "secure_input":return .secureInput
+            case "target_not_frontmost":return .targetNotFrontmost
+            case "focused_element_unreadable":return .focusedElementUnreadable
+            case "secure_field","secure_text_field":return .secureField
+            case "role_unreadable":return .roleUnreadable
+            case "not_supported_text_field":return .unsupportedTextField
+            case "active_composition":return .activeComposition
+            case "text_unreadable":return .textUnreadable
+            case "selection_unreadable":return .selectionUnreadable
+            case "selection_invalid":return .selectionInvalid
+            case "focus_changed_during_snapshot":return .focusChanged
+            case "attribute_batch_unreadable":return .attributeBatchUnreadable
+            case "editor_coordinates_unverified":return .editorCoordinatesUnverified
+            default:return .other
+            }
+        }
+        var label:String {
+            switch self {
+            case .success:return "본문·커서 조회 성공"
+            case .accessibilityPermission:return "손쉬운 사용 권한 없음"
+            case .secureInput:return "보안 입력으로 조회 생략"
+            case .targetNotFrontmost:return "입력 대상이 현재 포커스와 다름"
+            case .focusedElementUnreadable:return "포커스 요소 조회 불가"
+            case .secureField:return "보안 입력칸으로 조회 중단"
+            case .roleUnreadable:return "입력칸 역할 조회 불가"
+            case .unsupportedTextField:return "지원하지 않는 입력칸 역할"
+            case .activeComposition:return "편집기의 진행 중 조합으로 조회 중단"
+            case .textUnreadable:return "본문 값 조회 불가"
+            case .selectionUnreadable:return "커서·선택 범위 조회 불가"
+            case .selectionInvalid:return "커서·선택 범위 유효성 확인 실패"
+            case .focusChanged:return "조회 중 포커스 변경"
+            case .attributeBatchUnreadable:return "AX 속성 일괄 조회 불가"
+            case .editorCoordinatesUnverified:return "편집기 본문·범위 표현 확인 실패"
+            case .metadataOnly:return "본문을 요청하지 않은 역할 조회"
+            case .other:return "분류되지 않은 조회 중단"
+            }
+        }
+    }
     final class ReadSpan {
         fileprivate let token=UUID(),began:Double
         fileprivate let generation:Int32
@@ -987,7 +1036,7 @@ final class InputIncidentTrace {
         }
         return span
     }
-    func endRead(_ lane:Lane,_ span:ReadSpan?){
+    func endRead(_ lane:Lane,_ span:ReadSpan?,outcome:ReadOutcome?=nil){
         guard let span else{if enabled{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         guard span.reserveEnd() else{if gate.generation==span.generation{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         let ended=clock(),duration=ended-span.began
@@ -1002,6 +1051,7 @@ final class InputIncidentTrace {
             }
             append(lane,.read,observedAt:ended,observationTiming:timing,event:read.id,category:2,duration:duration)
             ring[(position-1+capacity)%capacity]?.workEvidence=work
+            ring[(position-1+capacity)%capacity]?.readOutcome=outcome
             updatePreservedLastFrame()
             }
         }

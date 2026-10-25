@@ -142,6 +142,7 @@ struct RecorderFrame: Codable {
     var controlEvidence:RecorderControlEvidence?=nil
     var eventEvidence:RecorderEventEvidence?=nil
     var workEvidence:RecorderWorkEvidence?=nil
+    var readOutcome:Int?=nil
 }
 
 struct RecorderDecisionDelivery: Codable {
@@ -265,6 +266,9 @@ struct RecorderTrace: Codable {
 
     private static func validFrame(_ row:RecorderFrame)->Bool {
                   guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...12).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
+                  if let outcome=row.readOutcome {
+                      guard (1...17).contains(outcome),row.kind==2,(6...7).contains(row.lane),row.category==2 else{return false}
+                  }
                   if let work=row.workEvidence {
                       guard work.valid,((row.kind==1 && (1...4).contains(row.lane) && row.edge==1 && work.cpuState != 0) || (row.kind==2 && (6...7).contains(row.lane) && row.category==2 && [0,5].contains(work.cpuState))),(!work.clockValid || work.endedAtMicros/1000<=row.milliseconds) else{return false}
                   }
@@ -341,7 +345,11 @@ struct RecorderTrace: Codable {
         }
         let keys = Set(["sequence", "milliseconds", "lane", "kind", "event", "edge", "category", "inputOrigin", "consumed", "durationMicros", "count", "selected", "field"])
         guard rows.allSatisfy({ row in
-            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence"])==keys else{return false}
+            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome"])==keys else{return false}
+            if row.keys.contains("readOutcome") {
+                guard let number=row["readOutcome"] as? NSNumber,CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      let value=row["readOutcome"] as? Int,(1...17).contains(value) else{return false}
+            }
             if row.keys.contains("workEvidence") {
                 guard let value=row["workEvidence"] as? [String:Any],Set(value.keys).subtracting(["cpuMicros"])==RecorderWorkEvidence.keys else{return false}
             }

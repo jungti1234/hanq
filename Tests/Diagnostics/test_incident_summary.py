@@ -9,6 +9,17 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_snapshot_read_outcomes_are_fixed_completed_guard_results(self):
+        row=dict(frame(6,2,event=42,category=2,ms=50),sequence=1,readOutcome=10)
+        r=summary.summarize(dict(schema=1,trigger=1,frames=[row]))
+        self.assertEqual(r['snapshot_read_outcomes'][0]['outcome'],'text_unreadable')
+        self.assertEqual(r['snapshot_read_outcomes'][0]['event'],42)
+        self.assertEqual(r['snapshot_read_outcome_counts'],{'onset_ax:text_unreadable':1})
+        old=dict(row);old.pop('readOutcome')
+        self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[old]))['snapshot_read_outcomes'][0]['outcome'],'unmeasured')
+        for patch in [dict(readOutcome=0),dict(readOutcome=18),dict(readOutcome=True),dict(readOutcome='private'),dict(readOutcome={'text':'private'}),dict(kind=1),dict(category=1),dict(lane=2)]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
+
     def test_indirect_timing_and_overlap_are_not_causality(self):
         w=dict(beganAtMicros=10000,endedAtMicros=30000,clockValid=True,cpuState=1,cpuMicros=2000)
         row=dict(frame(2,1,event=1,ms=30),sequence=1,workEvidence=w)

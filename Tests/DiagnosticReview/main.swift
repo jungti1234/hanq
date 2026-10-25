@@ -210,4 +210,10 @@ let queued = try projected([["kind": 6, "category": 8], ["kind": 7, "category": 
 for label in ["후속 입력 임시 보관", "후속 입력 대기열 보관", "영문 소스에서 관측 생략"] {
     check(queued.readableText.contains(label), "existing fixed state is not silently omitted: \(label)")
 }
+let failedRead=try projected([["kind":2,"lane":6,"category":2,"durationMicros":1,"readOutcome":10],
+                              ["kind":2,"lane":7,"category":2,"durationMicros":1,"readOutcome":11],
+                              ["kind":2,"lane":7,"category":2,"durationMicros":1]])
+for label in ["첫 자음 조회: 본문 값 조회 불가","불일치 조회: 커서·선택 범위 조회 불가","불일치 조회: 조회 결과 미측정"] {
+    check(failedRead.readableText.contains(label),"review exposes outcome and distinguishes legacy: \(label)")
+}
 print("PASS: diagnostic review \(checks) checks (selection, original bytes, parsed preview, ZIP integrity, failure preservation)")

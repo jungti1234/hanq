@@ -35,6 +35,9 @@ python3 -B scripts/summarize-input-incident.py "$stage/capture-preservation.json
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/RecoveryStart/main.swift -o "$stage/recovery-start-tests"
 hanq_test_run "$stage/recovery-start-tests" "$stage/recovery-start.json"
 python3 -B scripts/summarize-input-incident.py "$stage/recovery-start.json" > "$stage/recovery-start-summary.json"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/ReadOutcomes/main.swift -o "$stage/read-outcome-tests"
+hanq_test_run "$stage/read-outcome-tests" "$stage/read-outcomes.json"
+python3 -B scripts/summarize-input-incident.py "$stage/read-outcomes.json" > "$stage/read-outcomes-summary.json"
 python3 -B Tests/Diagnostics/test_incident_summary.py
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/SwitchTimeline/main.swift -o "$stage/switch-timeline-tests"
 hanq_test_run "$stage/switch-timeline-tests" "$stage/switch-timeline.json"

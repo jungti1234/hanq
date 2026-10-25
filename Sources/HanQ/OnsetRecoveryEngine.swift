@@ -479,9 +479,10 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func snapshot()->OnsetSnapshot?{
         let incidentRead=InputIncidentTrace.shared.beginRead(.onsetAX)
-        defer{InputIncidentTrace.shared.endRead(.onsetAX,incidentRead)}
+        var incidentMeasured=false
+        defer{InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil)}
         if let testSnapshot{return testSnapshot()}
-        unavailableReason=""
+        unavailableReason="";incidentMeasured=incidentRead != nil
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
         guard !IsSecureEventInputEnabled() else{unavailableReason="secure_input";return nil}
         guard let target,!target.isTerminated else{unavailableReason="target_not_frontmost";return nil}

@@ -24,7 +24,8 @@ final class MismatchSnapshotWorker {
     static func read(pid:pid_t,semantics:Bool=false)->MismatchSnapshotResult {
         let began=ProcessInfo.processInfo.systemUptime
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
-        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead)}
+        var incidentReason=""
+        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentRead == nil ? nil:.snapshot(incidentReason))}
         let focusAccess=InputFocusAccess()
         let application=AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application,0.05)
@@ -33,7 +34,8 @@ final class MismatchSnapshotWorker {
         let collectSemantics=semantics && InputIncidentTrace.shared.enabled
         var route=0
         func result(_ snapshot:MismatchSnapshot?=nil,_ reason:String="")->MismatchSnapshotResult {
-            MismatchSnapshotResult(snapshot:snapshot,reason:reason,durationMs:(ProcessInfo.processInfo.systemUptime-began)*1000,focusMs:focusMs,attributesMs:attributesMs)
+            if incidentRead != nil{incidentReason=reason}
+            return MismatchSnapshotResult(snapshot:snapshot,reason:reason,durationMs:(ProcessInfo.processInfo.systemUptime-began)*1000,focusMs:focusMs,attributesMs:attributesMs)
         }
         func focused()->AXUIElement? {
             let start=ProcessInfo.processInfo.systemUptime
