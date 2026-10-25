@@ -39,6 +39,17 @@ def summarize_storage_document(data):
     return dict(build=data['build'],storage_after_write=storage_status(data['status']))
 
 
+def focus_evidence(value):
+    limits={'path':3,'role':10,'route':2,'ownerRelation':3,'elementRelation':3,'withinRead':3}
+    if not isinstance(value,dict) or set(value)!=set(limits) or any(type(value[k]) is not int or not (1 if k=='path' else 0)<=value[k]<=limit for k,limit in limits.items()):raise ValueError('invalid focus evidence')
+    return dict(value,path_name=['','onset','synchronous_mismatch','idle_mismatch_worker'][value['path']],
+                role_name=['unmeasured','unavailable','text_area','text_field','combo_box','web_area','group','button','window','application','other'][value['role']],
+                route_name=['unmeasured','system','application_fallback'][value['route']],
+                owner_relation=['unmeasured','target','other','unavailable'][value['ownerRelation']],
+                element_relation=['unavailable','first_or_after_gap','same','changed'][value['elementRelation']],
+                within_read=['single','same','changed','some_focus_unavailable'][value['withinRead']],
+                interpretation='AX_focus_observation_only_not_keyboard_recipient_or_root_cause')
+
 def ax_evidence(value):
     limits={'valueClass':5,'placeholder':4,'label':4,'characterCount':3,'representation':2,'route':3,'owner':9_000_000_000_000_000,'window':9_000_000_000_000_000,'fieldRelation':2,'windowRelation':2,'identityEpoch':9_000_000_000_000_000}
     if not isinstance(value,dict) or set(value)!=set(limits) or any(type(value[k]) is not int or not 0<=value[k]<=v for k,v in limits.items()):raise ValueError('invalid AX evidence')
@@ -342,6 +353,7 @@ def summarize(data):
     hud_rows=[]
     work_rows=[]
     read_rows=[]
+    focus_rows=[]
     read_names=['success','accessibility_permission','secure_input','target_not_frontmost','focused_element_unreadable',
                 'secure_field','role_unreadable','not_supported_text_field','active_composition','text_unreadable',
                 'selection_unreadable','selection_invalid','focus_changed_during_snapshot','attribute_batch_unreadable',
@@ -350,6 +362,10 @@ def summarize(data):
     source_actions=dict(enumerate(["observed","requested","committed","deferred","resumed","rejected","roman_skipped"],start=1))
     for frame in data['frames']:
         lane=lanes.get(frame['lane'],'unknown')
+        if 'focusEvidence' in frame:
+            focus=focus_evidence(frame['focusEvidence'])
+            if frame['kind']!=2 or frame['category']!=2 or 'readOutcome' not in frame or frame['lane']!=(6 if focus['path']==1 else 7):raise ValueError('invalid focus evidence frame')
+            focus_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],lane=lane,**focus))
         if 'readOutcome' in frame:
             value=frame['readOutcome']
             if type(value) is not int or not 1<=value<=len(read_names) or frame['kind']!=2 or frame['lane'] not in [6,7] or frame['category']!=2:raise ValueError('invalid read outcome')
@@ -456,7 +472,7 @@ def summarize(data):
             'peak_observed_ax_reads':peak,'cross_lane_ax_overlap_starts':overlap_starts,
             'open_or_unpaired_ax_reads':len(active)+unpaired_ends,'recovery_state_counts':dict(state_counts),'maximum_observed_owned_pending_events':dict(pending_max),
             'callback_work_timelines':work_timelines(work_rows,shape_rows),'work_interval_evidence':work_rows,
-            'snapshot_read_outcomes':read_rows,'snapshot_read_outcome_counts':dict(collections.Counter(r['lane']+':'+r['outcome'] for r in read_rows)),
+            'snapshot_focus_observations':focus_rows,'snapshot_read_outcomes':read_rows,'snapshot_read_outcome_counts':dict(collections.Counter(r['lane']+':'+r['outcome'] for r in read_rows)),
             'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,

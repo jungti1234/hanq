@@ -63,3 +63,7 @@ hanq_test_run "$stage/reboot-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/IndirectInfluence/main.swift -o "$stage/indirect-tests"
 hanq_test_run "$stage/indirect-tests" "$stage/indirect.json"
 python3 -B scripts/summarize-input-incident.py "$stage/indirect.json" > "$stage/indirect-summary.json"
+
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/FocusEvidence/main.swift -o "$stage/focus-evidence-tests"
+hanq_test_run "$stage/focus-evidence-tests" "$stage/focus-evidence.json"
+python3 -B scripts/summarize-input-incident.py "$stage/focus-evidence.json" > "$stage/focus-evidence-summary.json"

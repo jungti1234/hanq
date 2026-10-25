@@ -103,3 +103,17 @@ for prefix in [String(repeating:"한",count:600),String(repeating:"한",count:30
     }}
 }
 print("PASS \(checks) keyboard-focus routing and canonical text equality checks; no OS keys posted")
+
+let focusObserverAccess=InputFocusAccess()
+let focusObserverApp=AXUIElementCreateApplication(getpid())
+var observerReads=0,observerCalls=0
+focusObserverAccess.read={_ in observerReads+=1;return focusObserverApp}
+let without=focusObserverAccess.focusedElement(application:focusObserverApp,pid:getpid())
+let readsWithout=observerReads;observerReads=0
+focusObserverAccess.observeFocus={element,owner,route in
+    observerCalls+=1
+    check(element != nil && owner==getpid() && route==1,"observer uses the original focus result")
+}
+let with=focusObserverAccess.focusedElement(application:focusObserverApp,pid:getpid())
+check(with != nil && without != nil && CFEqual(with!,without!) && observerReads==readsWithout && observerCalls==1,"observer adds no focus query or behavior change")
+print("PASS focus observation reuses existing query and owner")

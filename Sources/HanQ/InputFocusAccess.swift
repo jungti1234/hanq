@@ -101,6 +101,7 @@ final class InputFocusAccess {
     let system = AXUIElementCreateSystemWide()
     private(set) var lastRoute=0
     private(set) var lastOwner:pid_t?
+    var observeFocus:((AXUIElement?,pid_t?,Int)->Void)?
     var read: (AXUIElement) -> AXUIElement? = InputFocusAccess.readFocused
     var frontmostPID: () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
 
@@ -120,8 +121,10 @@ final class InputFocusAccess {
     }
 
     func currentPID() -> pid_t? {
-        if let element = read(system) { return Self.owner(of: element) }
-        return frontmostPID()
+        if let element = read(system) {
+            let owner=Self.owner(of:element);observeFocus?(element,owner,1);return owner
+        }
+        let owner=frontmostPID();observeFocus?(nil,owner,2);return owner
     }
 
     func currentApplication(reusing previous:NSRunningApplication?=nil) -> NSRunningApplication? {
@@ -165,6 +168,7 @@ final class InputFocusAccess {
         lastRoute=0;lastOwner=nil
         if let element = read(system) {
             lastOwner=Self.owner(of:element)
+            observeFocus?(element,lastOwner,1)
             guard lastOwner == pid else { return nil }
             AXUIElementSetMessagingTimeout(element, 0.05)
             lastRoute=1
@@ -173,8 +177,11 @@ final class InputFocusAccess {
         // Some editors expose focus only on the application AX root. This
         // fallback is valid only for the actual frontmost application.
         lastOwner=frontmostPID()
-        guard lastOwner == pid, let element = read(application),
-              Self.owner(of: element) == pid else { return nil }
+        guard lastOwner == pid,let element=read(application) else{
+            observeFocus?(nil,lastOwner,2);return nil
+        }
+        let owner=Self.owner(of:element);observeFocus?(element,owner,2)
+        guard owner == pid else{return nil}
         AXUIElementSetMessagingTimeout(element, 0.05)
         lastRoute=2
         return element

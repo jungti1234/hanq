@@ -13,20 +13,29 @@ struct MismatchSnapshotResult {
 // sends keys, edits text, or touches UI. Results are consumed on the main queue.
 final class MismatchSnapshotWorker {
     private let queue=DispatchQueue(label:"hanq.mismatch.snapshot",qos:.userInitiated)
+    private let incidentFocusProbe=InputIncidentFocusProbe()
     private let readOperation:((pid_t)->MismatchSnapshotResult)?
     init(read:((pid_t)->MismatchSnapshotResult)?=nil){readOperation=read}
     func request(pid:pid_t,semantics:Bool=false,completion:@escaping (MismatchSnapshotResult)->Void){
         queue.async {
-            let result=self.readOperation?(pid) ?? Self.read(pid:pid,semantics:semantics)
+            let result=self.readOperation?(pid) ?? Self.read(pid:pid,semantics:semantics,focusProbe:self.incidentFocusProbe)
             DispatchQueue.main.async{completion(result)}
         }
     }
-    static func read(pid:pid_t,semantics:Bool=false)->MismatchSnapshotResult {
+    static func read(pid:pid_t,semantics:Bool=false,focusProbe:InputIncidentFocusProbe=InputIncidentFocusProbe())->MismatchSnapshotResult {
         let began=ProcessInfo.processInfo.systemUptime
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
         var incidentReason=""
-        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentRead == nil ? nil:.snapshot(incidentReason))}
+        let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
+        var focusRead:InputIncidentFocusProbe.Read?=incidentRead == nil ? nil:InputIncidentFocusProbe.Read(target:pid)
         let focusAccess=InputFocusAccess()
+        if incidentRead != nil {focusAccess.observeFocus={element,owner,route in focusRead?.observe(element,owner:owner,route:route)}}
+        defer{
+            focusAccess.observeFocus=nil
+            let allowed=incidentRead != nil && !["secure_input","secure_text_field"].contains(incidentReason)
+            let focus=focusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:3)
+            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentRead == nil ? nil:.snapshot(incidentReason),focus:focus)
+        }
         let application=AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application,0.05)
         var focusMs=0.0,attributesMs=0.0
@@ -59,6 +68,7 @@ final class MismatchSnapshotWorker {
         }
         attributesMs=(ProcessInfo.processInfo.systemUptime-start)*1000
         guard error == .success,let list=values as? [AnyObject],list.count>=4 else{return result(nil,"attribute_batch_unreadable")}
+        if incidentRead != nil {focusRead?.observedRole(list[0] as? String)}
         guard let role=list[0] as? String,["AXTextArea","AXTextField"].contains(role) else{return result(nil,"not_supported_text_field")}
         guard list[1] as? String != "AXSecureTextField" else{return result(nil,"secure_text_field")}
         guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{return result(nil,"text_unreadable")}

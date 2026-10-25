@@ -129,6 +129,12 @@ struct RecorderShapeBaseline:Codable {
         (previous.map{$0.valid && $0.evidence.phase==3 && $0.evidence.lastMilliseconds<=current.evidence.firstMilliseconds && $0.evidence.baselineSequence<current.evidence.baselineSequence} ?? true)}
 }
 
+struct RecorderFocusEvidence:Codable {
+    let path,role,route,ownerRelation,elementRelation,withinRead:Int
+    static let keys=Set(["path","role","route","ownerRelation","elementRelation","withinRead"])
+    var valid:Bool {(1...3).contains(path) && (0...10).contains(role) && (0...2).contains(route) && (0...3).contains(ownerRelation) && (0...3).contains(elementRelation) && (0...3).contains(withinRead)}
+}
+
 struct RecorderFrame: Codable {
     let sequence, milliseconds, lane, kind, event, edge, category, inputOrigin: Int
     let consumed: Bool
@@ -143,6 +149,7 @@ struct RecorderFrame: Codable {
     var eventEvidence:RecorderEventEvidence?=nil
     var workEvidence:RecorderWorkEvidence?=nil
     var readOutcome:Int?=nil
+    var focusEvidence:RecorderFocusEvidence?=nil
 }
 
 struct RecorderDecisionDelivery: Codable {
@@ -266,6 +273,10 @@ struct RecorderTrace: Codable {
 
     private static func validFrame(_ row:RecorderFrame)->Bool {
                   guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...12).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
+                  if let focus=row.focusEvidence {
+                      guard focus.valid,row.kind==2,row.category==2,row.readOutcome != nil,
+                            row.lane==(focus.path==1 ? 6:7) else{return false}
+                  }
                   if let outcome=row.readOutcome {
                       guard (1...17).contains(outcome),row.kind==2,(6...7).contains(row.lane),row.category==2 else{return false}
                   }
@@ -345,7 +356,14 @@ struct RecorderTrace: Codable {
         }
         let keys = Set(["sequence", "milliseconds", "lane", "kind", "event", "edge", "category", "inputOrigin", "consumed", "durationMicros", "count", "selected", "field"])
         guard rows.allSatisfy({ row in
-            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome"])==keys else{return false}
+            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence"])==keys else{return false}
+            if row.keys.contains("focusEvidence") {
+                guard let value=row["focusEvidence"] as? [String:Any],Set(value.keys)==RecorderFocusEvidence.keys,
+                      value.values.allSatisfy({ raw in
+                          guard let n=raw as? NSNumber else{return false}
+                          return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
+                      }) else{return false}
+            }
             if row.keys.contains("readOutcome") {
                 guard let number=row["readOutcome"] as? NSNumber,CFGetTypeID(number) != CFBooleanGetTypeID(),
                       let value=row["readOutcome"] as? Int,(1...17).contains(value) else{return false}

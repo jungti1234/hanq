@@ -390,6 +390,7 @@ final class OnsetRecoveryEngine:NSObject {
     var lastAXFailure=""
     var accessibilityRequested=false
     var lastFocusRoute=""
+    private let incidentFocusProbe=InputIncidentFocusProbe()
     let focusAccess=InputFocusAccess()
     var systemAX:AXUIElement { focusAccess.system }
     func focusedElement(_ app:AXUIElement, pid:pid_t)->AXUIElement? {
@@ -480,18 +481,31 @@ final class OnsetRecoveryEngine:NSObject {
     func snapshot()->OnsetSnapshot?{
         let incidentRead=InputIncidentTrace.shared.beginRead(.onsetAX)
         var incidentMeasured=false
-        defer{InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil)}
+        let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
+        var focusRead:InputIncidentFocusProbe.Read?
+        let oldFocusObserver=focusAccess.observeFocus
+        defer{
+            focusAccess.observeFocus=oldFocusObserver
+            let allowed=incidentMeasured && !["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason)
+            let focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:1)
+            InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus)
+        }
         if let testSnapshot{return testSnapshot()}
         unavailableReason="";incidentMeasured=incidentRead != nil
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
         guard !IsSecureEventInputEnabled() else{unavailableReason="secure_input";return nil}
         guard let target,!target.isTerminated else{unavailableReason="target_not_frontmost";return nil}
+        if incidentMeasured {
+            focusRead=InputIncidentFocusProbe.Read(target:target.processIdentifier)
+            focusAccess.observeFocus={element,owner,route in focusRead?.observe(element,owner:owner,route:route)}
+        }
         // focusedElement proves the owner itself. A separate currentPID read
         // immediately before it duplicated the same system-wide AX request.
         guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{
             unavailableReason=focusAccess.lastOwner==target.processIdentifier ? "focused_element_unreadable":"target_not_frontmost";return nil
         }
         let context=InputFocusAccess.attributes(element,[kAXSubroleAttribute,kAXRoleAttribute]+(recovering ? []:["AXMarkedTextRange"]))
+        if incidentMeasured {focusRead?.observedRole(context[1] as? String)}
         guard context[0] as? String != "AXSecureTextField" else{unavailableReason="secure_field";return nil}
         guard let role=context[1] as? String else{unavailableReason="role_unreadable";return nil}
         guard OnsetEditableRole.supports(role) else{unavailableReason="not_supported_text_field";return nil}

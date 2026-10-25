@@ -198,6 +198,57 @@ struct InputIncidentAXEvidence:Codable,Equatable {
 
 }
 
+// Fixed focus observations from existing reads only. No role strings, AX objects,
+// PIDs, coordinates or content cross the diagnostic queue.
+struct InputIncidentFocusEvidence:Codable,Equatable {
+    let path:Int // 1 onset, 2 synchronous mismatch, 3 idle mismatch worker
+    let role:Int // 0 unmeasured, 1 unavailable, 2 text area, 3 text field, 4 combo, 5 web area, 6 group, 7 button, 8 window, 9 application, 10 other
+    let route:Int // 0 unmeasured, 1 system, 2 application fallback
+    let ownerRelation:Int // 0 unmeasured, 1 target, 2 other, 3 unavailable
+    let elementRelation:Int // 0 unavailable, 1 first/after gap, 2 same, 3 changed (same path only)
+    let withinRead:Int // 0 single, 1 same, 2 changed, 3 some focus unavailable
+    static func role(_ value:String?)->Int {
+        guard let value else{return 1}
+        return ["AXTextArea":2,"AXTextField":3,"AXComboBox":4,"AXWebArea":5,"AXGroup":6,"AXButton":7,"AXWindow":8,"AXApplication":9][value] ?? 10
+    }
+}
+// Owned by each existing snapshot execution context. At most one previous AX
+// reference is retained; no registry, lock, IPC or global identity is introduced.
+final class InputIncidentFocusProbe {
+    private var previous:AXUIElement?
+    private var generation:Int32=0
+    struct Read {
+        let target:pid_t
+        init(target:pid_t){self.target=target}
+        private(set) var first:AXUIElement?,last:AXUIElement?,subject:AXUIElement?
+        private(set) var route=0,ownerRelation=0,role=0
+        private var lastRoute=0,lastOwnerRelation=0,reads=0,changed=false,missing=false
+        mutating func observe(_ element:AXUIElement?,owner:pid_t?,route:Int) {
+            reads+=1
+            if let element {
+                if let first {if !CFEqual(first,element){changed=true}}else{first=element}
+            }else{missing=true}
+            last=element;lastRoute=route;lastOwnerRelation=owner.map{$0==target ? 1:2} ?? 3
+            if subject==nil {self.route=lastRoute;ownerRelation=lastOwnerRelation}
+        }
+        mutating func observedRole(_ value:String?) {
+            role=InputIncidentFocusEvidence.role(value)
+            subject=last;route=lastRoute;ownerRelation=lastOwnerRelation
+        }
+        fileprivate var element:AXUIElement? {subject ?? first}
+        fileprivate var withinRead:Int {changed ? 2:(missing ? 3:(reads>1 ? 1:0))}
+        fileprivate var measured:Bool {reads>0}
+    }
+    func finish(_ read:Read?,generation:Int32,path:Int)->InputIncidentFocusEvidence? {
+        if self.generation != generation {previous=nil;self.generation=generation}
+        guard generation>0,let read,read.measured else{previous=nil;return nil}
+        let element=read.element
+        let relation=element.map{value in previous.map{CFEqual($0,value) ? 2:3} ?? 1} ?? 0
+        previous=read.withinRead>=2 ? nil:element
+        return InputIncidentFocusEvidence(path:path,role:read.role,route:read.route,ownerRelation:read.ownerRelation,elementRelation:relation,withinRead:read.withinRead)
+    }
+}
+
 // Main-thread owned, bounded AX references. CFHash alone never establishes
 // identity. Monotonic tokens are not hashes, PIDs, names or object addresses.
 final class InputIncidentFieldRegistry {
@@ -457,6 +508,7 @@ final class InputIncidentTrace {
         var eventEvidence:EventEvidence?=nil
         var workEvidence:WorkEvidence?=nil
         var readOutcome:ReadOutcome?=nil
+        var focusEvidence:InputIncidentFocusEvidence?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -1036,7 +1088,7 @@ final class InputIncidentTrace {
         }
         return span
     }
-    func endRead(_ lane:Lane,_ span:ReadSpan?,outcome:ReadOutcome?=nil){
+    func endRead(_ lane:Lane,_ span:ReadSpan?,outcome:ReadOutcome?=nil,focus:InputIncidentFocusEvidence?=nil){
         guard let span else{if enabled{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         guard span.reserveEnd() else{if gate.generation==span.generation{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         let ended=clock(),duration=ended-span.began
@@ -1052,6 +1104,7 @@ final class InputIncidentTrace {
             append(lane,.read,observedAt:ended,observationTiming:timing,event:read.id,category:2,duration:duration)
             ring[(position-1+capacity)%capacity]?.workEvidence=work
             ring[(position-1+capacity)%capacity]?.readOutcome=outcome
+            ring[(position-1+capacity)%capacity]?.focusEvidence=focus
             updatePreservedLastFrame()
             }
         }

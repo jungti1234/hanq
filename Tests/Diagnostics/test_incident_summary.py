@@ -9,6 +9,20 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_snapshot_focus_evidence_is_fixed_and_scoped(self):
+        focus=dict(path=1,role=6,route=1,ownerRelation=1,elementRelation=3,withinRead=0)
+        row=dict(frame(6,2,event=7,category=2,ms=40),sequence=1,readOutcome=8,focusEvidence=focus)
+        result=summary.summarize(dict(schema=1,trigger=1,frames=[row]))['snapshot_focus_observations'][0]
+        self.assertEqual(result['role_name'],'group')
+        self.assertEqual(result['element_relation'],'changed')
+        self.assertIn('not_keyboard_recipient',result['interpretation'])
+        for patch in [dict(path=0),dict(role=11),dict(role=True),dict(route=3),dict(ownerRelation=4),dict(elementRelation=4),dict(withinRead=4),dict(text='private')]:
+            with self.assertRaises(ValueError):summary.focus_evidence(dict(focus,**patch))
+        for patch in [dict(kind=1),dict(category=1),dict(lane=7),dict(readOutcome=0)]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
+        old=dict(row);old.pop('focusEvidence')
+        self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[old]))['snapshot_focus_observations'],[])
+
     def test_snapshot_read_outcomes_are_fixed_completed_guard_results(self):
         row=dict(frame(6,2,event=42,category=2,ms=50),sequence=1,readOutcome=10)
         r=summary.summarize(dict(schema=1,trigger=1,frames=[row]))

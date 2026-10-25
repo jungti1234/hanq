@@ -277,6 +277,15 @@ final class DiagnosticReviewSnapshot {
                 let label=integer(frame["readOutcome"]).flatMap{InputIncidentTrace.ReadOutcome(rawValue:$0)}?.label ?? "조회 결과 미측정"
                 let lane=integer(frame["lane"]) == 6 ? "첫 자음" : "불일치"
                 counts["\(lane) 조회: \(label)",default:0]+=1
+                if let focus=frame["focusEvidence"] as? [String:Any] {
+                    let roles=["역할 미측정","역할 조회 불가","텍스트 영역","텍스트 필드","콤보 상자","웹 영역","그룹","버튼","창","앱","기타 역할"]
+                    let relations=["요소 미확인","첫 관측·관측 공백 뒤","같은 요소","다른 요소"]
+                    if let role=integer(focus["role"]),roles.indices.contains(role),
+                       let relation=integer(focus["elementRelation"]),relations.indices.contains(relation) {
+                        let path=integer(focus["path"]) == 3 ? "불일치 유휴" : lane
+                        counts["\(path) 포커스: \(roles[role]) · \(relations[relation])",default:0]+=1
+                    }
+                }
             }
             // Counts simplify the preview. The exported file retains all original
             // frames, times, links, classifications and other diagnostic evidence.

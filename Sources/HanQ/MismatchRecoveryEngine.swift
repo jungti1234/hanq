@@ -326,6 +326,7 @@ final class MismatchRecoveryEngine:NSObject {
         else if let testPost {testPost(event)}
         else {event.post(tap:route)}
     }
+    private let incidentFocusProbe=InputIncidentFocusProbe()
     let focusAccess=InputFocusAccess()
     var systemAX:AXUIElement { focusAccess.system }
     var focusErrors:[String:String]=[:]
@@ -356,7 +357,15 @@ final class MismatchRecoveryEngine:NSObject {
     func snapshot(includeContent:Bool=true,allowComboBox:Bool=false)->MismatchSnapshot?{
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
         var incidentMeasured=false
-        defer{InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason,includesContent:includeContent):nil)}
+        let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
+        var focusRead:InputIncidentFocusProbe.Read?
+        let oldFocusObserver=focusAccess.observeFocus
+        defer{
+            focusAccess.observeFocus=oldFocusObserver
+            let allowed=incidentMeasured && !["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason)
+            let focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:2)
+            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason,includesContent:includeContent):nil,focus:focus)
+        }
         let queryStart=ProcessInfo.processInfo.systemUptime,previousID=activeSnapshotID
         traceSequence+=1;let id=traceSequence;activeSnapshotID=id
         if traceLatency{log("snapshot_started",["id":id,"stage":snapshotStage,"includeContent":includeContent,"uptime":queryStart])}
@@ -369,7 +378,12 @@ final class MismatchRecoveryEngine:NSObject {
         unavailableReason="";incidentMeasured=incidentRead != nil
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
         guard !IsSecureEventInputEnabled() else{unavailableReason="secure_input";return nil}
-        guard let target,!target.isTerminated,focusAccess.currentPID()==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}
+        guard let target,!target.isTerminated else{unavailableReason="target_not_frontmost";return nil}
+        if incidentMeasured {
+            focusRead=InputIncidentFocusProbe.Read(target:target.processIdentifier)
+            focusAccess.observeFocus={element,owner,route in focusRead?.observe(element,owner:owner,route:route)}
+        }
+        guard focusAccess.currentPID()==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}
         guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{unavailableReason="focused_element_unreadable";return nil}
         // Fetch one coherent attribute batch instead of four synchronous IPCs.
         let names=(includeContent ? [kAXRoleAttribute,kAXSubroleAttribute,kAXValueAttribute,kAXSelectedTextRangeAttribute] : [kAXRoleAttribute,kAXSubroleAttribute]) as CFArray
@@ -381,6 +395,7 @@ final class MismatchRecoveryEngine:NSObject {
         if traceLatency{log("attributes_query_finished",["snapshotID":id,"durationMs":duration,"result":result.rawValue])}
         if duration>5{log("snapshot_batch_latency",["ms":duration,"result":result.rawValue])}
         guard result == .success,let list=values as? [AnyObject],list.count==(includeContent ? 4:2) else{unavailableReason="attribute_batch_unreadable";return nil}
+        if incidentMeasured {focusRead?.observedRole(list[0] as? String)}
         guard let role=list[0] as? String else{unavailableReason="role_unreadable";return nil}
         guard Self.supportsSnapshotRole(role,includeContent:includeContent,allowComboBox:allowComboBox) else{unavailableReason="not_supported_text_field";return nil}
         guard list[1] as? String != "AXSecureTextField" else{unavailableReason="secure_text_field";return nil}
