@@ -168,7 +168,7 @@ final class DiagnosticReviewSnapshot {
             let object = try Self.object(data)
             guard Self.integer(object["schema"]) == 1, let number = Self.integer(object["incident"]), number > 0,
                   let phase = Self.integer(object["phase"]), (0...1).contains(phase),
-                  let trigger = Self.integer(object["trigger"]), (1...6).contains(trigger),
+                  let trigger = Self.integer(object["trigger"]), (1...7).contains(trigger),
                   object["frames"] is [[String: Any]] else { throw DiagnosticReviewError.invalidCapture }
             let run: String
             if let raw = object["runID"] as? String {
@@ -228,7 +228,7 @@ final class DiagnosticReviewSnapshot {
     }
     static func triggerTitle(_ trigger: Int) -> String {
         [1: "방금 발생한 문제 기록", 2: "입력 처리 지연 관측", 3: "접근성 조회 지연 관측",
-         4: "본문 길이 감소 관측", 5: "전환 대기 중단", 6: "자동 보정 시작"][trigger] ?? "알 수 없는 기록"
+         4: "본문 길이 감소 관측", 5: "전환 대기 중단", 6: "자동 보정 시작", 7: "공백 처리 관측"][trigger] ?? "알 수 없는 기록"
     }
     private static func capture(_ object: [String: Any], phase: Int) throws -> DiagnosticReviewDocument {
         let frames = object["frames"] as! [[String: Any]]
@@ -320,6 +320,14 @@ final class DiagnosticReviewSnapshot {
             if let requests = preservation["requests"] as? [[String: Any]],
                let request = requests.first(where: { integer($0["trigger"]) == 6 }), let detail = integer(request["detail"]) {
                 coverage.append(.init(label: "최초 보정 감지 사유", value: reasons[detail] ?? "해석하지 못한 감지 사유"))
+            }
+            if let requests=preservation["requests"] as? [[String:Any]] {
+                let labels=[1:"짧은 간격의 공백 누름",2:"공백 소비·보관 단서",3:"한Q 재전송 표식",4:"공백 반복 플래그"]
+                let observed=Set(requests.filter{integer($0["trigger"])==7}.compactMap{integer($0["detail"])})
+                if !observed.isEmpty {
+                    coverage.append(.init(label:"공백 관측 조건",value:observed.sorted().compactMap{labels[$0]}.joined(separator:", ")))
+                    coverage.append(.init(label:"해석 범위",value:"공백 처리 관측이며 중복 결과나 원인을 확정하지 않습니다."))
+                }
             }
         }
         var sections = [DiagnosticReviewSection(title: "확인 범위", fields: coverage),

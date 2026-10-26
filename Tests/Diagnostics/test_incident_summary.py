@@ -124,7 +124,7 @@ class IncidentSummaryTests(unittest.TestCase):
         self.assertIsNone(old['capture_preservation']);self.assertIsNone(old['capture_backlog'])
         for bad in [None,dict(preserved,text='private'),dict(preserved,postCapacity=0),dict(preserved,postOmittedFrames=True),dict(preserved,closed=False),dict(preserved,requests=[dict(request,keyCode=1)]),dict(preserved,requests=[dict(request,milliseconds='private')]),dict(preserved,requests=[request]*33)]:
             with self.assertRaises(ValueError):summary.summarize(dict(data,capturePreservation=bad))
-        for bad in [None,dict(backlog,text='private'),dict(backlog,pendingAutomatic=17),dict(backlog,requestOverflow={'7':1}),dict(backlog,completedWindows=2),dict(backlog,merged={'05':1}),dict(backlog,requested={'5':True})]:
+        for bad in [None,dict(backlog,text='private'),dict(backlog,pendingAutomatic=17),dict(backlog,requestOverflow={'8':1}),dict(backlog,completedWindows=2),dict(backlog,merged={'05':1}),dict(backlog,requested={'5':True})]:
             with self.assertRaises(ValueError):summary.summarize(dict(data,captureBacklog=bad))
 
     def test_shape_spans_baselines_and_strict_privacy(self):

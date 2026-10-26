@@ -345,6 +345,8 @@ final class InputIncidentTrace {
     enum HUDStage:Int {case requested=1,ordered,firstDraw,suppressed,unavailable}
     struct EventEvidence:Codable {
         let observedAtMicros:Int;let timestampMicros:Int;let keyClass:Int
+        var creatorClass:Int?=nil // 1 unreported, 2 this HanQ, 3 another PID; never hardware proof
+        var autoRepeat:Bool?=nil
         // Physical classes only. No letter identity, Unicode payload or raw flags.
         init(time:Double,origin:Double,type:CGEventType,event:CGEvent) {
             observedAtMicros=Int(max(0,min((time-origin)*1_000_000,9_000_000_000_000_000)))
@@ -357,6 +359,11 @@ final class InputIncidentTrace {
             case 36,48,51,53,76,117,123...126:keyClass=3 // editing/navigation
             default:keyClass=6 // other
             }}
+            if keyClass==1 {
+                let creator=event.getIntegerValueField(.eventSourceUnixProcessID)
+                creatorClass=creator<=0 ? 1:(creator==Int64(getpid()) ? 2:3)
+                autoRepeat=event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            }
         }
     }
     // Append-only fixed codes. No source IDs, key values or arbitrary messages.
@@ -370,7 +377,7 @@ final class InputIncidentTrace {
         case manualEdit,keyboardCapture,onsetRepair,onsetReservation
         case handoffUninitialized,observationAllowed
     }
-    enum Trigger:Int,Codable {case manual=1,callbackDelay,axDelay,possibleShrink,boundaryInterrupted,recoveryStarted}
+    enum Trigger:Int,Codable,CaseIterable {case manual=1,callbackDelay,axDelay,possibleShrink,boundaryInterrupted,recoveryStarted,spaceObservation}
     enum BoundaryStage:Int {
         case waiting=1,queued,onsetWaiting,onsetConfirmed,onsetRetimed,retained,finished,deadline,focusChanged,failed,selection,sourceCommitted
         case snapshotWait,textWait,caretWait,repairWait,repairReceiptWait,onsetReceiptWait,replayReceiptWait,focusWait,selectionCommitWait,sourceCommitWait
@@ -587,8 +594,10 @@ final class InputIncidentTrace {
     private let eventCredits:DispatchSemaphore,metadataCredits:DispatchSemaphore,shapeCredits:DispatchSemaphore,readCredits:DispatchSemaphore
     private let observationOverflowSignals:[DispatchSemaphore],observationOmittedSignals:[DispatchSemaphore]
     private var observationProcessed:[Int:Int]=[:],observationOverflow:[Int:Int]=[:],observationOmitted:[Int:Int]=[:],observationCoalesced:[Int:Int]=[:]
-    private let captureCredits=(0..<6).map{_ in DispatchSemaphore(value:16)}
-    private let captureOverflowSignals=(0..<6).map{_ in DispatchSemaphore(value:0)}
+    private let captureCredits=Trigger.allCases.map{_ in DispatchSemaphore(value:16)}
+    private let captureOverflowSignals=Trigger.allCases.map{_ in DispatchSemaphore(value:0)}
+    private var lastSpaceDown:[Int:Double]=[:]
+    private var lastSpaceCapture:[Int:Double]=[:]
     // All window mutation is on decisionQueue under the metadata lock. Writer
     // closures receive value snapshots; a window slot is held through both writes.
     private final class CaptureWindow {
@@ -679,6 +688,7 @@ final class InputIncidentTrace {
                 ring=Array(repeating:nil,count:configured ? capacity:0);position=0;stored=0
                 reads.removeAll();shapes.removeAll();identities.removeAll();lastDecisions.removeAll();lastSourceEvidence.removeAll()
                 fields.removeAll();lastEdit = -Double.infinity;lastTrigger = -Double.infinity
+                lastSpaceDown.removeAll();lastSpaceCapture.removeAll()
                 if active,configured{captures=max(captures,last);_ = gate.activate(paused)}
                 lock.unlock()
                 DispatchQueue.main.async{[weak self] in self?.start();completion?()}
@@ -804,13 +814,17 @@ final class InputIncidentTrace {
         }
     }
     private func requestCapture(_ reason:Trigger,lane:Lane = .main,detail:Int=0,event:CGEvent?=nil){
+        guard enabled else{return}
+        requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock())
+    }
+    private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double){
         let generation=gate.generation;guard generation>0 else{return}
         // Bounded admission only. The input caller never waits for a lock, copies
         // a ring, encodes JSON, or performs file I/O.
         guard captureCredits[reason.rawValue-1].wait(timeout:.now()) == .success else{
             captureOverflowSignals[reason.rawValue-1].signal();return
         }
-        let time=clock(),enqueued=observationClock(),reference=event.map{EventReference($0,$0.type)}
+        let enqueued=observationClock()
         decisionQueue.async{[self] in
             defer{captureCredits[reason.rawValue-1].signal()}
             guard gate.generation==generation else{return}
@@ -928,6 +942,7 @@ final class InputIncidentTrace {
         let time=clock(),reference=EventReference(event,type)
         let evidence = lane == .hid || lane == .main ? EventEvidence(time:time,origin:origin,type:type,event:event):nil
         let code=event.getIntegerValueField(.keyboardEventKeycode)
+        let isSpace=code==49 && (type == .keyDown || type == .keyUp)
         let editing=event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty == false || [36,48,51,53,76,117,123,124,125,126].contains(code)
         let pointer=type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown
         let edge=type == .keyDown ? 1:(type == .keyUp ? 2:3)
@@ -939,6 +954,21 @@ final class InputIncidentTrace {
             ring[(position-1+capacity)%capacity]?.workEvidence=workGeneration==gate.generation ? work:nil
             ring[(position-1+capacity)%capacity]?.eventEvidence=evidence
             updatePreservedLastFrame()
+            // Metadata worker only. No new input tap, timer, AX/TIS call or key post.
+            var reason=0
+            if edge==1 && isSpace {
+                if [Lane.hid,Lane.main].contains(lane) {
+                    if let previous=lastSpaceDown[lane.rawValue],time>=previous,time-previous<=0.08 {reason=1}
+                    lastSpaceDown[lane.rawValue]=time
+                }
+                if consumed {reason=2}
+                if origin==2 {reason=3}
+                if evidence?.autoRepeat==true {reason=4}
+            } else if edge==1 || edge==3 {lastSpaceDown.removeValue(forKey:lane.rawValue)}
+            if reason>0,time-(lastSpaceCapture[reason] ?? -Double.infinity)>=1 {
+                lastSpaceCapture[reason]=time
+                requestCapture(.spaceObservation,lane:lane,detail:reason,reference:reference,time:time)
+            }
         }
         // Preserve the request even when event queue capacity was exhausted.
         if duration>=0.05{requestCapture(.callbackDelay,lane:lane,event:event)}

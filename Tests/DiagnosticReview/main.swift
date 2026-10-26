@@ -216,4 +216,22 @@ let failedRead=try projected([["kind":2,"lane":6,"category":2,"durationMicros":1
 for label in ["첫 자음 조회: 본문 값 조회 불가","불일치 조회: 커서·선택 범위 조회 불가","불일치 조회: 조회 결과 미측정"] {
     check(failedRead.readableText.contains(label),"review exposes outcome and distinguishes legacy: \(label)")
 }
+let spaceDirectory=root.appendingPathComponent("space-preview")
+try fm.createDirectory(at:spaceDirectory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+try fm.copyItem(at:snapshotURL.appendingPathComponent("storage-status.json"),to:spaceDirectory.appendingPathComponent("storage-status.json"))
+var spaceDates:[String:Double]=[:]
+for phase in 0...1 {
+    var object=try JSONSerialization.jsonObject(with:capture(20,phase,trigger:7)) as! [String:Any]
+    object["capturePreservation"]=["postOmittedFrames":0,"endedOnShutdown":false,"requests":[["trigger":7,"detail":2]]]
+    let name="incident-20-\(phase)-\(UUID().uuidString).json"
+    try JSONSerialization.data(withJSONObject:object).write(to:spaceDirectory.appendingPathComponent(name))
+    try fm.setAttributes([.posixPermissions:0o600],ofItemAtPath:spaceDirectory.appendingPathComponent(name).path)
+    spaceDates[name]=1
+}
+try JSONEncoder().encode(spaceDates).write(to:spaceDirectory.appendingPathComponent("review-dates.json"))
+try fm.setAttributes([.posixPermissions:0o600],ofItemAtPath:spaceDirectory.appendingPathComponent("review-dates.json").path)
+let spacePreview=try DiagnosticReviewSnapshot(directory:spaceDirectory)
+check(spacePreview.incidents[0].title=="공백 처리 관측" && !spacePreview.incidents[0].manual,"space observation has a distinct automatic review title")
+let spaceText=spacePreview.incidents[0].documents[0]!.readableText
+check(spaceText.contains("공백 소비·보관 단서") && spaceText.contains("원인을 확정하지 않습니다"),"review distinguishes intervention evidence from root cause")
 print("PASS: diagnostic review \(checks) checks (selection, original bytes, parsed preview, ZIP integrity, failure preservation)")

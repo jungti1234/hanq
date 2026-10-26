@@ -191,6 +191,6 @@ var object=(try! JSONSerialization.jsonObject(with:encoded(post))) as! [String:A
 var preserved=object["capturePreservation"] as! [String:Any];preserved["text"]="PRIVATE";object["capturePreservation"]=preserved
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"unknown preservation payload rejected")
 object=(try! JSONSerialization.jsonObject(with:encoded(post))) as! [String:Any]
-var backlog=object["captureBacklog"] as! [String:Any];backlog["windowOverflow"]=["7":1];object["captureBacklog"]=backlog
+var backlog=object["captureBacklog"] as! [String:Any];backlog["windowOverflow"]=["8":1];object["captureBacklog"]=backlog
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"invalid trigger counter rejected")
 print("PASS \(checks) protected capture pre/post, deferred batch, anonymous linkage, bounds, nonblocking admission, timers, OFF, shutdown and strict privacy checks; no AX/global keys")

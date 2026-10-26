@@ -424,6 +424,8 @@ SourceSwitchBarrier는 주 입력 경로에서 앞선 문자·선택의 예상 �
 
 ### 간헐적 입력 이상 기록
 
+공백 진단의 trigger7은 detail1짧은 간격(80ms)의 이어진 누름/2공백 소비/3한Q 재전송 표식/4반복 플래그다. 기존 metadata worker에서 조건별1초 간격으로 전후 보존을 요청하며 콜백에 AX/TIS 조회·진단 잠금 대기·파일 I/O·키 전송을 추가하지 않는다. eventEvidence의 공백 전용 creatorClass는1미보고/2현재 한Q/3다른 프로세스, autoRepeat는 이벤트의 반복 플래그다. 구형 필드 없음은 미측정이며 생성 PID의 필드값·복사 가능성을 실제 전송자나 하드웨어 증명으로 해석하지 않는다. `bash scripts/test-space-observation-diagnostics.sh`는80ms 경계/다른 키·OFF/세대 초기화·비차단/엄격 수집과 요약을 검사한다. 기존 창의 최종 두 공백 결과와 조건 관측을 구분한다.
+
 전환 시점 조사에는 선택적 `eventEvidence`·`caretPrecedingClass`와 `kind=12` HUD 단서를 사용한다. `eventEvidence`는 기존 HID/메인 event·제어 frame에 원래 OS `timestampMicros`(0은 미측정), trace 시작에 대한 `observedAtMicros`, 물리 키의 고정 분류 `keyClass`만 추가한다. 분류는1공백/2문자키 위치/3편집·탐색/4modifier/5pointer/6기타이며 실제 글자·키 코드·Unicode payload·원래 flags를 저장하지 않는다. 캡처의 `clockOriginMicros`와 관측 시각을 합쳐 OS 이벤트부터 관측까지의 경과를 계산한다. 서로 다른 단계에서 OS 시각이 재설정될 수 있고 익명 이벤트 연결은 계속 보조 정보이므로, 시각0·구형 필드 없음·미연결을 추정하지 않는다. 마이크로초 정수 변환에는 약1µs 반올림 차이가 있을 수 있다.
 
 기존 본문 snapshot의 변경 또는 커서 이동 때 커서 바로 앞 UTF-16 한 단위만 분류하고 `shapeEvidence.caretPrecedingClass`에0미확인·앞 글자 없음·선택 중/1ASCII 영문/2한글 음절/3자모/4공백·탭·줄바꿈/5기타를 남긴다. 좌표·원문은 진단 큐로 넘기지 않으며 입력칸 추가 조회·타이머·전환·키 전송은 없다. 이 값은 같은 AX 제공자의 관측이고 어떤 물리 키의 결과인지 또는 실제 IME 내부 상태인지 독립적으로 증명하지 않는다.
