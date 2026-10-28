@@ -25,6 +25,7 @@ final class Case {
   e.testPostCompositionCommit={target,event in
    check(CFEqual(target,self.field),"cursor command targets original field")
    check(event.getIntegerValueField(.keyboardEventKeycode)==123 && event.flags.isEmpty,"only plain Left is posted")
+   check(event.getIntegerValueField(.eventSourceStateID)==Int64(CGEventSourceStateID.hidSystemState.rawValue),"native source state reaches the PID-pinned command")
    check(event.getIntegerValueField(.eventSourceUserData)==self.e.compositionCommitMarker && self.e.compositionCommitMarker != self.e.marker && OnsetInputGate.isRecoveryMarker(self.e.compositionCommitMarker),"commit is a distinct repair identity")
    _=self.gate.receive(event.type,event)
    check(self.gate.seenCount()==0,"commit must never acknowledge a character replay")

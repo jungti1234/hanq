@@ -5,6 +5,10 @@ extension OnsetRecoveryEngine {
     // A completed late word is already committed input. Replace it through the
     // original AX element, never by queuing physical keys to the current focus.
     func canReplaceCommittedText(_ field:AXUIElement)->Bool {
+        // This provider advertised a writable selection but did not confirm the
+        // actual edit. The empty-composer handoff preserves original IME input;
+        // never select/hold a late word here based only on the advertised flag.
+        guard (testTargetBundleID?() ?? target?.bundleIdentifier) != "com.openai.codex" else{return false}
         if let testCanReplaceText{return testCanReplaceText()}
         var writable:DarwinBoolean=false
         return AXUIElementIsAttributeSettable(field,kAXSelectedTextAttribute as CFString,&writable) == .success && writable.boolValue
@@ -34,11 +38,37 @@ extension OnsetRecoveryEngine {
         return AXUIElementSetAttributeValue(snap.element,kAXSelectedTextRangeAttribute as CFString,AXValueCreate(.cfRange,&range)!) == .success
     }
     func cancelCommittedSelection(_ candidate:OnsetRecoveryPlan){
-        guard let field=planElement,let snap=originalSnapshot(field),restoreCommittedCaret(candidate,snap) else{park("committed_cancel_unverified");return}
-        guard let restored=originalSnapshot(field),restored.text==candidate.expected,
-              restored.selection==NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0) else{park("committed_cancel_unverified");return}
-        log("committed_replacement_cancelled")
-        finishCommittedReplacement(restored)
+        beginCommittedCaretRestoration(candidate)
+    }
+    func beginCommittedCaretRestoration(_ candidate:OnsetRecoveryPlan){
+        if committedCaretRestoring{verifyCommittedCaretRestoration();return}
+        guard let field=planElement,let snap=originalSnapshot(field),
+              snap.text==candidate.expected else{park("committed_cancel_unverified");return}
+        let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
+        if snap.selection==caret{log("committed_replacement_cancelled");finishCommittedReplacement(snap);return}
+        guard snap.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{park("committed_cancel_unverified");return}
+        // A successful range setter is not an acknowledgment. Issue cleanup
+        // once, then wait for the original element's actual caret within the
+        // existing input hold. Never repeat the uncertain text operation.
+        committedCaretRestoring=true;committedReplacementAwaiting=true
+        committedCaretRestoreDeadline=ProcessInfo.processInfo.systemUptime+0.12
+        guard restoreCommittedCaret(candidate,snap) else{park("committed_cancel_unverified");return}
+        verifyCommittedCaretRestoration()
+    }
+    func verifyCommittedCaretRestoration(){
+        guard recovering,!rollingBack,committedCaretRestoring,
+              let candidate=currentPlan,candidate.isCommittedLate,let field=planElement else{return}
+        guard gate?.healthy() ?? true else{park("committed_gate_closed");return}
+        if let restored=originalSnapshot(field){
+            guard restored.text==candidate.expected else{park("committed_result_changed");return}
+            let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
+            if restored.selection==caret{
+                log("committed_replacement_cancelled");finishCommittedReplacement(restored);return
+            }
+            guard restored.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{park("committed_cancel_unverified");return}
+        }
+        guard ProcessInfo.processInfo.systemUptime<committedCaretRestoreDeadline else{park("committed_cancel_unverified");return}
+        scheduleRecovery(0.002){[weak self] in self?.verifyCommittedCaretRestoration()}
     }
     func replaceCommitted(_ candidate:OnsetRecoveryPlan,_ selected:OnsetSnapshot){
         guard !replayStarted,let replacement=candidate.replayedText,
@@ -56,6 +86,7 @@ extension OnsetRecoveryEngine {
         verifyCommittedReplacement()
     }
     func verifyCommittedReplacement(){
+        if committedCaretRestoring{verifyCommittedCaretRestoration();return}
         guard recovering,!rollingBack,committedReplacementAwaiting,let candidate=currentPlan,candidate.isCommittedLate,
               replayStarted,let field=planElement,let replacement=candidate.replayedText else{return}
         guard gate?.healthy() ?? true else{park("committed_gate_closed");return}
@@ -67,17 +98,14 @@ extension OnsetRecoveryEngine {
             }
             if snap.text != candidate.expected{park("committed_result_changed");return}
             if now>=committedReplacementDeadline {
-                guard restoreCommittedCaret(candidate,snap) else{park("committed_cancel_unverified");return}
-                guard let restored=originalSnapshot(field),restored.text==candidate.expected,
-                      restored.selection==NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0) else{park("committed_cancel_unverified");return}
-                log("committed_replacement_not_applied");finishCommittedReplacement(restored);return
+                beginCommittedCaretRestoration(candidate);return
             }
         }
         guard now<committedReplacementDeadline else{park("committed_result_unreadable");return}
         scheduleRecovery(0.002){[weak self] in self?.verifyCommittedReplacement()}
     }
     func finishCommittedReplacement(_ snap:OnsetSnapshot){
-        committedReplacementAwaiting=false
+        committedReplacementAwaiting=false;committedCaretRestoring=false
         collectHeld()
         // Original input is separate from the text replacement. Its existing
         // per-event target/source checks remain mandatory before delivery.

@@ -801,3 +801,21 @@ do {
 }
 
 print("Source switch barrier:",checks,"checks passed")
+
+// A native select-all over a split first word must not turn contradictory
+// prediction history into retained future typing. No AX write has occurred.
+for ready in [true,false] {
+ let b=SourceSwitchBarrier();var text="",range=NSRange(location:0,length:0),clock=1.0,retained=0,posts=0,writes=0,stages:[String]=[]
+ var isReady=true
+ b.now={clock};b.ready={isReady};b.read={.init(field:field,text:text,selection:range)};b.readFocus={field};b.source={ko};b.retained={retained += $0.count};b.send={_ in posts+=1};b.applySelection={_,_ in writes+=1;return true};b.trace={stages.append($0)}
+ for c:UInt16 in [15,40,1,49]{b.observe(.keyDown,key(c));let up=key(c);up.type = .keyUp;b.observe(.keyUp,up)}
+ text="ㄱㅏㄴ ";range=NSRange(location:0,length:4);b.observe(.keyDown,key(0,.maskCommand));b.step()
+ if !ready{isReady=false}
+ let release=key(55);release.type = .flagsChanged
+ check(b.receive(.flagsChanged,release) == !ready,"native left Command release bypasses only the idle unwritten selection boundary")
+ check(b.receive(.keyDown,key(37)) == !ready,"contradictory native select-all resumes next original letter when no edit owns input")
+ if ready {
+  check(!b.busy && retained==0 && posts==0 && writes==0,"empty-onset select-all cancellation never edits or strands following input")
+  check(stages.contains("native_select_all_diverged_input_resumed"),"fixed content-free cancellation reason")
+ }else{isReady=true;b.fail("test_cleanup")}
+}

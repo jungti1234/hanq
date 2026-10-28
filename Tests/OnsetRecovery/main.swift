@@ -12,11 +12,12 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     func plan(_ prior:OnsetSnapshot?,_ text:String,_ caret:Int?=nil,_ element:AXUIElement?=nil)->OnsetRecoveryPlan? {
         let current=OnsetSnapshot(element:element ?? field,text:text,selection:NSRange(location:caret ?? text.utf16.count,length:0))
         var d=OnsetRecoveryDetector();d.outsideKey(code:15,shift:false,time:0,korean:true,plain:true);d.entered(time:0.05)
-        return d.firstConsonant(time:0.1,text:text,selection:current.selection,previousText:OnsetRecoveryEngine.firstConsonantBaseline(prior,current:current))
+        guard let baseline=OnsetRecoveryEngine.firstConsonantBaseline(prior,current:current) else{return nil}
+        return d.firstConsonant(time:0.1,text:text,selection:current.selection,previousText:baseline)
     }
     for old in ["Codex와 함께 작업하세요\n","\n무엇이든 요청하세요","unknown hint","\n","actual old text"] {
         let prior=OnsetSnapshot(element:field,text:old,selection:NSRange(location:0,length:0))
-        testCheck(plan(prior,"ㄱ")?.before == "","single-character current editor has no surrounding text to guess")
+        testCheck(plan(prior,"ㄱ")==nil,"replaced placeholder/content is not a proved pre-key empty field")
         testCheck(plan(prior,"ㄱ"+old,1)?.before == old,"literal content is preserved")
         for text in ["ㄴ","가","ㄱㅏ"]{testCheck(plan(prior,text)==nil,"key matching and multi-key guards retained")}
     }
@@ -175,14 +176,15 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
                     let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g
                     p.unavailableReason="not_supported_text_field";p.sampleEarly(nil)
                     testCheck(g.receive(.keyDown,key(code,true,shift)) != nil && g.reservation()?.sourceID==id,"reserve actual layout initial")
-                    let field=AXUIElementCreateApplication(12345);var text=original;var range=NSRange(location:1,length:0);var sent:[UInt16]=[]
+                    let field=AXUIElementCreateApplication(12345);var text=" "+original;var range=NSRange(location:2,length:0);var sent:[UInt16]=[]
+                    p.earlyBaseline=OnsetSnapshot(element:field,text:" ",selection:NSRange(location:1,length:0))
                     p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
                     p.testSetRange={_,r in range=r;return .success}
                     p.testPost={e in
                         _ = g.receive(e.type,e)
                         guard e.type == .keyDown else{return}
                         let k=UInt16(e.getIntegerValueField(.keyboardEventKeycode));sent.append(k)
-                        if sent.count==1{testCheck(k==code && e.flags.contains(.maskShift)==shift && range==NSRange(location:0,length:1));text=variants.last!;range=NSRange(location:1,length:0)}
+                        if sent.count==1{testCheck(k==code && e.flags.contains(.maskShift)==shift && range==NSRange(location:1,length:1));text=" "+variants.last!;range=NSRange(location:2,length:0)}
                         else{testCheck(k==vowel && range.length==0);text="composed";range=NSRange(location:8,length:0)}
                     }
                     p.sample()
@@ -206,8 +208,9 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
         var source=KoreanKeyboardLayout.threeSetID;var sent=0
         p.testSource={source};p.unavailableReason="not_supported_text_field";p.sampleEarly(nil)
         _=g.receive(.keyDown,key(40));g.held=[key(3)] // Inject an in-flight buffered vowel to verify source-change fencing.
-        let field=AXUIElementCreateApplication(12345);var range=NSRange(location:1,length:0)
-        p.testSnapshot={OnsetSnapshot(element:field,text:"ㄱ",selection:range)}
+        let field=AXUIElementCreateApplication(12345);var range=NSRange(location:2,length:0)
+        p.earlyBaseline=OnsetSnapshot(element:field,text:" ",selection:NSRange(location:1,length:0))
+        p.testSnapshot={OnsetSnapshot(element:field,text:" ㄱ",selection:range)}
         p.testSetRange={_,r in range=r;if phase==1{source=onsetKoreanID};return .success}
         p.testPost={e in _=g.receive(e.type,e);if e.type == .keyDown{sent+=1;range=NSRange(location:1,length:0);if phase==2{source=onsetKoreanID}}}
         if phase==0{source=onsetKoreanID}
@@ -276,25 +279,26 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
             let shiftUp=key(shiftCode,false,[]);shiftUp.type = .flagsChanged
             let follow=[key(code,false,.maskShift),shiftUp,key(40,true,[]),key(40,false,[])]
             testCheck(g.receive(follow[0].type,follow[0]) != nil,"original release passes before claim")
-            let field=AXUIElementCreateApplication(12345);var text=jamo;var range=NSRange(location:1,length:0)
+            let field=AXUIElementCreateApplication(12345);var text=" "+jamo;var range=NSRange(location:2,length:0)
             var sent:[CGEvent]=[]
+            p.earlyBaseline=OnsetSnapshot(element:field,text:" ",selection:NSRange(location:1,length:0))
             p.testSource={onsetKoreanID};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
             p.testSetRange={_,r in range=r;return .success}
             p.testPost={e in
                 sent.append(e);_ = g.receive(e.type,e)
                 if e.type == .keyDown && e.getIntegerValueField(.keyboardEventKeycode)==Int64(code) {
-                    testCheck(e.flags.contains(.maskShift) && range==NSRange(location:0,length:1))
-                    range=NSRange(location:1,length:0)
+                    testCheck(e.flags.contains(.maskShift) && range==NSRange(location:1,length:1))
+                    range=NSRange(location:2,length:0)
                 }
                 if e.type == .keyDown && e.getIntegerValueField(.keyboardEventKeycode)==40 {
-                    testCheck(!e.flags.contains(.maskShift) && range.length==0);text=syllable
+                    testCheck(!e.flags.contains(.maskShift) && range.length==0);text=" "+syllable
                 }
             }
             p.sample()
             for e in follow.dropFirst(){testCheck(g.receive(e.type,e)==nil,"verified repair holds subsequent events")}
             let deadline=Date().addingTimeInterval(0.5)
             while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
-            testCheck(text==syllable && !p.recovering && p.pending.isEmpty,"code=\(code) text=\(text) sent=\(sent.count) pending=\(p.pending.count) enabled=\(p.enabled) recovering=\(p.recovering) waiting=\(p.waitingForContext)")
+            testCheck(text==" "+syllable && !p.recovering && p.pending.isEmpty,"code=\(code) text=\(text) sent=\(sent.count) pending=\(p.pending.count) enabled=\(p.enabled) recovering=\(p.recovering) waiting=\(p.waitingForContext)")
             testCheck(sent.count==5 && sent[2].type == .flagsChanged && !sent[2].flags.contains(.maskShift),"Shift release stays ordered before vowel")
             p.closeSession()
         }
@@ -317,23 +321,24 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
         let g=OnsetInputGate(marker:p.marker);g.beat();p.gate=g;g.configureEarly(true)
         testCheck(g.receive(.keyDown,key(15)) != nil)
         testCheck(g.receive(.keyUp,key(15,false)) != nil,"release of original first down passes")
-        let field=AXUIElementCreateApplication(12345);var text="ㄱ";var range=NSRange(location:1,length:0);var codes:[Int64]=[]
+        let field=AXUIElementCreateApplication(12345);var text=" ㄱ";var range=NSRange(location:2,length:0);var codes:[Int64]=[]
+        p.earlyBaseline=OnsetSnapshot(element:field,text:" ",selection:NSRange(location:1,length:0))
         p.testSource={onsetKoreanID};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
         p.testSetRange={_,r in range=r;return .success}
         p.testPost={e in
             _=g.receive(e.type,e)
             guard e.type == .keyDown else{return}
             let k=e.getIntegerValueField(.keyboardEventKeycode);codes.append(k)
-            if k==15{testCheck(range==NSRange(location:0,length:1));range=NSRange(location:1,length:0)}
-            if k==40{testCheck(text=="ㄱ" && range.length==0);text="가"}
-            if k==1{testCheck(text=="가");text="간"}
+            if k==15{testCheck(range==NSRange(location:1,length:1));range=NSRange(location:2,length:0)}
+            if k==40{testCheck(text==" ㄱ" && range.length==0);text=" 가"}
+            if k==1{testCheck(text==" 가");text=" 간"}
         }
         p.sample()
         for (k,d):(CGKeyCode,Bool) in [(40,true),(40,false),(1,true),(1,false)]{testCheck(g.receive(d ? .keyDown:.keyUp,key(k,d))==nil)}
         if alreadyCollected{p.collectHeld()}
         let deadline=Date().addingTimeInterval(0.5)
         while p.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.002))}
-        testCheck(text=="간" && codes==[15,40,1] && p.pending.isEmpty && p.enabled && !p.recovering)
+        testCheck(text==" 간" && codes==[15,40,1] && p.pending.isEmpty && p.enabled && !p.recovering)
         p.closeSession()
     }
     for prefix in [false,true] {
@@ -362,10 +367,10 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
         _=g.receive(.keyDown,key(15))
         let began=g.reservation()!.time
         let originalField=AXUIElementCreateApplication(12345);var field=originalField
-        let base=scenario=="existing" ? "앞뒤":"";let offset=scenario=="existing" ? 1:0
+        let base=scenario=="existing" ? "앞뒤":" ";let offset=1
         var text=base;var range=NSRange(location:offset,length:0);var source=onsetKoreanID;var sent:[Int64]=[]
-        if scenario=="existing"{p.earlyBaseline=OnsetSnapshot(element:field,text:base,selection:range)}
-        if scenario=="caret"{text="ㄱ"}
+        p.earlyBaseline=OnsetSnapshot(element:field,text:base,selection:range)
+        if scenario=="caret"{text=" ㄱ"}
         p.testSource={source};p.testSnapshot={OnsetSnapshot(element:field,text:text,selection:range)}
         p.testSetRange={_,r in range=r;return .success}
         p.testPost={e in

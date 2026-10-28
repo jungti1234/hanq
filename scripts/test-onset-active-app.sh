@@ -4,6 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 record=${1:?사용법: test-onset-active-app.sh record.json 새-결과-디렉터리}
 output=${2:?새 결과 디렉터리가 필요합니다}
+mode=${3:-}
+if [[ -n "$mode" && "$mode" != --placeholder-entry && "$mode" != --space-rollover ]]; then echo "지원하지 않는 검사 모드" >&2; exit 1; fi
 python3 scripts/prepare-app-test.py check "$record"
 if [[ -e "$output" ]]; then echo '결과 디렉터리를 덮어쓰지 않습니다.' >&2; exit 1; fi
 mkdir -p "$output"
@@ -22,7 +24,9 @@ codesign --force --sign - "$app"
 (cd "$stage"; exec ./sender "$stage") > "$output/sender.log" 2>&1 &
 sender=$!
 trap 'kill "$sender" 2>/dev/null || true; wait "$sender" 2>/dev/null || true' EXIT
-open -n "$app" --args "$stage"
+fixture_args=("$stage")
+if [[ -n "$mode" ]]; then fixture_args+=("$mode"); fi
+open -n "$app" --args "${fixture_args[@]}"
 status=0
 python3 - "$stage" <<'PY' || status=$?
 import json,pathlib,sys,time

@@ -91,3 +91,26 @@ hanq_test_run "$stage/quiet-completion"
 # Native composition must commit through the editor before selecting its onset.
 swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/CompositionCommit/main.swift -o "$stage/composition-commit"
 hanq_test_run "$stage/composition-commit"
+
+# Retry AX activation after persistent focus loss, outside keyboard/edit paths.
+bash scripts/test-onset-accessibility-activation.sh
+
+# First-key focus without a pre-key field must never quarantine the following vowel.
+swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/UnanchoredOnset/main.swift -o "$stage/unanchored-onset"
+hanq_test_run "$stage/unanchored-onset"
+
+# A committed Space may overlap its release with the next word; never replay a fabricated Space down.
+swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/SpaceRollover/main.swift -o "$stage/space-rollover"
+hanq_test_run "$stage/space-rollover"
+
+# An ignored committed edit must await asynchronous caret cleanup before releasing originals.
+swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/CommittedCaretRestoration/main.swift -o "$stage/committed-caret-restoration"
+hanq_test_run "$stage/committed-caret-restoration"
+
+# First-input focus handoff never edits text or retains/replays the original key.
+swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/FocusHandoff/main.swift -o "$stage/focus-handoff"
+hanq_test_run "$stage/focus-handoff"
+
+swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/FocusHandoffDiagnostics/main.swift -o "$stage/focus-handoff-diagnostics"
+hanq_test_run "$stage/focus-handoff-diagnostics" --diagnose-input "$stage/focus-off.log"
+hanq_test_run "$stage/focus-handoff-diagnostics" --trace-onset-focus --diagnose-input "$stage/focus-on.log"

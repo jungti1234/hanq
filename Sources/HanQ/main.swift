@@ -589,6 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     case .normal: break
                     }
                     if !owner.sourceSwitchBarrier.busy {
+                        owner.onsetRecovery.engine?.prepareFocusForFirstInput(type,event)
                         owner.onsetRecovery.engine?.observeDeferredBeforeInput(type,event)
                     }else{owner.onsetRecovery.engine?.cancelDeferredObservation()}
                     if owner.sourceSwitchBarrier.receive(type,event) {control?.route=InputIncidentControl.Route.barrierQueued.rawValue;return nil}

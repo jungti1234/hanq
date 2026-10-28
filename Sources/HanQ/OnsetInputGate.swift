@@ -14,6 +14,11 @@ final class OnsetInputGate {
         var revision=1
         var keys:[(UInt16,Bool)]
         var pressed:Set<UInt16>
+        // The engine separately proves the exact, Space-committed whole word.
+        // A Space release cannot insert text; other held keys stay ineligible.
+        var onlyFinalPlainSpaceDown:Bool {
+            pressed==[49] && keys.last?.0==49 && keys.last?.1==false
+        }
     }
     private(set) var reentryTraceEnabled=false
     private var reentryFrames:[OnsetReentryDiagnostics.Frame]=[]
@@ -60,7 +65,7 @@ final class OnsetInputGate {
         lock.lock();defer{lock.unlock()}
         guard !stopped,early==nil,holdUntil==0,held.isEmpty,
               let current=passedInput,current.first.time==observed.first.time,
-              current.revision==observed.revision,current.pressed.isEmpty,
+              current.revision==observed.revision,(current.pressed.isEmpty || current.onlyFinalPlainSpaceDown),
               current.keys.count>=2,ProcessInfo.processInfo.systemUptime-current.first.time<2 else{traceReentry(.claim,.claim_rejected);return false}
         traceReentry(.claim,.claim_accepted)
         passedInput=nil;deferred=nil;hintUntil=0
@@ -143,6 +148,18 @@ final class OnsetInputGate {
         hintSourceID=sourceID;hintNormal=normal;hintShifted=shifted
     }
     func reservation()->Reservation?{lock.lock();defer{lock.unlock()};return early}
+    // Drop only this unclaimed single-key attempt. Keep the history of events
+    // already passed so exact, committed-word inspection remains possible.
+    func observeUnclaimed(_ first:Reservation)->Bool {
+        lock.lock();defer{lock.unlock()}
+        guard !stopped,held.isEmpty,
+              early.map({$0.time==first.time}) ?? true,
+              deferred.map({$0.time==first.time}) ?? true,
+              early != nil || deferred != nil || (holdUntil==0 && passedInput?.first.time==first.time) else{return false}
+        early=nil;deferred=nil;earlyReleasePending=false;deferredReleasePending=false
+        expiredEarly=false;holdUntil=0;hintUntil=0
+        return true
+    }
     func claimEarly()->Bool {
         lock.lock();defer{lock.unlock()}
         guard !stopped,let first=early,ProcessInfo.processInfo.systemUptime-first.time<0.35 else{traceReentry(.claim,.claim_rejected);return false}

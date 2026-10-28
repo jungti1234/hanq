@@ -25,11 +25,14 @@ extension OnsetRecoveryEngine {
     }
 
     func postCompositionCommit(_ field:AXUIElement)->Bool {
-        guard let source=CGEventSource(stateID:.privateState) else{return false}
+        guard let source=CGEventSource(stateID:.hidSystemState) else{return false}
         source.userData=compositionCommitMarker
         guard let down=CGEvent(keyboardEventSource:source,virtualKey:123,keyDown:true),
               let up=CGEvent(keyboardEventSource:source,virtualKey:123,keyDown:false) else{return false}
-        down.flags=[];up.flags=[]
+        // Preserve Quartz's native key-code representation. A private source
+        // or an AppKit function-character override can be ignored by a live IME.
+        // The PID-pinned delivery and caret acknowledgment below remain required.
+        for event in [down,up] {event.flags=[]}
         if let testPostCompositionCommit {
             return testPostCompositionCommit(field,down) && testPostCompositionCommit(field,up)
         }
@@ -55,7 +58,9 @@ extension OnsetRecoveryEngine {
             guard CFEqual(current.element,before.element),current.text==before.text else {
                 park("composition_commit_context_changed");return
             }
-            if current.selection==NSRange(location:candidate.caret,length:0) {
+            let expectedCaret=NSRange(location:candidate.isObservedReplay ? before.selection.location-1:candidate.caret,length:0)
+            if current.selection==expectedCaret {
+                if candidate.isObservedReplay{replayCommitCaret=expectedCaret}
                 log("composition_commit_confirmed")
                 requestRepairSelection(candidate,current)
                 return

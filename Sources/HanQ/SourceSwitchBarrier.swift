@@ -462,6 +462,19 @@ final class SourceSwitchBarrier {
         }
         beginRepairBoundary(type,event)
         guard busy else{return false}
+        // A native select-all has already reached the editor. Before any AX
+        // selection/commit write, a contradictory body cannot authorize repair.
+        // Resume its original keys instead of parking them behind stale history.
+        if target == nil,pendingSelectAll,!awaitingSelection,selectionAttempts==0,
+           selectionCommitSnapshot == nil,!externalEditPending,isReady(),
+           repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,queued.isEmpty {
+            let code=event.getIntegerValueField(.keyboardEventKeycode)
+            if type == .flagsChanged,code==55{return false} // unmapped left Command
+            if type == .keyDown,let snap=mismatchedSnapshot,!isPendingTextPrefix(snap) {
+                fail("native_select_all_diverged_input_resumed")
+                return false
+            }
+        }
         if type == .keyDown,target != nil,switchSnapshot == nil,
            !pendingSelectAll,!awaitingSelection,!selectionCommitPending,
            isReady(),repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,

@@ -5,7 +5,7 @@ import Foundation
 enum OnsetLateSequenceDetector {
     enum Result { case waiting, complete, rejected, candidate(OnsetRecoveryPlan) }
     static func inspect(keys:[(UInt16,Bool)],before:String,caret:Int,text:String,selection:NSRange,
-                        sourceID:String=KoreanKeyboardLayout.twoSetID)->Result {
+                        sourceID:String=KoreanKeyboardLayout.twoSetID,allowObservedReplay:Bool=false)->Result {
         guard (2...16).contains(keys.count),caret>=0,caret<=before.utf16.count,selection.length==0,
               let layout=KoreanKeyboardLayout.load(sourceID:sourceID),
               let initial=OnsetKeyboardLayout.load(sourceID:sourceID),
@@ -43,6 +43,11 @@ enum OnsetLateSequenceDetector {
         let joined=render(chars[...])
         if view(joined){return .complete}
         if view(split),split != joined {
+            // Only the caller with an independently observed pre-key baseline
+            // may request this IME replay. Normal composition is already complete.
+            if allowObservedReplay,caret==before.utf16.count {
+                return .candidate(OnsetRecoveryPlan(before:before,caret:caret,allowSingle:false,roman:split,codes:keys,onsetVariants:[],observedReplayText:joined))
+            }
             guard keys.last?.0==49,keys.last?.1==false else{return .waiting}
             return .candidate(OnsetRecoveryPlan(before:before,caret:caret,allowSingle:false,roman:split,codes:keys,onsetVariants:[],replayedText:joined))
         }

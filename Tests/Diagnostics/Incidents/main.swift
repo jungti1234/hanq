@@ -70,6 +70,16 @@ shape.flush();check(shapeCaptures.count==1,"recovery edits are not user-loss cla
 shape.context();shape.shape(.onsetAX,identity:111,count:0,selected:false,editing:false)
 shape.flush();check(shapeCaptures.count==1,"source/focus generation is not shrink")
 
+var focusCaptures:[InputIncidentTrace.Capture]=[]
+let focusTrace=InputIncidentTrace(destination:nil,clock:{time},writer:{focusCaptures.append($0)})
+focusTrace.shape(.onsetAX,identity:7766,count:5,selected:false,editing:false)
+focusTrace.focusHandoffObservation(.focusSceneClipped)
+focusTrace.focusHandoffObservation(.repairStarted) // Not a focus observation.
+focusTrace.shape(.onsetAX,identity:7766,count:4,selected:false,editing:false)
+focusTrace.flush()
+check(focusCaptures.first?.trigger == .possibleShrink,"focus-only diagnosis never clears the prior text-shape baseline")
+check(focusCaptures[0].frames.contains{$0.kind == .state && $0.category==10},"fixed traversal-limit state survives existing captures")
+check(!focusCaptures[0].frames.contains{$0.kind == .state && $0.category==1},"focus diagnosis cannot fabricate a repair start")
 var spans:[InputIncidentTrace.Capture]=[]
 let reads=InputIncidentTrace(destination:nil,clock:{time},writer:{spans.append($0)})
 let a=reads.beginRead(.onsetAX);time+=0.001

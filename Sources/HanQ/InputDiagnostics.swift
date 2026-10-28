@@ -409,7 +409,7 @@ final class InputIncidentTrace {
             case "waiting_for_focus":return .focusWait
             case "waiting_for_selection_commit":return .selectionCommitWait
             case "waiting_for_source_commit":return .sourceCommitWait
-            case "editor_diverged_input_resumed":return .inputResumed
+            case "editor_diverged_input_resumed","native_select_all_diverged_input_resumed":return .inputResumed
             case "editor_insertion_style_matched":return .editorStyleMatched
             case "editor_terminal_lf_matched":return .terminalLFMatched
             case "editor_terminal_lf_style_matched":return .terminalLFStyleMatched
@@ -426,6 +426,7 @@ final class InputIncidentTrace {
     }
     enum State:Int {
         case repairStarted=1,selection,replay,retained,finished,stopped,sourceChanged,buffered
+        case focusCandidateUnavailable,focusSceneClipped,focusMultipleEditors,focusSceneScanning,focusGuardRejected,focusRequestUnconfirmed,focusConfirmed
         static func event(_ event:String)->State? {
             switch event {
             case "repair_started","mismatch_confirmed":return .repairStarted
@@ -1229,6 +1230,15 @@ final class InputIncidentTrace {
         _ = submit(.state,lane,state.rawValue,observedAt:time){[self] timing in
             if state != .buffered{lastEdit=time;invalidateShapes()}
             append(lane,.state,observedAt:time,observationTiming:timing,category:state.rawValue,count:pending)
+        }
+    }
+    // Read-only focus decisions must not move the edit boundary or invalidate
+    // shape baselines. The existing state() method is for actual edits.
+    func focusHandoffObservation(_ state:State){
+        guard enabled,!IsSecureEventInputEnabled(),(9...15).contains(state.rawValue) else{return}
+        let time=clock()
+        _ = submit(.state,.onset,state.rawValue,observedAt:time){[self] timing in
+            append(.onset,.state,observedAt:time,observationTiming:timing,category:state.rawValue)
         }
     }
     func sourceEvidence(_ action:SourceEvidenceAction,_ value:SourceEvidence,event:CGEvent?=nil){
