@@ -194,6 +194,8 @@ final class MismatchRecoveryEngine:NSObject {
     var replayCount=0
     var rollingBack=false
     var rollbackReason=""
+    var rollbackCaretObservedAt:Double?
+    var rollbackFirstEditDelivered=false
     var stopAfterRollback=false
     var replayStarted=false
     var replayIssuedAt=0.0
@@ -281,6 +283,7 @@ final class MismatchRecoveryEngine:NSObject {
             guard self.fastRecoveryContext() else{self.park(stage+"_unsafe_context");return}
             guard ProcessInfo.processInfo.systemUptime<self.recoveryDeadline else{self.park(stage+"_deadline");return}
             guard ProcessInfo.processInfo.systemUptime-result.completedAt<0.05 else{
+                if self.rollingBack{self.rollbackCaretObservedAt=nil}
                 self.log("async_snapshot_discarded",["reason":"stale_delivery","stage":stage])
                 self.later(0.001,retry);return
             }
@@ -309,6 +312,7 @@ final class MismatchRecoveryEngine:NSObject {
             guard let field=planElement,CFEqual(snap.element,field) else{park(stage+"_field_changed");return nil}
             return snap
         }
+        if rollingBack{rollbackCaretObservedAt=nil}
         if ["target_not_frontmost","secure_input","secure_text_field","not_supported_text_field","accessibility_permission","focus_changed_during_snapshot"].contains(unavailableReason){park(stage+"_"+unavailableReason);return nil}
         let now=ProcessInfo.processInfo.systemUptime
         if snapshotWaitStarted==nil{snapshotWaitStarted=now;log("snapshot_retry_started",["stage":stage,"reason":unavailableReason])}
@@ -732,6 +736,7 @@ final class MismatchRecoveryEngine:NSObject {
         recoveryDeadline=ProcessInfo.processInfo.systemUptime+2.5
         willBeginRepair()
         recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;plan=nil;pending=[];nextBufferedID=0;postedBuffered=0
+        rollbackCaretObservedAt=nil;rollbackFirstEditDelivered=false
         deliveredHeldKeys=heldKeys
         intendedSource=recoverySourceID;recoverySourceBoundaries=[];pendingSources=[:];pendingTimestamps=[:];bufferedIdentities=[:];keyDownSources=Dictionary(uniqueKeysWithValues:heldKeys.map{($0,recoverySourceID)})
         clearSourceInteraction();systemSwitch.reset(currentSource());lastIntendedKorean=recoverySourceID
@@ -901,6 +906,17 @@ final class MismatchRecoveryEngine:NSObject {
         // Selection was verified before overwrite. A complete result containing
         // exactly those Roman keys is a failed replay, not missing AX output.
         // retryKorean takes a fresh snapshot again before authorizing any edit.
+        if replayStarted,snap.text==candidate.expected,
+           snap.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count),
+           snap.selectedText==candidate.roman {
+            // The editor still exposes the verified, selected pre-replay body.
+            // It has not acknowledged replacement. A short polling budget is
+            // not evidence for a failed Roman result; keep the original queue
+            // and wait within the existing progress deadline, without reposting
+            // the prefix or renewing that deadline. Back off after fast polls.
+            later(remaining>0 ? 0.01:0.025){[weak self] in self?.awaitKorean(candidate,remaining:max(0,remaining-1))}
+            return
+        }
         var romanCandidate=candidate
         romanCandidate.roman=candidate.replayRoman;romanCandidate.verifiedReplacement=nil
         if romanCandidate.matches(text:snap.text,selection:snap.selection){
@@ -978,6 +994,13 @@ final class MismatchRecoveryEngine:NSObject {
         guard ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park("delivery_deadline");return}
         guard let snap=verifiedSnapshot ?? recoverySnapshot("delivery",retry:{[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts)}) else{return}
         if systemSwitch.busy{later(0.01){[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts)};return}
+        if rollback,!rollbackFirstEditDelivered,!queuedSelectAll {
+            // Recheck at delivery: an outstanding selection write can land
+            // between rollback's asynchronous read and this one.
+            guard let candidate=currentPlan,snap.text==candidate.expected,
+                  snap.selection==NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0),
+                  snap.selectedText?.isEmpty != false else{park("rollback_delivery_context_changed");return}
+        }
         // A queued Select All is an editing boundary, not a printable key.
         // Apply its selection after the next source is ready: switching a live
         // selected composition can otherwise commit its last syllable outside
@@ -985,6 +1008,7 @@ final class MismatchRecoveryEngine:NSObject {
         while let first=pending.first {
             if Self.isSelectAll(first) {
                 pending.removeFirst();postedBuffered+=1;selectAllReleases+=1
+                if rollback{rollbackFirstEditDelivered=true}
                 queuedSelectAll=true;queuedSelectAllText=snap.text
             } else if first.type == .keyUp,first.getIntegerValueField(.keyboardEventKeycode)==0,selectAllReleases>0 {
                 pending.removeFirst();postedBuffered+=1;selectAllReleases-=1
@@ -1045,6 +1069,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         let prepared=group.compactMap{prepareEvent($0)}
         guard prepared.count==group.count else{if rollback{park("event_allocation_failed")}else{abort("event_allocation_failed")};return}
+        if rollback,group.contains(where:{$0.type == .keyDown}){rollbackFirstEditDelivered=true}
         let buffered=group;pending.removeFirst(count)
         for (index,event) in prepared.enumerated(){
             post(event)
@@ -1164,6 +1189,7 @@ final class MismatchRecoveryEngine:NSObject {
         activationShortcut.cancel()
         recoveryEpoch+=1;asyncReady=nil
         rollingBack=true;rollbackReason=reason;plan=nil
+        rollbackCaretObservedAt=nil;rollbackFirstEditDelivered=false
         failureDiagnostic("abort",reason)
         log("rollback_started",["reason":reason,"originalRoman":currentPlan?.roman ?? "","pendingEvents":pending.count])
         attemptRollback(remaining:15,requested:false)
@@ -1181,14 +1207,23 @@ final class MismatchRecoveryEngine:NSObject {
                 guard chooseSource(recoverySourceID)==noErr else{park("rollback_source_failed");return}
             }
         }
-        if snap.selection==caret,currentSource()==recoverySourceID {
-            log("rollback_caret_verified",["selection":[caret.location,caret.length]])
-            drain(rollback:true);return
-        }
         if !requested {
+            // Supersede our own outstanding selection request once, even if
+            // AX currently reports a caret. Only later reads can confirm it.
             let result=setRange(field,caret)
             log("rollback_caret_requested",["selection":[caret.location,caret.length],"result":result.rawValue])
             guard result == .success else{park("rollback_caret_rejected");return}
+            rollbackCaretObservedAt=nil
+        }else if snap.selection==caret,snap.selectedText?.isEmpty != false,
+                 currentSource()==recoverySourceID,!systemSwitch.busy {
+            let now=ProcessInfo.processInfo.systemUptime
+            if let began=rollbackCaretObservedAt,now-began>=0.02 {
+                log("rollback_caret_verified",["selection":[caret.location,caret.length]])
+                drain(rollback:true);return
+            }
+            if rollbackCaretObservedAt==nil{rollbackCaretObservedAt=now}
+        }else{
+            rollbackCaretObservedAt=nil
         }
         guard remaining>0 else{park("rollback_caret_timeout");return}
         self.later(0.01){[weak self] in self?.attemptRollback(remaining:remaining-1,requested:true)}
@@ -1240,11 +1275,14 @@ final class MismatchRecoveryEngine:NSObject {
         return !app.isTerminated
     }
     func cancelDetection(){detectionRevision+=1;plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[]}
-    func failureDiagnostic(_ stage:String,_ reason:String) {
+    static func failureReasonCode(_ reason:String)->Int {
         // Only ordinal codes from fixed product reasons, never arbitrary strings.
         // Keep retired reason slots stable for existing diagnostic codes.
-        let reasons=["pre_edit_mismatch","selection_failed","selection_not_applied","selected_text_not_verified","english_selection_failed","korean_selection_failed","source_switch_timeout","delete_not_verified","rollback_context_not_intact","buffer_result_not_verified","delivery_source_timeout","delivery_source_selection_failed","buffer_roman_retry_unavailable","source_menu_focus_changed","menu_source_restore_failed","caps_during_unsettled_source","menu_during_unsettled_source","final_source_context_changed","korean_retry_exhausted","recovery_deadline","paced_replay_unsafe_context","paced_replay_source_changed","paced_replay_allocation_failed","activation_context_changed","activation_boundary_changed","partial_replay_retry_exhausted"]
-        let code=reason.hasSuffix("_deadline") ? 20:(reasons.firstIndex(of:reason).map{$0+1} ?? 0)
+        let reasons=["pre_edit_mismatch","selection_failed","selection_not_applied","selected_text_not_verified","english_selection_failed","korean_selection_failed","source_switch_timeout","delete_not_verified","rollback_context_not_intact","buffer_result_not_verified","delivery_source_timeout","delivery_source_selection_failed","buffer_roman_retry_unavailable","source_menu_focus_changed","menu_source_restore_failed","caps_during_unsettled_source","menu_during_unsettled_source","final_source_context_changed","korean_retry_exhausted","recovery_deadline","paced_replay_unsafe_context","paced_replay_source_changed","paced_replay_allocation_failed","activation_context_changed","activation_boundary_changed","partial_replay_retry_exhausted","rollback_delivery_context_changed","rollback_unexpected_selection","rollback_caret_timeout","rollback_caret_rejected","rollback_source_failed"]
+        return reason.hasSuffix("_deadline") ? 20:(reasons.firstIndex(of:reason).map{$0+1} ?? 0)
+    }
+    func failureDiagnostic(_ stage:String,_ reason:String) {
+        let code=Self.failureReasonCode(reason)
         // A recurrence can be inspected without restarting into diagnostic
         // mode. Fixed ordinal states only; no editor/text/key/clipboard data.
         NSLog("입력 불일치 복구 중단: stage=%d reason=%d retries=%d",stage=="abort" ? 1:2,code,koreanRetries)

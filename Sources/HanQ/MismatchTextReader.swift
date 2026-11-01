@@ -21,6 +21,15 @@ enum MismatchTextReader {
     }
     static func isBoundaryResponse(_ error:AXError)->Bool { error == .illegalArgument || error == .noValue }
     struct Content { let text:String;let selectedText:String? }
+    static func selectionMatches(text:String,selection:NSRange,selectedText:String?)->Bool {
+        guard selection.location>=0,selection.length>=0,selection.location<=text.utf16.count,
+              selection.length<=text.utf16.count-selection.location else{return false}
+        // AX may expose a caret before an earlier selection write takes effect.
+        // Preserve unavailable selected text at a caret as unknown, but reject
+        // a known nonempty selection that contradicts the collapsed range.
+        if selection.length==0{return selectedText?.isEmpty != false}
+        return selectedText==(text as NSString).substring(with:selection)
+    }
     static func resolve(value:String,selection:NSRange,unavailable:()->Bool={false},read:(NSRange)->String?)->String? {
         let upper=value.utf16.count
         guard selection.location>=0,selection.length>=0,selection.location<=upper,
@@ -67,9 +76,8 @@ enum MismatchTextReader {
         var selectedRaw:CFTypeRef?
         let status=AXUIElementCopyAttributeValue(element,kAXSelectedTextAttribute as CFString,&selectedRaw)
         let selected=selectedRaw as? String
-        if selection.length>0 {
-            guard status == .success,selected==(text as NSString).substring(with:selection) else{return nil}
-        }
+        if selection.length>0,status != .success{return nil}
+        guard selectionMatches(text:text,selection:selection,selectedText:selected) else{return nil}
         // Reads are asynchronous IPC. Reject a changing value or caret, not a
         // mixed snapshot assembled from two edits.
         var rangeAfter:CFTypeRef?

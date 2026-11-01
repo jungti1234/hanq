@@ -86,6 +86,7 @@ extension MismatchRecoveryEngine {
         asyncReady=nil
     }
     func deferRecovery(_ action:@escaping ()->Void) {
+        if rollingBack{rollbackCaretObservedAt=nil}
         guard recovering else{return}
         guard pausedRecoveryActions.count<16 else{park("source_interaction_work_limit");return}
         pausedRecoveryActions.append(action)

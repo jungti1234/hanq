@@ -13,6 +13,10 @@ guard CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:false) != nil else{
 let app=NSApplication.shared;let owner=MismatchRecoveryEngine(detectionOnly: ProcessInfo.processInfo.arguments.contains("--detect-only"));app.setActivationPolicy(.regular)
 if ProcessInfo.processInfo.arguments.contains("--test-recovery-start") {
     runRecoveryStartTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-rollback-boundary") {
+    runRollbackBoundaryTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-replay-acknowledgment") {
+    runReplayAcknowledgmentTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-high-speed-proof") {
     runHighSpeedProofTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-detection-decisions") {
@@ -255,6 +259,8 @@ if ProcessInfo.processInfo.arguments.contains("--test-recovery-start") {
         probe.enabled=true;probe.recovering=true;probe.replayStarted=true;probe.koreanRetries=2
         probe.currentPlan=candidate;probe.planElement=field;probe.testSource={mismatchKoreanID};probe.testSnapshot={snap}
         probe.activationShortcut.configuration={nil}
+        var cursorRequests=0
+        probe.testSetRange={_,range in cursorRequests+=1;probeTestCheck(range==snap.selection);return .success}
         var delivered:[Int64]=[];probe.testPost={delivered.append($0.getIntegerValueField(.keyboardEventKeycode))}
         for (code,down) in [(5,true),(4,true),(5,false),(4,false)]{
             let event=CGEvent(keyboardEventSource:nil,virtualKey:CGKeyCode(code),keyDown:down)!
@@ -264,8 +270,8 @@ if ProcessInfo.processInfo.arguments.contains("--test-recovery-start") {
         let deadline=Date().addingTimeInterval(0.3)
         while probe.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
         probeTestCheck(!probe.recovering && probe.enabled)
-        if changed{probeTestCheck(delivered.isEmpty && probe.retained.count==4)}
-        else{probeTestCheck(delivered == [5,4,5,4] && probe.pending.isEmpty && probe.retained.isEmpty)}
+        if changed{probeTestCheck(delivered.isEmpty && probe.retained.count==4 && cursorRequests==0)}
+        else{probeTestCheck(delivered == [5,4,5,4] && probe.pending.isEmpty && probe.retained.isEmpty && cursorRequests==1)}
     }
     print("PASS: repeated failure returns all four gh events once; changed text retains them without editing; recovery ended")
 } else if ProcessInfo.processInfo.arguments.contains("--test-modifier-loop") {
