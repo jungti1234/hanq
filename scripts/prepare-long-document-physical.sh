@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 record=${1:?사용법: prepare-long-document-physical.sh record.json 새-결과-디렉터리}
 output=${2:?새 결과 디렉터리가 필요합니다}
-python3 scripts/prepare-app-test.py check "$record"
+python3 scripts/prepare-app-test.py check "$record" --require-diagnostics
 [[ ! -e "$output" ]] || { echo '기존 결과를 덮어쓰지 않습니다.' >&2; exit 1; }
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
@@ -18,7 +18,8 @@ swiftc -target arm64-apple-macosx13.0 -module-cache-path .build/hanq/module-cach
 python3 - "$app" "$record" "$stage" <<'PY'
 import pathlib,plistlib,json,sys,hashlib
 app,record,out=map(pathlib.Path,sys.argv[1:]);r=json.loads(record.read_text());identity=r['app']
-assert r['status']=='permissions_ready' and r['permission_result']['ax'] and r['permission_result']['post']
+assert r['status']=='input_test_ready' and r['permission_result']['ax'] and r['permission_result']['post']
+assert r['diagnostics']['status']=='verified_current_process'
 exe=pathlib.Path(identity['path'])/'Contents/MacOS/HanQ'
 assert hashlib.sha256(exe.read_bytes()).hexdigest()==identity['executable_sha256']
 (out/'product.json').write_text(json.dumps(dict(pid=r['main_pid'],build=identity['build_number'],version=identity['release_version'],path=identity['path'],sha256=identity['executable_sha256'],record=str(record.resolve())),indent=2)+'\n')

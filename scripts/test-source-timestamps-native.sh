@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 record=${1:?usage: test-source-timestamps-native.sh record.json new-output-directory}
 output=${2:?new output directory required}
-python3 scripts/prepare-app-test.py check "$record"
+python3 scripts/prepare-app-test.py check "$record" --require-diagnostics
 [[ ! -e "$output" ]]
 mkdir -p "$output"
 output=$(cd "$output" && pwd)

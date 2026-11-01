@@ -646,6 +646,8 @@ final class InputIncidentTrace {
     // aggregates. Input callers never wait for a metadata lock.
     private var skippedEvents:[Int:Int]=[:],skippedAuxiliary:[Int:Int]=[:]
     private let writer:((Capture)->Void)?
+    private var storageObserver:(()->Void)?
+    private var lastStorageNotice:Int?
     init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
         eventCredits=DispatchSemaphore(value:self.observationCapacity/2)
@@ -667,7 +669,32 @@ final class InputIncidentTrace {
         self.configured=destination != nil || writer != nil;self.gate=DiagnosticCollectionGate(self.configured && initiallyEnabled)
         self.capacity=max(1,min(capacity,16384));self.clock=clock;self.callbackCPU=callbackCPU;origin=clock();self.writer=writer
         ring=Array(repeating:nil,count:self.configured ? self.capacity:0)
-        if enabled{decisionQueue.async{[self] in storage?.prepareOwnership();captures=storage?.lastCaptureIncident ?? 0}}
+        if enabled{decisionQueue.async{[self] in
+            // Establish ownership and prove an actual write/read on the writer
+            // before assigning any capture IDs or accepting test readiness.
+            queue.sync {
+                if let token=DiagnosticStorageStartup.token {
+                    let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID))
+                    _ = storage?.verifyReadiness(receipt:receipt,name:DiagnosticReadinessReceipt.name(token))
+                }else{_ = storage?.verifyReadiness()}
+                captures=storage?.lastCaptureIncident ?? 0
+            }
+        }}
+    }
+    func storageHealth(_ completion:@escaping(DiagnosticStorageHealth)->Void){
+        decisionQueue.async{[self] in queue.async{[self] in
+            let readiness=storage?.readiness ?? .unavailable
+            let missing=storage.map{$0.status.unavailable+$0.status.encodingFailures+$0.status.limited+$0.status.statusWriteFailures} ?? 0
+            completion(DiagnosticStorageHealth(readiness:readiness,missingWrites:missing))
+        }}
+    }
+    func observeStorage(_ callback:@escaping()->Void){queue.async{[self] in storageObserver=callback}}
+    func waitForStorageReadiness(timeout:Double=5)->DiagnosticStorageReadiness {
+        let signal=DispatchSemaphore(value:0),lock=NSLock()
+        var result=DiagnosticStorageReadiness.timeout
+        storageHealth{health in lock.lock();result=health.readiness;lock.unlock();signal.signal()}
+        guard signal.wait(timeout:.now()+timeout) == .success else{return .timeout}
+        lock.lock();defer{lock.unlock()};return result
     }
     // Main-thread UI control. Preparation/draining stays on background queues.
     func setCollectionEnabled(_ active:Bool,completion:(()->Void)?=nil){
@@ -677,7 +704,8 @@ final class InputIncidentTrace {
         // OFF counts cancelled protected requests even if publication was queued.
         decisionQueue.async{[self] in queue.async{[self] in
             guard gate.generation==paused else{DispatchQueue.main.async{completion?()};return}
-            if active,configured{storage?.prepareOwnership()}
+            if active,configured{_ = storage?.verifyReadiness()}
+            else{storage?.withdrawReadiness()}
             let last=storage?.lastCaptureIncident ?? 0
             decisionQueue.async{[self] in
                 guard gate.generation==paused else{DispatchQueue.main.async{completion?()};return}
@@ -935,6 +963,10 @@ final class InputIncidentTrace {
             let data=try JSONEncoder().encode(annotated)
             _ = storage.save(data,incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual)
         } catch {storage.encodingFailed(incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual)}
+        let result=storage.status.lastResult
+        if result != lastStorageNotice || !storage.readiness.ready || capture.trigger == .manual {
+            lastStorageNotice=result;storageObserver?()
+        }
     }
     // No extra event tag, AX call, event copy, key post or source selection.
     func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0,started:CallbackStart?=nil){
@@ -1460,6 +1492,8 @@ final class DiagnosticLogStore {
     private var statusName=".storage-"+UUID().uuidString+".status"
     private var statusFile:File?
     private var failureStage=0,failureErrno:Int32=0
+    private(set) var readiness=DiagnosticStorageReadiness.notChecked
+    private var readinessReceipt:File?
     private func failed(_ stage:Int,_ code:Int32=0)->Result {failureStage=stage;failureErrno=code;return .unavailable}
     var usage:Usage {Usage(files:groups.reduce(0){$0+$1.files.count},bytes:groups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     var manualUsage:Usage {Usage(files:manualGroups.reduce(0){$0+$1.files.count},bytes:manualGroups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
@@ -1470,6 +1504,57 @@ final class DiagnosticLogStore {
         status=Status(maximumAutomaticFiles:policy.maximumAutomaticFiles,maximumAutomaticBytes:policy.maximumAutomaticBytes)
         status.maximumManualBytes=policy.maximumManualBytes;status.manualFiles=0;status.manualBytes=0
     }
+
+    // This is a real filesystem proof using the same ownership guard and byte
+    // writer as captures. It neither fabricates an incident nor consumes IDs.
+    @discardableResult func verifyReadiness(receipt:Data?=nil,name:String?=nil)->DiagnosticStorageReadiness {
+        readiness = .unavailable
+        prepareOwnership()
+        guard ownershipHealthy,let dir=openDirectory() else{return readiness}
+        defer{close(dir)}
+        let keep=receipt != nil && name != nil
+        guard (receipt==nil)==(name==nil) else{return readiness}
+        let filename:String
+        if let name {
+            guard name.hasPrefix(".preflight-"),name.hasSuffix(".json"),
+                  UUID(uuidString:String(name.dropFirst(11).dropLast(5))) != nil else{return readiness}
+            filename=name
+        }else{filename=".storage-check-"+UUID().uuidString}
+        let data=receipt ?? Data(UUID().uuidString.utf8)
+        guard data.count<=4096 else{return readiness}
+        let fd=openat(dir,filename,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
+        guard fd>=0 else{return readiness}
+        var created=stat()
+        guard fstat(fd,&created)==0 else{close(fd);return readiness}
+        defer{
+            close(fd)
+            // Remove only this canary; never remove a replacement at its name.
+            var current=stat()
+            if !keep,fstatat(dir,filename,&current,AT_SYMLINK_NOFOLLOW)==0,
+               current.st_dev==created.st_dev,current.st_ino==created.st_ino{unlinkat(dir,filename,0)}
+        }
+        guard writeAll(data,fd),fsync(fd)==0 else{return readiness}
+        let check=openat(dir,filename,O_RDONLY|O_NOFOLLOW|O_CLOEXEC)
+        guard check>=0 else{return readiness}
+        defer{close(check)}
+        var info=stat()
+        guard fstat(check,&info)==0,info.st_dev==created.st_dev,info.st_ino==created.st_ino,
+              info.st_uid==getuid(),info.st_mode&S_IFMT==S_IFREG,info.st_mode&0o077==0,
+              info.st_size==data.count,
+              let actual=try? FileHandle(fileDescriptor:check,closeOnDealloc:false).read(upToCount:data.count+1),actual==data else{return readiness}
+        readiness = .ready
+        if keep{readinessReceipt=File(name:filename,phase:0,identity:info,digest:Self.digest(data))}
+        return readiness
+    }
+    private func invalidateReadiness(){
+        readiness = .unavailable
+        if let receipt=readinessReceipt,let dir=openDirectory(){
+            if owned(receipt,dir){unlinkat(dir,receipt.name,0)}
+            close(dir)
+        }
+        readinessReceipt=nil
+    }
+    func withdrawReadiness(){invalidateReadiness()}
 
     // Device numbers and ctime are useful within one boot, not durable identity.
     // Schema 3 also binds the volume, creation times and exact stored bytes.
@@ -1814,16 +1899,19 @@ final class DiagnosticLogStore {
 
     @discardableResult func save(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
         let began=DispatchTime.now().uptimeNanoseconds
+        let previousStatusFailures=status.statusWriteFailures
         failureStage=0;failureErrno=0
         let result=publish(data,incident:incident,phase:phase,automatic:automatic)
         lastResult=result
         finishAttempt(incident:incident,phase:phase,automatic:automatic,result:result.rawValue,began:began)
+        if result != .saved || !ownershipHealthy || status.statusWriteFailures>previousStatusFailures{invalidateReadiness()}
         return result
     }
     func encodingFailed(incident:Int,phase:Int,automatic:Bool){
         prepareOwnership()
         failureStage=6;failureErrno=0
         finishAttempt(incident:incident,phase:phase,automatic:automatic,result:5,began:DispatchTime.now().uptimeNanoseconds)
+        invalidateReadiness()
     }
     private func finishAttempt(incident:Int,phase:Int,automatic:Bool,result:Int,began:UInt64){
         lastCaptureIncident=max(lastCaptureIncident,incident)
@@ -2010,4 +2098,82 @@ final class DiagnosticLogStore {
         return .saved
     }
 
+}
+
+struct DiagnosticStorageReadiness: Codable, Equatable {
+    let ready: Bool
+    let reason: String
+    static let ready = Self(ready:true,reason:"ready")
+    static let unavailable = Self(ready:false,reason:"storage_unavailable")
+    static let notChecked = Self(ready:false,reason:"not_checked")
+    static let timeout = Self(ready:false,reason:"storage_check_timeout")
+}
+
+// Test preparation receipt, separate from incident data. It contains only the
+// requested nonce and this HanQ process's identity, never an input target.
+struct DiagnosticReadinessReceipt: Codable {
+    let schema: Int
+    let token: String
+    let pid: Int32
+    let build: String
+    let runID: String
+    let ready: Bool
+    static func make(token:String,runID:String)->Self {
+        Self(schema:1,token:token,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test",runID:runID,ready:true)
+    }
+    static func name(_ token:String)->String {".preflight-\(token).json"}
+}
+
+enum DiagnosticStorageStartup {
+    static let tokenArgument="--diagnostic-readiness-token"
+    static var explicit:Bool {
+        let args=ProcessInfo.processInfo.arguments
+        return args.contains("--preserve-input-incidents") || args.contains("--diagnose-input-incidents")
+    }
+    static var token:String? {
+        let args=ProcessInfo.processInfo.arguments
+        guard let i=args.firstIndex(of:tokenArgument),i+1<args.count,UUID(uuidString:args[i+1]) != nil else{return nil}
+        return args[i+1]
+    }
+    static func requireReadyIfRequested(){
+        let args=ProcessInfo.processInfo.arguments
+        guard explicit || args.contains(tokenArgument) else{return}
+        guard explicit,!args.contains(tokenArgument) || token != nil else{_exit(64)}
+        let result=InputIncidentTrace.shared.waitForStorageReadiness()
+        guard result.ready else{
+            fputs("HanQ: diagnostic storage verification failed; input test was not started (\(result.reason)).\n",stderr)
+            _exit(74)
+        }
+    }
+    static func runProbeIfRequested(){
+        let args=ProcessInfo.processInfo.arguments
+        guard let i=args.firstIndex(of:"--diagnostic-storage-probe") else{return}
+        guard i+1<args.count,explicit else{_exit(64)}
+        let directory=URL(fileURLWithPath:args[i+1]).standardizedFileURL
+        guard directory.deletingLastPathComponent()==FileManager.default.temporaryDirectory.standardizedFileURL,
+              directory.lastPathComponent.hasPrefix("hanq-storage-") else{_exit(64)}
+        DispatchQueue.global().asyncAfter(deadline:.now()+8){_exit(71)}
+        let result=InputIncidentTrace.shared.waitForStorageReadiness()
+        let response=Response(token:directory.lastPathComponent,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",directory:InputIncidentTrace.shared.destinationDirectory?.standardizedFileURL.path ?? "",readiness:result)
+        do {
+            let url=directory.appendingPathComponent("result.json")
+            try JSONEncoder().encode(response).write(to:url,options:.atomic)
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+            _exit(0)
+        }catch{_exit(74)}
+    }
+    private struct Response:Encodable {
+        let token:String;let pid:Int32;let build:String;let directory:String;let readiness:DiagnosticStorageReadiness
+    }
+}
+
+struct DiagnosticStorageHealth {
+    let readiness:DiagnosticStorageReadiness
+    let missingWrites:Int
+    var menuMessage:String? {
+        if readiness.reason=="not_checked"{return nil}
+        if !readiness.ready{return "진단 저장 확인 실패 — 새 기록이 저장되지 않을 수 있습니다"}
+        if missingWrites>0{return "진단 저장 오류 \(missingWrites)회 — 기록을 확인하세요"}
+        return nil
+    }
 }

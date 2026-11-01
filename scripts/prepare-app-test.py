@@ -11,6 +11,7 @@ import plistlib
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -123,7 +124,7 @@ class MacOS:
                 except ProcessLookupError:
                     continue
                 raise
-            helper = any(flag in command for flag in ('--permission-probe', '--permission-relauncher', '--hanja-candidate-probe', '--hanja-candidates-list-probe'))
+            helper = any(flag in command for flag in ('--permission-probe', '--permission-relauncher', '--diagnostic-storage-probe', '--hanja-candidate-probe', '--hanja-candidates-list-probe'))
             processes.append({'pid': pid, 'identity': identity, 'app': str(app), 'helper': helper})
         return processes
 
@@ -147,7 +148,14 @@ class MacOS:
         run(['/usr/bin/tccutil', 'reset', 'Accessibility', BUNDLE_ID])
 
     def launch(self, app):
-        run(['/usr/bin/open', '-n', app])
+        return self._launch(app, [])
+
+    def launch_diagnostics(self, app, directory, token):
+        return self._launch(app, ['--preserve-input-incidents', directory,
+                                  '--diagnostic-readiness-token', token])
+
+    def _launch(self, app, arguments):
+        run(['/usr/bin/open', '-n', app] + (['--args'] + arguments if arguments else []))
         end = time.monotonic() + 5
         while time.monotonic() < end:
             main = [item for item in self.processes() if not item['helper']]
@@ -155,6 +163,25 @@ class MacOS:
                 return main[0]['pid']
             time.sleep(0.1)
         raise PreflightError('지정한 새 한Q의 실행을 확인할 수 없습니다.')
+
+    def diagnostic_probe(self, app, directory):
+        temporary_root = run(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).stdout.strip()
+        with tempfile.TemporaryDirectory(prefix='hanq-storage-', dir=temporary_root) as temporary:
+            run(['/usr/bin/open', '-n', '-g', app, '--args', '--diagnostic-storage-probe', temporary,
+                 '--preserve-input-incidents', directory])
+            path = pathlib.Path(temporary) / 'result.json'
+            end = time.monotonic() + 7
+            while time.monotonic() < end:
+                if path.exists():
+                    result = read_private_json(path)
+                    if (result.get('token') != pathlib.Path(temporary).name or
+                            type(result.get('pid')) is not int or result['pid'] <= 1 or
+                            result.get('directory') != directory or
+                            type(result.get('readiness', {}).get('ready')) is not bool):
+                        raise PreflightError('진단 저장 검사 응답이 유효하지 않습니다.')
+                    return result
+                time.sleep(0.05)
+        raise PreflightError('진단 저장 검사 응답을 받지 못했습니다. 입력 시험을 시작하지 마세요.')
 
     def settings(self):
         run(['/usr/bin/open', SETTINGS_URL])
@@ -207,12 +234,81 @@ def code_signature(app):
                            '--inspect', str(app)]).stdout)
 
 
-def reuse_permissions(app, previous_record, previous_app, output=None, operations=None):
+def read_private_json(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_mode & 0o077 or info.st_size > 8192):
+            raise PreflightError('진단 준비 응답의 소유자·권한·크기가 유효하지 않습니다.')
+        data = os.read(fd, 8193)
+        after = os.fstat(fd)
+        if len(data) != info.st_size or (info.st_size, info.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise PreflightError('진단 준비 응답이 읽는 도중 바뀌었습니다.')
+        return json.loads(data)
+    finally:
+        os.close(fd)
+
+
+def diagnostic_directory(path, create=True):
+    directory = pathlib.Path(os.path.abspath(os.path.expanduser(str(path))))
+    parent = directory.parent
+    if not parent.exists():
+        if not create:
+            return str(directory)
+        parent.mkdir(mode=0o700)
+    for candidate in (parent, directory):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+            raise PreflightError(f'진단 저장 폴더와 부모는 본인 소유의 700 디렉터리여야 합니다: {candidate}')
+    return str(directory)
+
+
+def prepare_diagnostics(identity, path, operations):
+    info = plistlib.loads((pathlib.Path(identity['path']) / 'Contents/Info.plist').read_bytes())
+    if type(info.get('HanQDiagnosticReadinessVersion')) is not int or info['HanQDiagnosticReadinessVersion'] != 1:
+        raise PreflightError('이 앱은 실제 진단 저장 준비 검증을 지원하지 않습니다.')
+    directory = diagnostic_directory(path)
+    result = operations.diagnostic_probe(identity['path'], directory)
+    ensure_same_app(identity)
+    if result.get('build') != identity['build_number'] or result.get('readiness', {}).get('ready') is not True:
+        raise PreflightError('실제 앱의 진단 파일 쓰기·다시 읽기 검증 실패. 기존 앱을 유지하고 입력 시험을 중단합니다.')
+    return {'directory': directory, 'token': str(uuid.uuid4()), 'probe': result,
+            'status': 'awaiting_current_process_receipt'}
+
+
+def diagnostic_receipt(record, main):
+    expected = record['diagnostics']
+    directory = diagnostic_directory(expected['directory'], create=False)
+    receipt = read_private_json(pathlib.Path(directory) / f".preflight-{expected['token']}.json")
+    if (type(receipt.get('schema')) is not int or receipt['schema'] != 1 or receipt.get('token') != expected['token'] or
+            type(receipt.get('pid')) is not int or receipt['pid'] != main['pid'] or
+            receipt.get('build') != record['app']['build_number'] or receipt.get('ready') is not True or
+            not isinstance(receipt.get('runID'), str)):
+        raise PreflightError('현재 앱의 진단 저장 완료 증명이 없습니다. 입력 시험을 시작하지 마세요.')
+    try:
+        uuid.UUID(receipt['runID'])
+    except ValueError as error:
+        raise PreflightError('진단 실행 식별자가 유효하지 않습니다.') from error
+    return receipt
+
+
+def launch_prepared(operations, record):
+    if 'diagnostics' in record:
+        d = record['diagnostics']
+        return operations.launch_diagnostics(record['app']['path'], d['directory'], d['token'])
+    return operations.launch(record['app']['path'])
+
+
+def reuse_permissions(app, previous_record, previous_app, output=None, operations=None, diagnostics=None):
     """Verify certificate continuity and real permission before launching a new main app."""
     identity = app_identity(app)
     baseline = json.loads(pathlib.Path(previous_record).read_text())
     if (baseline.get('kind') != 'hanq-app-test-preflight' or
-            baseline.get('status') != 'permissions_ready' or
+            baseline.get('status') not in ('permissions_ready', 'input_test_ready') or
             baseline.get('permission_result', {}).get('ax') is not True or
             baseline.get('permission_result', {}).get('post') is not True):
         raise PreflightError('승인·검사가 완료된 이전 준비 기록이 필요합니다.')
@@ -229,7 +325,7 @@ def reuse_permissions(app, previous_record, previous_app, output=None, operation
         raise PreflightError('동일 인증서와 안정적인 서명 식별 조건을 확인할 수 없습니다.')
     operations = operations or MacOS()
     output = pathlib.Path(output or ROOT / '.build/hanq/test-preflight' / uuid.uuid4().hex).resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
     record_path = output / 'record.json'
     record = {'schema_version': 1, 'kind': 'hanq-app-test-preflight', 'app': identity,
               'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -240,6 +336,9 @@ def reuse_permissions(app, previous_record, previous_app, output=None, operation
               'fresh_permission_check': 'not_run'}}
     save_record(record_path, record)
     try:
+        if diagnostics is not None:
+            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations)
+            save_record(record_path, record)
         operations.stop(operations.processes())
         record['steps']['previous_app_stopped'] = 'completed'
         ensure_same_app(identity)
@@ -252,7 +351,7 @@ def reuse_permissions(app, previous_record, previous_app, output=None, operation
             raise PreflightError('권한이 유지되지 않았습니다. 일반 prepare와 GUI 승인이 필요합니다.')
         record['steps']['fresh_permission_check'] = 'passed_before_launch'
         record['steps']['gui_approval'] = 'previous_approval_verified'
-        record['launched_pid'] = operations.launch(identity['path'])
+        record['launched_pid'] = launch_prepared(operations, record)
         record['steps']['new_app_launched'] = 'completed'
         record['status'] = 'awaiting_approval'
         save_record(record_path, record)
@@ -264,11 +363,13 @@ def reuse_permissions(app, previous_record, previous_app, output=None, operation
         raise
 
 
-def prepare(app, output=None, dry_run=False, operations=None):
+def prepare(app, output=None, dry_run=False, operations=None, diagnostics=None):
     identity = app_identity(app)
     operations = operations or MacOS()
     processes = operations.processes()
     if dry_run:
+        if diagnostics is not None:
+            diagnostic_directory(diagnostics, create=False)
         print(json.dumps({'app': identity, 'hanq_processes_to_stop': len(processes),
                           'plan': ['한Q 종료 및 잔여 프로세스 확인',
                                    f'tccutil reset Accessibility {BUNDLE_ID}',
@@ -279,7 +380,7 @@ def prepare(app, output=None, dry_run=False, operations=None):
     if output is None:
         output = ROOT / '.build/hanq/test-preflight' / uuid.uuid4().hex
     output = pathlib.Path(output).expanduser().resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
     record_path = output / 'record.json'
     record = {'schema_version': 1, 'kind': 'hanq-app-test-preflight', 'app': identity,
               'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -288,6 +389,9 @@ def prepare(app, output=None, dry_run=False, operations=None):
               'gui_approval': 'pending', 'fresh_permission_check': 'not_run'}}
     save_record(record_path, record)
     try:
+        if diagnostics is not None:
+            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations)
+            save_record(record_path, record)
         operations.stop(processes)
         record['steps']['previous_app_stopped'] = 'completed'
         save_record(record_path, record)
@@ -300,7 +404,7 @@ def prepare(app, output=None, dry_run=False, operations=None):
         ensure_same_app(identity)
         if operations.processes():
             raise PreflightError('다른 한Q가 실행되어 새 앱 실행을 중단합니다.')
-        record['launched_pid'] = operations.launch(identity['path'])
+        record['launched_pid'] = launch_prepared(operations, record)
         record['steps']['new_app_launched'] = 'completed'
         record['status'] = 'awaiting_approval'
         try:
@@ -323,16 +427,18 @@ def prepare(app, output=None, dry_run=False, operations=None):
     return 0
 
 
-def check(record_path, operations=None):
+def check(record_path, operations=None, require_diagnostics=False):
     record_path = pathlib.Path(record_path).expanduser().resolve()
     record = json.loads(record_path.read_text())
     steps = record.get('steps', {})
+    if require_diagnostics and 'diagnostics' not in record:
+        raise PreflightError('진단 저장 준비가 없는 기록입니다. --preserve-input-incidents로 prepare부터 다시 실행하세요.')
     reset_ready = steps.get('accessibility_reset') == 'completed' or (
         steps.get('accessibility_reset') == 'not_performed_certificate_continuity' and
         bool(record.get('code_signature', {}).get('certificateSHA1')) and
         bool(record.get('previous_record')))
     if (record.get('schema_version') != 1 or record.get('kind') != 'hanq-app-test-preflight' or
-            record.get('status') not in ('awaiting_approval', 'permissions_ready') or
+            record.get('status') not in ('awaiting_approval', 'permissions_ready', 'input_test_ready', 'awaiting_diagnostics') or
             not reset_ready or
             not all(steps.get(key) == 'completed' for key in
                     ('previous_app_stopped', 'new_app_launched'))):
@@ -344,27 +450,36 @@ def check(record_path, operations=None):
         main = [item for item in operations.processes() if not item['helper']]
         if len(main) != 1 or main[0]['app'] != identity['path']:
             raise PreflightError('준비한 경로의 한Q만 실행 중이어야 합니다.')
+        if 'diagnostics' in record and main[0]['pid'] != record.get('launched_pid'):
+            raise PreflightError('진단을 준비한 앱 프로세스가 바뀌었습니다. 다시 prepare하세요.')
         result = operations.probe(identity['path'])
         ensure_same_app(identity)
         current_main = [item for item in operations.processes() if not item['helper']]
         if current_main != main:
             raise PreflightError('권한 검사 중 실행 중인 한Q가 바뀌었습니다. 다시 check하세요.')
         ready = result['ax'] is True and result['post'] is True
+        receipt = diagnostic_receipt(record, main[0]) if ready and 'diagnostics' in record else None
         record.pop('error', None)
         record['checked_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         record['permission_result'] = result
         record['main_pid'] = main[0]['pid']
         record['steps']['gui_approval'] = 'verified_by_permission_probe' if ready else 'pending'
         record['steps']['fresh_permission_check'] = 'passed' if ready else 'denied'
-        record['status'] = 'permissions_ready' if ready else 'awaiting_approval'
+        record['status'] = ('input_test_ready' if receipt else 'permissions_ready') if ready else 'awaiting_approval'
+        if 'diagnostics' in record:
+            record['diagnostics']['status'] = 'verified_current_process' if receipt else 'pending'
+            record['diagnostics']['receipt'] = receipt
         save_record(record_path, record)
     except Exception as error:
         # Keep the preparation record reusable after a transient check failure,
         # but invalidate any earlier permission success.
-        record['status'] = 'awaiting_approval'
+        record['status'] = 'awaiting_diagnostics' if 'diagnostics' in record else 'awaiting_approval'
         record['steps']['fresh_permission_check'] = 'error'
         record['steps']['gui_approval'] = 'unconfirmed'
         record.pop('permission_result', None)
+        if 'diagnostics' in record:
+            record['diagnostics']['status'] = 'error'
+            record['diagnostics'].pop('receipt', None)
         record['error'] = str(error)
         save_record(record_path, record)
         raise
@@ -373,7 +488,8 @@ def check(record_path, operations=None):
     if not ready:
         print('권한 미허용: GUI에서 승인한 뒤 다시 check하세요. 실제 입력 테스트는 아직 시작하지 마세요.')
         return 2
-    print('새 빌드의 권한 확인 완료. 앱의 입력 감시·실제 입력 동작은 별도로 확인하세요.')
+    print('권한·현재 실행본의 진단 파일 쓰기/읽기 확인 완료. 실입력 시험 준비가 됐습니다.' if receipt else
+          '권한만 확인했습니다. 로그가 필요한 입력 조사는 --preserve-input-incidents로 다시 준비하세요.')
     return 0
 
 
@@ -387,17 +503,31 @@ def main():
     prepare_parser.add_argument('--reuse-permissions-from', type=pathlib.Path,
                                 help='같은 인증서·경로의 이전 승인 기록 (초기화 없이 실제 권한 검사)')
     prepare_parser.add_argument('--previous-app', type=pathlib.Path, help='승인 당시의 보존된 앱 사본')
+    prepare_parser.add_argument('--preserve-input-incidents', type=pathlib.Path,
+                                help='실제 앱 쓰기/읽기와 현재 프로세스 증명을 필수로 확인할 진단 폴더')
     check_parser = commands.add_parser('check', help='GUI 승인 후 새 앱의 권한 확인')
     check_parser.add_argument('record', type=pathlib.Path)
+    check_parser.add_argument('--require-diagnostics', action='store_true',
+                              help='권한만 확인한 기록을 거부하고 현재 앱의 실제 저장 완료를 필수 확인')
+    diagnostic_parser = commands.add_parser('verify-diagnostics', help='기존 앱 유지 상태에서 새 앱의 진단 저장만 사전 검증')
+    diagnostic_parser.add_argument('app', type=pathlib.Path)
+    diagnostic_parser.add_argument('--directory', required=True, type=pathlib.Path)
     args = parser.parse_args()
     try:
         if args.command == 'prepare':
             if args.reuse_permissions_from or args.previous_app:
                 if not (args.reuse_permissions_from and args.previous_app) or args.dry_run:
                     raise PreflightError('재사용 검사는 이전 기록·앱 사본이 모두 필요하며 dry-run과 함께 사용할 수 없습니다.')
-                return reuse_permissions(args.app, args.reuse_permissions_from, args.previous_app, args.output)
-            return prepare(args.app, args.output, args.dry_run)
-        return check(args.record)
+                return reuse_permissions(args.app, args.reuse_permissions_from, args.previous_app, args.output,
+                                         diagnostics=args.preserve_input_incidents)
+            return prepare(args.app, args.output, args.dry_run, diagnostics=args.preserve_input_incidents)
+        if args.command == 'verify-diagnostics':
+            identity = app_identity(args.app)
+            verified = prepare_diagnostics(identity, args.directory, MacOS())
+            print(json.dumps({'app': identity, 'diagnostics': verified, 'main_app_launched': False,
+                              'existing_app_stopped': False}, ensure_ascii=False, indent=2))
+            return 0
+        return check(args.record, require_diagnostics=args.require_diagnostics)
     except (PreflightError, OSError, ValueError, KeyError) as error:
         print(f'오류: {error}', file=sys.stderr)
         return 1

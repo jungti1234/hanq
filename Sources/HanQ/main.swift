@@ -212,6 +212,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let hudItem = NSMenuItem(title: "입력 소스 변경 시 화면에 표시", action: #selector(toggleHUD), keyEquivalent: "")
     let loginItem = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     let inputDiagnosticsItem = NSMenuItem(title:"진단 기록 활성화",action:#selector(toggleInputDiagnostics),keyEquivalent:"")
+    let diagnosticStorageItem = NSMenuItem(title:"",action:nil,keyEquivalent:"")
+    private var diagnosticStorageMessage:String?
     let inputIncidentItem = NSMenuItem(title:"방금 발생한 문제 기록",action:#selector(markInputIncident),keyEquivalent:"")
     let inputDiagnosticExportItem = NSMenuItem(title:"진단 기록 내보내기…",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
@@ -222,6 +224,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         InputDiagnostics.shared.start()
         InputIncidentTrace.shared.start()
+        InputIncidentTrace.shared.observeStorage{[weak self] in
+            DispatchQueue.main.async{self?.refreshDiagnosticLogAvailability()}
+        }
         KeyboardStateMirror.shared.diagnosticBoundary={type,event,consumed in
             InputIncidentTrace.shared.event(.boundary,type,event,consumed:consumed)
         }
@@ -287,6 +292,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         diagnostics.addItem(inputDiagnosticsItem)
         diagnostics.addItem(.separator())
         diagnostics.addItem(inputIncidentItem)
+        diagnosticStorageItem.isHidden=true
+        diagnostics.addItem(diagnosticStorageItem)
         diagnostics.addItem(inputDiagnosticExportItem)
         statusMenu.addItem(diagnosticsItem)
         statusMenu.addItem(.separator())
@@ -833,6 +840,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private func refreshDiagnosticLogAvailability(){
         guard let directory=InputIncidentTrace.shared.destinationDirectory else{return}
+        InputIncidentTrace.shared.storageHealth{[weak self] health in
+            DispatchQueue.main.async{
+                self?.diagnosticStorageMessage=health.menuMessage
+                self?.refreshStatus()
+            }
+        }
         DispatchQueue.global(qos:.utility).async{[weak self] in
             let found=((try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []).contains{$0.hasPrefix("incident-") && $0.hasSuffix(".json")}
             DispatchQueue.main.async{self?.hasDiagnosticLogs=found;self?.refreshStatus()}
@@ -911,6 +924,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         inputDiagnosticsItem.isEnabled = !changingInputDiagnostics
         inputIncidentItem.isEnabled=InputIncidentTrace.shared.enabled
         inputDiagnosticExportItem.isEnabled=hasDiagnosticLogs && !changingInputDiagnostics
+        diagnosticStorageItem.isHidden=diagnosticStorageMessage==nil
+        diagnosticStorageItem.title=diagnosticStorageMessage ?? ""
+        inputDiagnosticExportItem.toolTip=diagnosticStorageMessage
         retainedMismatchItem.isHidden=mismatchRecovery.engine.retained.isEmpty
         retainedMismatchItem.isEnabled = !mismatchRecovery.busy
 
@@ -1044,8 +1060,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // MARK: Executable entry
 HanjaCandidates.runProbeIfRequested()
 PermissionRelauncher.runIfRequested()
+DiagnosticStorageStartup.runProbeIfRequested()
 let app = NSApplication.shared
 PermissionProbe.runIfRequested()
+DiagnosticStorageStartup.requireReadyIfRequested()
 app.setActivationPolicy(.accessory)
 guard let instanceLock = AppInstanceLock() else {
     StatusItemController.requestRunningInstanceRepair()

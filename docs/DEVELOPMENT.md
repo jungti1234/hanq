@@ -119,6 +119,23 @@ python3 scripts/prepare-app-test.py prepare build/candidate/HanQ.app \
 
 도구는 이전 승인 기록·앱 사본의 해시·같은 경로·실제 인증서 지문·코드 식별 조건을 대조한다. 기존 한Q 종료 후 새 보조 프로세스에서 AX·post를 확인하고 둘 다 허용된 경우에만 새 본체를 실행한다. 실행 뒤에도 같은 앱의 새 보조 프로세스로 다시 검사한다. 권한 초기화와 GUI 재승인은 수행하지 않았다고 기록하며, 초기화 완료로 표시하지 않는다. 거부·조회 오류·다른 인증서·변경된 이전 사본이면 진행을 중단한다. 필요하면 일반 prepare와 GUI 승인으로 복구한다. 기존 승인 기록만으로 새 앱을 통과시키지 않으며 실제 키 입력 검증은 별도다.
 
+### 로그를 남기는 입력 조사 사전 확인
+
+실입력·물리 키로 입력 문제를 조사할 때는 권한 확인과 진단 저장 준비를 함께 통과해야 한다. 진단 폴더와 바로 위 부모는 본인 소유의 `700` 디렉터리여야 한다. 기존 폴더의 권한이나 내용을 준비 도구가 임의로 고치지 않는다. 새 전용 부모를 만들고 정상 경로를 지정한다.
+
+```sh
+mkdir -m 700 "$HOME/Library/Application Support/HanQ Diagnostics/Investigation-example"
+python3 scripts/prepare-app-test.py verify-diagnostics build/candidate/HanQ.app \
+  --directory "$HOME/Library/Application Support/HanQ Diagnostics/Investigation-example/InputIncidents"
+python3 scripts/prepare-app-test.py prepare build/candidate/HanQ.app \
+  --preserve-input-incidents "$HOME/Library/Application Support/HanQ Diagnostics/Investigation-example/InputIncidents"
+python3 scripts/prepare-app-test.py check <record.json> --require-diagnostics
+```
+
+`verify-diagnostics`는 새 앱의 별도 보조 프로세스에서 실제 쓰기·다시 읽기를 확인하며 기존 앱을 종료하거나 입력 탭을 만들지 않는다. 이 사전 검사만으로 실제 입력 준비를 통과한 것으로 세지 않는다. `prepare`는 기존 앱을 종료하기 전에 같은 검사를 수행하고, 실행 후 `check`는 현재 본체의 PID·빌드·새 nonce·실제 파일 쓰기/읽기 증명을 대조한다. 권한과 진단 저장이 함께 확인된 `input_test_ready`만 기록이 필요한 입력 시험을 시작할 수 있다. `permissions_ready`는 권한만 확인한 상태다. 동일 인증서 재사용 시에도 `--preserve-input-incidents`를 함께 지정한다.
+
+명시적 보존 실행은 저장 검증 실패 시 입력 감시를 시작하지 않는다. 소유권 검사에 실패한 저장소는 같은 프로세스에서 경로 권한만 바꿔도 회복되지 않는다. 실패 자료를 보존한 뒤 새 전용 폴더와 새 준비 절차로 다시 검사한다. 실패한 위치의 파일·색인을 지워 검사를 통과시키지 않는다. 진단의 실제 저장 실패는 메뉴에 표시하며, 수동 기록 완료 뒤에는 내보내기 가능 여부를 다시 갱신한다. 준비 증명은 입력 내용을 만들거나 저장하지 않는 별도 기술 파일이며 진단 사건 수에 포함하지 않는다.
+
 ### 별도 후보 빌드와 업데이트 의존성
 
 `bash scripts/build-app.sh --candidate`는 `build/candidate/HanQ.app`을 생성한다. 기존 `build/HanQ.app`은 계속 실행할 수 있으며 후보 앱 자체가 실행 중이면 교체하지 않는다. 실제 입력 검증은 기존 앱을 종료한 뒤 같은 설치 경로에서 수행하며, 위 권한 사전 체크를 완료한다. 후보 생성과 실제 실행 검증은 구분한다.

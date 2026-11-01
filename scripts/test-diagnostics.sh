@@ -15,6 +15,8 @@ swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache So
 hanq_test_run "$stage/incident-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/Retention/main.swift -o "$stage/retention-tests"
 hanq_test_run "$stage/retention-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/Readiness/main.swift -o "$stage/storage-readiness-tests"
+hanq_test_run "$stage/storage-readiness-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Decisions/main.swift -o "$stage/decision-tests"
 hanq_test_run "$stage/decision-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/DecisionTiming/main.swift -o "$stage/decision-timing-tests"
