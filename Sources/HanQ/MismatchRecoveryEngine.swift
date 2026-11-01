@@ -50,7 +50,7 @@ final class MismatchRecoveryEngine:NSObject {
     func switchTarget(to next:NSRunningApplication?){
         guard next?.processIdentifier != target?.processIdentifier else{return}
         if recovering{park("frontmost_app_changed")}
-        recoveryEpoch+=1;plan=nil;planElement=nil;locked=nil;lastText=nil;heldKeys=[];resetCompositionObservation()
+        recoveryEpoch+=1;plan=nil;planElement=nil;locked=nil;lastText=nil;heldKeys=[];replayHeldKeys=[];resetCompositionObservation()
         activationPID=NSWorkspace.shared.frontmostApplication?.processIdentifier
         target=next;ax=next.map{AXUIElementCreateApplication($0.processIdentifier)}
         if let ax{AXUIElementSetMessagingTimeout(ax,0.05)}
@@ -334,6 +334,11 @@ final class MismatchRecoveryEngine:NSObject {
         let route=tap == .cgSessionEventTap && recovering && !rollingBack && replayStarted && koreanRetries==2
             ? CGEventTapLocation.cghidEventTap:tap
         log("key_post_requested",["eventType":event.type.rawValue])
+        if recovering,!rollingBack {
+            let code=event.getIntegerValueField(.keyboardEventKeycode)
+            if event.type == .keyDown{replayHeldKeys.insert(code)}
+            if event.type == .keyUp{replayHeldKeys.remove(code)}
+        }
         if let testPostAtTap {testPostAtTap(event,route)}
         else if let testPost {testPost(event)}
         else {event.post(tap:route)}
@@ -348,6 +353,9 @@ final class MismatchRecoveryEngine:NSObject {
     // Key-downs delivered before recovery must not look held to the editor
     // while AX/source work queues subsequent typing.
     var deliveredHeldKeys=Set<Int64>()
+    // Separate from physical presses passed before recovery. These holds were
+    // created by our own replay and may be released before text is acknowledged.
+    private var replayHeldKeys=Set<Int64>()
     var queuedSelectAll=false
     var queuedSelectAllText:String?
     var selectAllReleases=0
@@ -604,6 +612,7 @@ final class MismatchRecoveryEngine:NSObject {
                 let releaseDeliveredKey = type == .keyUp && deliveredHeldKeys.remove(code) != nil
                 if releaseDeliveredKey {
                     heldKeys.remove(code)
+                    replayHeldKeys.remove(code)
                     // Repeats queued during the physical hold still need their
                     // own later release. Otherwise this release is not replayed.
                     if !pending.contains(where:{$0.type == .keyDown && $0.getIntegerValueField(.keyboardEventKeycode)==code}) {
@@ -768,7 +777,7 @@ final class MismatchRecoveryEngine:NSObject {
         willBeginRepair()
         recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;plan=nil;pending=[];nextBufferedID=0;postedBuffered=0
         rollbackCaretObservedAt=nil;rollbackFirstEditDelivered=false
-        deliveredHeldKeys=heldKeys;resetCompositionObservation()
+        deliveredHeldKeys=heldKeys;replayHeldKeys=[];resetCompositionObservation()
         intendedSource=recoverySourceID;recoverySourceBoundaries=[];pendingSources=[:];pendingTimestamps=[:];bufferedIdentities=[:];keyDownSources=Dictionary(uniqueKeysWithValues:heldKeys.map{($0,recoverySourceID)})
         clearSourceInteraction();systemSwitch.reset(currentSource());lastIntendedKorean=recoverySourceID
         koreanRetries=0;activationFallbackTried=false;interruptedSourceRestores=0;ledger=nil;ledgerAfterRepair=nil;snapshotWaitStarted=nil
@@ -1122,6 +1131,13 @@ final class MismatchRecoveryEngine:NSObject {
         if !sourceOnly,let wanted=expected.segments.last?.source,currentSource() != wanted {
             restoreInterruptedSource("buffer_verification",targetSource:wanted){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining,roman:roman,reopenComposition:true)};return
         }
+        // Text acknowledgement must not hold the releases of downs we already
+        // posted. Revalidate the same field/source first; never skip a new down
+        // or change source to deliver a release. This does not acknowledge text.
+        if releaseReplayHolds() {
+            if recovering{later(0){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining,roman:roman,reopenComposition:reopenComposition,sourceOnly:sourceOnly)}}
+            return
+        }
         if MismatchRecoveryPlan.sameEditorText(snap.text,expected.text),snap.selection==expected.selection {
             if reopenComposition,expected.segments.last?.source==recoverySourceID {
                 log("buffer_composition_reopen",["text":snap.text,"postedEvents":postedBuffered])
@@ -1182,6 +1198,21 @@ final class MismatchRecoveryEngine:NSObject {
         }
         later(0.01){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining-1,roman:roman,reopenComposition:reopenComposition,sourceOnly:sourceOnly)}
     }
+    private func releaseReplayHolds()->Bool {
+        var holds=replayHeldKeys,count=0
+        for event in pending {
+            guard event.type == .keyUp,holds.remove(event.getIntegerValueField(.keyboardEventKeycode)) != nil else{break}
+            count+=1
+        }
+        guard count>0 else{return false}
+        let events=Array(pending.prefix(count)),prepared=events.compactMap{prepareEvent($0)}
+        guard prepared.count==count else{park("event_allocation_failed");return true}
+        pending.removeFirst(count)
+        for event in prepared{post(event);postedBuffered+=1}
+        replayCount+=count
+        log("replay_holds_released")
+        return true
+    }
     func repairBufferedRoman(_ expected:MismatchReplayLedger,_ snap:MismatchSnapshot){
         guard let segment=expected.segments.last,segment.source==recoverySourceID,currentSource()==recoverySourceID,
               koreanRetries<2,ProcessInfo.processInfo.systemUptime+0.6<recoveryDeadline else{park("buffer_roman_retry_unavailable");return}
@@ -1202,7 +1233,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard recovering,rollingBack==rollback else{return}
         if sourceWorkPaused{deferRecovery{[weak self] in self?.drain(rollback:rollback)};return}
         if !pending.isEmpty || queuedSelectAll || currentSource() != intendedSource{drain(rollback:rollback,verifiedSnapshot:verifiedSnapshot);return}
-        recoveryEpoch+=1;recovering=false;rollingBack=false;currentPlan=nil;lastSource=currentSource();heldKeys=[];deliveredHeldKeys=[];resetCompositionObservation();queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
+        recoveryEpoch+=1;recovering=false;rollingBack=false;currentPlan=nil;lastSource=currentSource();heldKeys=[];deliveredHeldKeys=[];replayHeldKeys=[];resetCompositionObservation();queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
         if !rollback,let ledger,let snap=verifiedSnapshot {
             if currentSource()==mismatchKoreanID,ledger.text==snap.text,ledger.selection==snap.selection,
                let continuation=ledger.lastTwoSetPlan() {
@@ -1271,7 +1302,7 @@ final class MismatchRecoveryEngine:NSObject {
         retained.append(contentsOf:pending);pending=[]
         suspended=true
         didRetainInput()
-        recovering=false;rollingBack=false;plan=nil;planElement=nil;currentPlan=nil;heldKeys=[];deliveredHeldKeys=[];resetCompositionObservation();queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
+        recovering=false;rollingBack=false;plan=nil;planElement=nil;currentPlan=nil;heldKeys=[];deliveredHeldKeys=[];replayHeldKeys=[];resetCompositionObservation();queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
         log("monitor_suspended")
 
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
@@ -1326,7 +1357,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         // Deliberately never evaluate fields: they can contain typed text, keys,
         // editor identifiers or clipboard content copied from the experiment.
-        if ["key_received","candidate_recorded","candidate_cancelled","field_changed","source_change","observation_blocked","user_source_boundary","mismatch_confirmed","korean_result_verified","recovery_finished","pending_retained","rollback_finished","start_failed","caps_source_wait","caps_source_confirmed","caps_source_unchanged","source_menu_paused","source_work_resumed","cycle_english","cycle_korean","selection_requested","replay_started","composition_key_release_wait","composition_settlement_wait","composition_settled"].contains(kind) {
+        if ["key_received","candidate_recorded","candidate_cancelled","field_changed","source_change","observation_blocked","user_source_boundary","mismatch_confirmed","korean_result_verified","recovery_finished","pending_retained","rollback_finished","start_failed","caps_source_wait","caps_source_confirmed","caps_source_unchanged","source_menu_paused","source_work_resumed","cycle_english","cycle_korean","selection_requested","replay_started","composition_key_release_wait","composition_settlement_wait","composition_settled","replay_holds_released"].contains(kind) {
             InputDiagnostics.shared.record("mismatch."+kind)
         }
     }
@@ -1392,7 +1423,7 @@ final class MismatchRecoveryEngine:NSObject {
         if !pending.isEmpty{retained.append(contentsOf:pending);pending=[];suspended=true;didRetainInput()}
         recoveryEpoch+=1;asyncReady=nil;asyncRequest=nil
         activationShortcut.cancel();systemSwitch.cancel();switchGate?.stop();switchGate=nil
-        enabled=false;recovering=false;deliveredHeldKeys=[];queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0;timer?.invalidate();timer=nil;cancelDetection()
+        enabled=false;recovering=false;deliveredHeldKeys=[];replayHeldKeys=[];queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0;timer?.invalidate();timer=nil;cancelDetection()
         if let tap{CGEvent.tapEnable(tap:tap,enable:false);CFMachPortInvalidate(tap)};tap=nil
         if let runSource{CFRunLoopRemoveSource(CFRunLoopGetMain(),runSource,.commonModes);CFRunLoopSourceInvalidate(runSource)};runSource=nil
     }

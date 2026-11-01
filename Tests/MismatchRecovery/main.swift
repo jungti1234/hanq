@@ -15,6 +15,10 @@ if ProcessInfo.processInfo.arguments.contains("--test-recovery-start") {
     runRecoveryStartTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-composition-settlement") {
     runCompositionSettlementTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-owned-replay-release") {
+    runOwnedReplayReleaseTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-boundary-integration") {
+    runRecoveryBoundaryIntegrationTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-rollback-boundary") {
     runRollbackBoundaryTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-replay-acknowledgment") {
