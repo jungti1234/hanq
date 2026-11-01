@@ -1,12 +1,9 @@
 import AppKit
 import Carbon
 
-// Compatibility for the desktop composer's type-to-focus path. Discovery is
-// read-only and idle-only. The first original key is never held or replayed.
+// Bounded read-only editor observation. Discovery neither establishes input
+// intent nor moves focus; only a later actual focused field can use its history.
 final class OnsetFocusHandoff {
-    static func supports(_ bundle:String?,arguments:[String]=ProcessInfo.processInfo.arguments)->Bool {
-        bundle == "com.openai.codex" || (bundle == "taek.in.hanq.prefocus-fixture" && arguments.contains("--test-onset-focus-handoff"))
-    }
     enum Outcome:Int {case idle=0,eligibility,window,systemFocus,outsideIdentity,outsideRole,field,lateContext,deadline,requested,unconfirmed,confirmed}
     private(set) var lastOutcome=Outcome.idle
     private(set) var lastFieldCheck=0
@@ -15,14 +12,16 @@ final class OnsetFocusHandoff {
     private var root:AXUIElement?
     private var outside:AXUIElement?
     private var cachedEditor:AXUIElement?
+    var observeSnapshot:((OnsetSnapshot)->Void)?
     var nodeLimit=2048
     var sceneCompleted:Bool{completedScans>0}
     var sceneVisited:Int{visitedCount}
     var sceneClipped:Bool{(uncertainReasons & 48) != 0}
-    var sceneScanning:Bool{!queue.isEmpty}
+    var sceneScanning:Bool{!queue.isEmpty || pendingSearch != nil}
     var sceneEditorCount:Int{editors}
-    private var emptyEntries:[(field:AXUIElement,time:Double)]=[]
-    private var draftEntries:[(snapshot:OnsetSnapshot,time:Double)]=[]
+    private var emptyEntries:[(field:AXUIElement,window:AXUIElement,time:Double)]=[]
+    private var representedEntries:[(snapshot:OnsetSnapshot,window:AXUIElement,time:Double)]=[]
+    private var draftEntries:[(snapshot:OnsetSnapshot,window:AXUIElement,time:Double)]=[]
     // A recently observed editor is only a search hint. Pointer/shortcut input
     // still clears every proof; this reference can authorize no write.
     private var recentEditor:(field:AXUIElement,time:Double)?
@@ -31,21 +30,25 @@ final class OnsetFocusHandoff {
     // the whole-window focus candidate ambiguous. It never authorizes focus.
     func emptyEntryBaseline(for field:AXUIElement,before time:Double)->OnsetSnapshot? {
         guard let proof=emptyEntries.last(where:{CFEqual($0.field,field) && $0.time<=time && time-$0.time<=0.75}) else{return nil}
-        guard now()>=proof.time,now()-proof.time<=1.1,
+        guard now()>=proof.time,now()-proof.time<=1.1,currentContext(field,window:proof.window),
               !draftEntries.contains(where:{CFEqual($0.snapshot.element,field) && $0.time<time && $0.time>=proof.time}) else{return nil}
         return .init(element:field,text:"",selection:NSRange(location:0,length:0))
     }
     func draftEntryBaseline(for field:AXUIElement,before time:Double)->OnsetSnapshot? {
         guard let proof=draftEntries.last(where:{CFEqual($0.snapshot.element,field) && $0.time<time && time-$0.time<=0.75}),
-              now()>=proof.time,now()-proof.time<=1.1,
+              now()>=proof.time,now()-proof.time<=1.1,currentContext(field,window:proof.window),
               !emptyEntries.contains(where:{CFEqual($0.field,field) && $0.time<=time && $0.time>=proof.time}) else{return nil}
         return proof.snapshot
     }
     // Pointer/shortcut input invalidates both empty and existing-body evidence.
-    func invalidateEmptyEntries(){emptyEntries=[];draftEntries=[]}
+    func invalidateEmptyEntries(){emptyEntries=[];draftEntries=[];representedEntries=[]}
     private var nextRefresh=0.0
     var sceneCacheEnabled=false
     private var queue:[(AXUIElement,Int)]=[]
+    var editorSearch=OnsetEditorSearch()
+    private var pendingSearch:(document:AXUIElement,children:[AXUIElement],depth:Int)?
+    private var searchesThisScan=0
+    private(set) var searchAttempts=0,searchOutcome=0
     private var visited:[CFHashCode:[AXUIElement]]=[:]
     private var visitedCount=0,editors=0
     private var found:AXUIElement?
@@ -58,7 +61,7 @@ final class OnsetFocusHandoff {
     private var diagnosticCaretKind=0,diagnosticHintRelation=0,diagnosticHintKind=0
     private var diagnosticValueKind=0,diagnosticValueShape=0,diagnosticCountKind=0,diagnosticValueSize=0,diagnosticFormatOnly=0
     private var uncertainReasons=0,resetCount=0,scanCount=0,completedScans=0
-    var diagnosticState:String {"candidate=\(candidate != nil ? 1:0) visited=\(visitedCount) limit=\(nodeLimit) queue=\(queue.count) editors=\(editors) uncertain=\(uncertainReasons) resets=\(resetCount) scans=\(scanCount) completed=\(completedScans) field=\(lastFieldCheck) outcome=\(lastOutcome.rawValue) attempted=\(attempted ? 1:0) cache=\(sceneCacheEnabled ? 1:0) valueKind=\(diagnosticValueKind) valueShape=\(diagnosticValueShape) countKind=\(diagnosticCountKind) valueSize=\(diagnosticValueSize) formatOnly=\(diagnosticFormatOnly) caretKind=\(diagnosticCaretKind) hintRelation=\(diagnosticHintRelation) hintKind=\(diagnosticHintKind) editableEmpty=\(editableEmptyProof) rangeOne=\(rangeOneClass) focusedSeen=\(focusedSeen) focusedMatch=\(focusedMatch) focusedShape=\(focusedShape) focusedSize=\(focusedSize) focusedCaret=\(focusedCaret)"}
+    var diagnosticState:String {"candidate=\(candidate != nil ? 1:0) visited=\(visitedCount) limit=\(nodeLimit) queue=\(queue.count) editors=\(editors) uncertain=\(uncertainReasons) resets=\(resetCount) scans=\(scanCount) completed=\(completedScans) field=\(lastFieldCheck) outcome=\(lastOutcome.rawValue) attempted=\(attempted ? 1:0) cache=\(sceneCacheEnabled ? 1:0) valueKind=\(diagnosticValueKind) valueShape=\(diagnosticValueShape) countKind=\(diagnosticCountKind) valueSize=\(diagnosticValueSize) formatOnly=\(diagnosticFormatOnly) caretKind=\(diagnosticCaretKind) hintRelation=\(diagnosticHintRelation) hintKind=\(diagnosticHintKind) editableEmpty=\(editableEmptyProof) rangeOne=\(rangeOneClass) focusedSeen=\(focusedSeen) focusedMatch=\(focusedMatch) focusedShape=\(focusedShape) focusedSize=\(focusedSize) focusedCaret=\(focusedCaret) searchAttempts=\(searchAttempts) searchOutcome=\(searchOutcome)"}
     private var nextScan=0.0
     var now:()->Double={ProcessInfo.processInfo.systemUptime}
     var read:(AXUIElement,String)->CFTypeRef? = { element,name in
@@ -91,12 +94,7 @@ final class OnsetFocusHandoff {
     var owner:(AXUIElement)->pid_t?=InputFocusAccess.owner
     var frontPID:()->pid_t?={NSWorkspace.shared.frontmostApplication?.processIdentifier}
     var ready:()->Bool={AXIsProcessTrusted() && !IsSecureEventInputEnabled()}
-    var restoreTimeout:(AXUIElement)->Void={AXUIElementSetMessagingTimeout($0,0.05)}
-    var focus:(AXUIElement)->AXError = { element in
-        AXUIElementSetMessagingTimeout(element,0.003)
-        return AXUIElementSetAttributeValue(element,kAXFocusedAttribute as CFString,kCFBooleanTrue)
-    }
-    func reset(){resetCount=min(9_999_999,resetCount+1);candidate=nil;root=nil;outside=nil;cachedEditor=nil;nextRefresh=0;queue=[];visited=[:];visitedCount=0;editors=0;found=nil;uncertain=false;uncertainReasons=0;attempted=false;nextScan=0;nextRecentValidation=0}
+    func reset(){resetCount=min(9_999_999,resetCount+1);candidate=nil;root=nil;outside=nil;cachedEditor=nil;nextRefresh=0;queue=[];pendingSearch=nil;searchesThisScan=0;visited=[:];visitedCount=0;editors=0;found=nil;uncertain=false;uncertainReasons=0;attempted=false;nextScan=0;nextRecentValidation=0}
     func beginDiagnosticObservation(){
         diagnosticEditor=nil;diagnosticEditorAt=0
         focusedSeen=0;focusedMatch=0;focusedShape=0;focusedSize=0;focusedCaret=0;rangeOneClass=0
@@ -119,11 +117,11 @@ final class OnsetFocusHandoff {
         lastFieldCheck=1
         guard values.count==Self.details.count else{return false}
         lastFieldCheck=2
-        guard values[0] as? String==kAXTextAreaRole,values[1] as? String != kAXSecureTextFieldSubrole else{return false}
+        guard let role=values[0] as? String,OnsetEditableRole.supports(role),values[1] as? String != kAXSecureTextFieldSubrole else{return false}
         let text:String?,valueKind:Int
         if let raw=values[2],CFGetTypeID(raw) != CFNullGetTypeID() {
             if let string=raw as? String{text=string;valueKind=1}
-            else if CFGetTypeID(raw)==CFAttributedStringGetTypeID(){text=CFAttributedStringGetString(raw as! CFAttributedString) as String;valueKind=2}
+            else if CFGetTypeID(raw)==CFAttributedStringGetTypeID(){text=CFAttributedStringGetString((raw as! CFAttributedString)) as String;valueKind=2}
             else{text=nil;valueKind=3}
         }else{text=nil;valueKind=0}
         let count:Double?={
@@ -131,10 +129,35 @@ final class OnsetFocusHandoff {
                   number.doubleValue.isFinite,number.doubleValue>=0 else{return nil}
             return number.doubleValue
         }()
+        if observing,let text,text.utf16.count<=16384,
+           values[4] as? Bool==true,values[5] as? Bool==false,
+           let windowValue=values[6],CFGetTypeID(windowValue)==AXUIElementGetTypeID(),CFEqual(windowValue,window),
+           let rawRange=values[3],CFGetTypeID(rawRange)==AXValueGetTypeID(),
+           ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid {
+            var range=CFRange()
+            if AXValueGetValue(rawRange as! AXValue,.cfRange,&range),range.length==0,
+               range.location>=0,range.location<=text.utf16.count,now()>=began,now()-began<0.012 {
+                observeSnapshot?(.init(element:field,text:text,selection:NSRange(location:range.location,length:0)))
+            }
+        }
+        if observing,let text,!text.isEmpty,text.utf16.count<=4096,
+           count==Double(text.utf16.count),Self.origin(values[3]),
+           values[4] as? Bool==true,values[5] as? Bool==false,
+           let rawWindow=values[6],CFGetTypeID(rawWindow)==AXUIElementGetTypeID(),CFEqual(rawWindow,window),
+           ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid,
+           now()>=began,now()-began<0.012 {
+            let time=now()
+            representedEntries.removeAll{time-$0.time>1.1}
+            let previous=representedEntries.last(where:{CFEqual($0.snapshot.element,field)})
+            if previous.map({!InputFocusAccess.literalTextEqual($0.snapshot.text,text) || !CFEqual($0.window,window) || time-$0.time>=0.05}) ?? true {
+                representedEntries.append((.init(element:field,text:text,selection:NSRange(location:0,length:0)),window,time))
+                if representedEntries.count>8{representedEntries.removeFirst()}
+            }
+        }
         if observing,valueKind==1,let text,
            let draft=verifiedDraft(field,window:window,values:values,text:text,count:count,began:began) {
             readDraft?(draft)
-            if recording{rememberDraftEntry(draft)}
+            if recording{rememberDraftEntry(draft,window:window)}
         }
         if diagnosticsEnabled {
             diagnosticValueKind=valueKind;diagnosticValueShape=text.map(InputIncidentAXEvidence.classify) ?? 0
@@ -175,46 +198,9 @@ final class OnsetFocusHandoff {
         editableEmptyProof=0
         let needsEditableProof=text.map{!$0.isEmpty && $0 != "\n"} ?? false
         lastFieldCheck=3
-        if needsEditableProof {
-            // A published display value is never treated as an empty draft.
-            // Ask the provider about its editable coordinate domain instead.
-            guard valueKind==1,let text,text.utf16.count<=4096,
-                  let count,count>0,Self.origin(values[3]) else{return false}
-            editableEmptyProof=2
-            let zero=rangeText(field,CFRange(location:0,length:0))
-            guard zero.0 == .success,zero.1 == "" else{return false}
-            editableEmptyProof=3
-            let one=rangeText(field,CFRange(location:0,length:1))
-            if diagnosticsEnabled {
-                if one.0 == .success{rangeOneClass=one.1.map{$0.isEmpty ? 2:3} ?? 4}
-                else if one.0 == .illegalArgument{rangeOneClass=5}
-                else if one.0 == .noValue{rangeOneClass=6}
-                else if one.0 == .parameterizedAttributeUnsupported{rangeOneClass=7}
-                else if one.0 == .cannotComplete{rangeOneClass=8}
-                else{rangeOneClass=9}
-            }
-            // Only an explicit out-of-range response proves a zero domain.
-            // Success with clamping, unsupported, timeout and other failures
-            // are not proof. This is the existing range-reader boundary rule.
-            let zeroDomain=one.0 == .illegalArgument || one.0 == .noValue
-            // The user-identified Korean placeholder is also present in the
-            // installed Codex locale and the original Oct-11 regression case.
-            // This is an exact application hint, never arbitrary draft text.
-            let hint=Self.knownCodexPlaceholder(text) && count==Double(text.utf16.count)
-                && one.0 == .success && one.1?.utf16.count==1 && one.1?.utf16.first==text.utf16.first
-            guard zeroDomain || hint else{return false}
-            editableEmptyProof=4
-            let after=batch(field,Self.details)
-            guard after.count==Self.details.count,
-                  after[0] as? String==kAXTextAreaRole,
-                  after[1] as? String != kAXSecureTextFieldSubrole,
-                  after[2] as? String==text,Self.origin(after[3]),
-                  after[4] as? Bool==true,after[5] as? Bool==false,
-                  let afterWindow=after[6],CFGetTypeID(afterWindow)==AXUIElementGetTypeID(),CFEqual(afterWindow,window),
-                  let afterCount=after[7],CFGetTypeID(afterCount)==CFNumberGetTypeID(),
-                  (afterCount as? NSNumber)?.doubleValue==count else{return false}
-            editableEmptyProof=zeroDomain ? 1:5 // 5: recognized published hint, not an empty-domain claim
-        }
+        // A published nonempty value remains content of unknown provenance.
+        // Neither a hint string nor a range-query error proves an empty body.
+        if needsEditableProof {return false}
         lastFieldCheck=4
         var unknownRange=values[3] == nil || values[3].map{CFGetTypeID($0)==CFNullGetTypeID()} == true
         if !unknownRange,let raw=values[3] {
@@ -227,13 +213,16 @@ final class OnsetFocusHandoff {
                 guard range.location>=0,range.location<=(text?.utf16.count ?? 0) else{return false}
             }
         }
-        let needsZeroProof=text==nil || unknownRange
-        if needsZeroProof {
-            // An unfocused client may publish neither its value nor its caret.
-            // Only an independently measured exact numeric zero establishes
-            // an empty document with no selected text/insertion ambiguity.
-            lastFieldCheck=text==nil ? 11:10
-            guard count==0,text==nil || text!.isEmpty else{return false}
+        // Missing value/caret is unknown even when a provider advertises zero
+        // characters. Only an explicit value and valid caret can be a baseline.
+        lastFieldCheck=10
+        guard let text,!unknownRange else{return false}
+        if text.isEmpty {
+            guard values[7]==nil || count==0 else{return false}
+        }else{
+            // A format-only terminal LF is normalized only when the provider
+            // independently reports an empty character domain.
+            guard text=="\n",count==0 else{return false}
         }
         lastFieldCheck=5
         guard values[4] as? Bool==true else{return false}
@@ -242,15 +231,15 @@ final class OnsetFocusHandoff {
         lastFieldCheck=7
         guard let rawWindow=values[6],CFGetTypeID(rawWindow)==AXUIElementGetTypeID(),CFEqual(rawWindow,window) else{return false}
         lastFieldCheck=9
-        guard writable(field,kAXFocusedAttribute),needsZeroProof || writable(field,kAXSelectedTextRangeAttribute) else{return false}
+        guard writable(field,kAXSelectedTextRangeAttribute) else{return false}
         lastFieldCheck=0
-        if recording{rememberEmptyEntry(field)}
+        if recording{rememberEmptyEntry(field,window:window)}
         return true
     }
     // Reuse the idle scan's existing batch. A draft can authorize no focus and
     // is usable only after an exact same-field, original-key/body comparison.
     private func verifiedDraft(_ field:AXUIElement,window:AXUIElement,values:[CFTypeRef?],text:String,count:Double?,began:Double)->OnsetSnapshot? {
-        guard !text.isEmpty,text != "\n",text.utf16.count<=16384,!Self.knownCodexPlaceholder(text),
+        guard !text.isEmpty,text != "\n",text.utf16.count<=16384,
               count==Double(text.utf16.count),values[4] as? Bool==true,values[5] as? Bool==false,
               let rawWindow=values[6],CFGetTypeID(rawWindow)==AXUIElementGetTypeID(),CFEqual(rawWindow,window),
               let raw=values[3],CFGetTypeID(raw)==AXValueGetTypeID() else{return nil}
@@ -260,10 +249,22 @@ final class OnsetFocusHandoff {
               now()>=began,now()-began<0.012,ready(),frontPID()==pid else{return nil}
         return .init(element:field,text:text,selection:NSRange(location:range.location,length:0))
     }
+    // This is a prior displayed value, not an empty-body or focus proof.
+    func representedEntry(for field:AXUIElement,before time:Double)->OnsetSnapshot? {
+        guard let entry=representedEntries.last(where:{CFEqual($0.snapshot.element,field) && $0.time<time && time-$0.time<=0.75}),
+              now()>=entry.time,now()-entry.time<=1.1,currentContext(field,window:entry.window) else{return nil}
+        return entry.snapshot
+    }
+    func currentContext(_ field:AXUIElement,window:AXUIElement)->Bool {
+        guard ready(),let pid=frontPID(),owner(field)==pid,owner(window)==pid,
+              let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID(),
+              CFEqual(actual,window),ready(),frontPID()==pid else{return false}
+        return true
+    }
     private func rememberEditorHint(_ field:AXUIElement,time:Double){
         if recentEditor.map({CFEqual($0.field,field) || time-$0.time>5.5}) ?? true{recentEditor=(field,time)}
     }
-    private func rememberDraftEntry(_ snapshot:OnsetSnapshot){
+    private func rememberDraftEntry(_ snapshot:OnsetSnapshot,window:AXUIElement){
         let time=now();rememberEditorHint(snapshot.element,time:time)
         draftEntries.removeAll{time-$0.time>1.1}
         let previous=draftEntries.last(where:{CFEqual($0.snapshot.element,snapshot.element)})
@@ -271,16 +272,16 @@ final class OnsetFocusHandoff {
             !old.snapshot.text.utf16.elementsEqual(snapshot.text.utf16) || old.snapshot.selection != snapshot.selection || time-old.time>=0.05
                 || emptyEntries.contains(where:{CFEqual($0.field,snapshot.element) && $0.time>=old.time})
         }) ?? true {
-            draftEntries.append((snapshot,time));if draftEntries.count>8{draftEntries.removeFirst()}
+            draftEntries.append((snapshot,window,time));if draftEntries.count>8{draftEntries.removeFirst()}
         }
     }
-    private func rememberEmptyEntry(_ field:AXUIElement){
+    private func rememberEmptyEntry(_ field:AXUIElement,window:AXUIElement){
         let time=now();rememberEditorHint(field,time:time)
         emptyEntries.removeAll{time-$0.time>1.1}
         if emptyEntries.last(where:{CFEqual($0.field,field)}).map({old in
             time-old.time>=0.05 || draftEntries.contains(where:{CFEqual($0.snapshot.element,field) && $0.time>=old.time})
         }) ?? true {
-            emptyEntries.append((field,time));if emptyEntries.count>8{emptyEntries.removeFirst()}
+            emptyEntries.append((field,window,time));if emptyEntries.count>8{emptyEntries.removeFirst()}
         }
     }
     private func revalidateRecentEditor(window:AXUIElement,began:Double){
@@ -295,12 +296,8 @@ final class OnsetFocusHandoff {
         let empty=emptyEditor(recent.field,window:window,observing:true,recording:false,readDraft:{draft=$0})
         guard empty || draft != nil,
               now()-began<0.012,ready(),frontPID()==pid,owner(window)==pid,owner(recent.field)==pid else{return}
-        if empty{rememberEmptyEntry(recent.field)}
-        else if let draft{rememberDraftEntry(draft)}
-    }
-    static func knownCodexPlaceholder(_ text:String)->Bool {
-        let hint="Codex와 함께 작업하세요"
-        return InputIncidentAXEvidence.same(text,hint) || InputIncidentAXEvidence.same(text,hint+"\n")
+        if empty{rememberEmptyEntry(recent.field,window:window)}
+        else if let draft{rememberDraftEntry(draft,window:window)}
     }
     private static func origin(_ raw:CFTypeRef?)->Bool {
         guard let raw,CFGetTypeID(raw)==AXValueGetTypeID() else{return false}
@@ -313,6 +310,32 @@ final class OnsetFocusHandoff {
         let start=now()
         let changedOutside=outside.map{old in currentOutside.map{!CFEqual(old,$0)} ?? true} ?? (currentOutside != nil)
         if (root.map({!CFEqual($0,window)}) ?? true) || changedOutside{reset();root=window;outside=currentOutside}
+        if let request=pendingSearch {
+            pendingSearch=nil;searchAttempts=min(9_999_999,searchAttempts+1)
+            let result:OnsetEditorSearch.Result
+            if currentContext(request.document,window:window),now()-start<0.003 {
+                result=editorSearch.lookup(request.document)
+            }else{result = .unavailable}
+            var useFallback=true
+            switch result {
+            case .unique(let field):
+                searchOutcome=5
+                if ready(),now()>=start,now()-start<0.012 {
+                    // Query output is only a read hint, never scene uniqueness
+                    // or focus authority. Validate this editor on the next tick.
+                    queue.insert((field,request.depth+1),at:0);useFallback=false
+                    uncertain=true;uncertainReasons |= 256
+                }
+            case .multiple:searchOutcome=4;uncertain=true;uncertainReasons |= 128
+            case .none:searchOutcome=3
+            case .unavailable:searchOutcome=2;uncertain=true;uncertainReasons |= 64
+            case .unsupported:searchOutcome=1
+            }
+            if useFallback{queue.append(contentsOf:request.children.map{($0,request.depth+1)})}
+            if queue.count>nodeLimit{queue=[];uncertain=true;uncertainReasons |= 16}
+            if queue.isEmpty{finishScan(window:window)}
+            return
+        }
         if candidate==nil{revalidateRecentEditor(window:window,began:start)}
         if queue.isEmpty {
             guard start>=nextScan else{
@@ -323,7 +346,7 @@ final class OnsetFocusHandoff {
                 }
                 return
             }
-            queue=[(window,0)];visited=[:];visitedCount=0;editors=0;found=nil;sceneEditor=nil;uncertain=false;uncertainReasons=0;scanCount=min(9_999_999,scanCount+1)
+            queue=[(window,0)];searchesThisScan=0;visited=[:];visitedCount=0;editors=0;found=nil;sceneEditor=nil;uncertain=false;uncertainReasons=0;scanCount=min(9_999_999,scanCount+1)
             nextScan=start+0.5
         }
         var count=0
@@ -343,65 +366,25 @@ final class OnsetFocusHandoff {
             guard let descendants=(values[1] as? [AXUIElement]) ?? children(node) else{uncertain=true;uncertainReasons |= 2;continue}
             if depth>=40 {if !descendants.isEmpty{uncertain=true;uncertainReasons |= 4};continue}
             if descendants.count>512{uncertain=true;uncertainReasons |= 8}
+            if role=="AXWebArea",searchesThisScan<4 {
+                searchesThisScan+=1
+                pendingSearch=(node,Array(descendants.prefix(512)),depth)
+                break
+            }
             queue.append(contentsOf:descendants.prefix(512).map{($0,depth+1)})
             if queue.count>nodeLimit{queue=[];uncertain=true;uncertainReasons |= 16}
         }
         if visitedCount>=nodeLimit,!queue.isEmpty{queue=[];uncertain=true;uncertainReasons |= 32}
-        if queue.isEmpty {
+        if queue.isEmpty,pendingSearch==nil {finishScan(window:window)}
+        else if let candidate,now()-candidate.observedAt>0.75{self.candidate=nil}
+    }
+    private func finishScan(window:AXUIElement){
             completedScans=min(9_999_999,completedScans+1)
             let unique = !uncertain && editors==1
             cachedEditor=unique ? sceneEditor:nil
             if diagnosticsEnabled,let cachedEditor{diagnosticEditor=cachedEditor;diagnosticEditorAt=now()}
             candidate = unique ? found.map{Candidate(field:$0,window:window,observedAt:now())}:nil
             if sceneCacheEnabled,unique{nextScan=now()+5;nextRefresh=now()+0.2}
-        }else if let candidate,now()-candidate.observedAt>0.75{self.candidate=nil}
     }
-    // Runs before the untouched first key leaves the existing main tap. There
-    // is one bounded focus request, no polling, no text/range write, no key send.
-    @discardableResult func prepare(_ type:CGEventType,_ event:CGEvent,application:AXUIElement,pid:pid_t,
-                                 sourceID:String,currentSource:()->String,normal:Set<UInt16>,shifted:Set<UInt16>,systemFocus:(()->AXUIElement?)?=nil)->Bool {
-        let began=now(),field=candidate?.field
-        defer{restoreTimeout(application);if let field{restoreTimeout(field)}}
-        func focused()->AXUIElement? {
-            if let systemFocus{return systemFocus()}
-            guard let raw=read(application,kAXFocusedUIElementAttribute),CFGetTypeID(raw)==AXUIElementGetTypeID() else{return nil}
-            return raw as! AXUIElement
-        }
-        let recipient=event.getIntegerValueField(.eventTargetUnixProcessID)
-        lastOutcome = .eligibility
-        guard type == .keyDown,!attempted,let candidate,ready(),frontPID()==pid,
-              now()>=candidate.observedAt,now()-candidate.observedAt<=0.75,
-              event.getIntegerValueField(.keyboardEventAutorepeat)==0,
-              (recipient==Int64(pid) || (recipient==0 && systemFocus != nil)),
-              !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),
-              event.getIntegerValueField(.eventSourceUserData) != SyntheticInputMarker.manualEdit,
-              event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskAlphaShift,.maskSecondaryFn]).isEmpty,
-              (event.flags.contains(.maskShift) ? shifted:normal).contains(UInt16(event.getIntegerValueField(.keyboardEventKeycode))),
-              currentSource()==sourceID,owner(candidate.field)==pid else{return false}
-        lastOutcome = .window
-        guard let window=read(application,kAXFocusedWindowAttribute),CFEqual(window,candidate.window) else{return false}
-        lastOutcome = .systemFocus
-        guard let outside=focused(),owner(outside)==pid else{return false}
-        lastOutcome = .outsideIdentity
-        guard let observedOutside=self.outside,CFEqual(outside,observedOutside) else{return false}
-        lastOutcome = .outsideRole
-        guard let role=read(outside,kAXRoleAttribute) as? String,
-              ["AXWebArea",kAXGroupRole,kAXStaticTextRole,kAXScrollAreaRole,kAXSplitGroupRole].contains(role) else{return false}
-        lastOutcome = .field
-        guard emptyEditor(candidate.field,window:candidate.window) else{return false}
-        let confirmHintOrigin=editableEmptyProof==5
-        lastOutcome = .lateContext
-        guard ready(),frontPID()==pid,currentSource()==sourceID else{return false}
-        lastOutcome = .deadline
-        guard now()-began<0.03 else{return false}
-        attempted=true;lastOutcome = .requested
-        _ = focus(candidate.field)
-        // A successful setter is not an acknowledgment. An ambiguous reply is
-        // not retried; the caller always returns the original event unchanged.
-        lastOutcome = .unconfirmed
-        guard ready(),frontPID()==pid,currentSource()==sourceID,
-              let actual=focused(),CFEqual(actual,candidate.field) else{return false}
-        if confirmHintOrigin{guard Self.origin(read(candidate.field,kAXSelectedTextRangeAttribute)) else{return false}}
-        lastOutcome = .confirmed;return true
-    }
+
 }

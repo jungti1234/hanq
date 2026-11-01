@@ -3,17 +3,18 @@ var checks=0,failures=0
 func check(_ value:Bool,_ message:String){checks+=1;if !value{failures+=1;print("FAIL",message)}}
 final class Case {
  let h:OnsetFocusHandoff
+ let engine:OnsetRecoveryEngine
  let app=AXUIElementCreateApplication(9001),root=AXUIElementCreateApplication(9002)
  let field=AXUIElementCreateApplication(9100),outside=AXUIElementCreateApplication(9200),other=AXUIElementCreateApplication(9300)
  var rangeCalls=0,proofChanged=false,proofHasDraft=false
  var nodes:[AXUIElement]=[],focused:AXUIElement!,clock=10.0,source="ko",writes=0,slow=false,draftChanged=false
  let mode:String
- init(_ mode:String,h:OnsetFocusHandoff=OnsetFocusHandoff()){self.h=h;self.mode=mode;focused=outside
+ init(_ mode:String,engine:OnsetRecoveryEngine=OnsetRecoveryEngine()){self.engine=engine;self.h=engine.focusHandoff;self.mode=mode;focused=outside
   let depth=mode=="too_deep" ? 42:31
   nodes=[root]+(0..<depth).map{AXUIElementCreateApplication(pid_t(10000+$0))}+[field]
   h.nodeLimit=mode=="dense_probe" || mode=="dense_ambiguous" ? 16384:2048
   h.sceneCacheEnabled=mode=="cache"
-  h.restoreTimeout={_ in};h.diagnosticsEnabled=true
+  h.diagnosticsEnabled=true
   h.now={self.clock};h.ready={!["secure_input","permission"].contains(self.mode)}
   h.frontPID={self.mode=="target_changed" ? 43:42};h.owner={_ in self.mode=="owner" ? 43:42}
   h.read={e,n in if self.slow{self.clock+=0.003};return self.read(e,n)}
@@ -39,10 +40,8 @@ final class Case {
   }
   h.children={_ in self.mode=="unreadable_tree" ? nil:[]}
   h.writable={_,attribute in self.mode != "unwritable" && !(["unknown_readonly_range","absent_value_readonly"].contains(self.mode) && attribute==kAXSelectedTextRangeAttribute)}
-  h.focus={e in self.writes+=1;check(CFEqual(e,self.field),"only discovered field gets focus")
-   if self.mode != "unconfirmed"{self.focused=self.field}
-   return self.mode=="ambiguous_ack" ? .cannotComplete:.success
-  }
+  engine.testSetRange={_,_ in self.writes+=1;return .failure}
+  engine.testPost={_ in self.writes+=1}
   for _ in 0..<(mode.hasPrefix("dense_") ? 64:10){h.advance(window:root,outside:outside)}
  }
  func range(_ location:Int,_ length:Int)->CFTypeRef {var value=CFRange(location:location,length:length);return AXValueCreate(.cfRange,&value)!}
@@ -124,31 +123,31 @@ final class Case {
   if mode=="editor_outside"{focused=outside}
   if mode=="changed_outside"{focused=nodes[2]}
   let data=event.data
-  let accepted=h.prepare(type,event,application:app,pid:42,sourceID:"ko",currentSource:{self.source},normal:[15],shifted:[15],systemFocus:["system_focus","unreported_pid"].contains(mode) ? {self.focused}:nil)
+  engine.prepareFocusForFirstInput(type,event)
   check(event.data==data,"original event data never changed: \(mode)")
-  return accepted
+  return writes>0
  }
 }
 for mode in ["normal","terminal_lf","ambiguous_ack","system_focus","unreported_pid"] {
  let c=Case(mode);check(c.h.candidate != nil,"deep complete tree discovers unique empty editor: \(mode)")
  check(c.writes==0,"discovery never changes focus")
- check(c.attempt(),"actual focus acknowledgment accepted: \(mode)");check(c.writes==1,"one focus request")
- check(!c.attempt() && c.writes==1,"same outside episode never retries")
+ check(!c.attempt(),"native routing preserved despite a unique candidate: \(mode)");check(c.writes==0,"no focus or edit request")
+ check(!c.attempt() && c.writes==0,"repeated originals remain untouched")
 }
 for mode in ["draft","selection","ambiguous","hidden","secure_field","unwritable","disabled","unreadable_tree","too_deep","truncated","window_changed","target_changed","owner","source","permission","secure_input","button_outside","editor_outside","changed_outside","stale","deadline","event_pid","unreported_without_system","repeat","replay","manual"] {
  let c=Case(mode);check(!c.attempt(),"unsafe/unsupported context declined: \(mode)");check(c.writes==0,"unsafe context has no focus write: \(mode)")
 }
 for mode in ["unknown_missing_range","unknown_notfound_range","unknown_readonly_range"] {
- let c=Case(mode);check(c.h.candidate != nil,"zero-character unfocused editor prepared: \(mode)")
- check(c.attempt() && c.writes==1,"empty editor needs no pre-focus caret or selection write: \(mode)")
+ let c=Case(mode);check(c.h.candidate==nil,"zero count cannot replace an unknown caret: \(mode)")
+ check(!c.attempt() && c.writes==0,"unknown caret leaves routing unchanged: \(mode)")
  check(!c.h.diagnosticState.contains("PRIVATE_DRAFT"),"fixed diagnostic state has no content")
 }
 for mode in ["unknown_draft","unknown_lf","unknown_count_missing","unknown_count_mismatch","unknown_count_bool","unknown_wrong_range_type"] {
  let c=Case(mode);check(!c.attempt() && c.writes==0,"unknown caret requires independently proved zero characters: \(mode)")
 }
 for mode in ["absent_value","absent_value_no_range","absent_value_notfound","absent_value_readonly","null_value_no_range","attributed_empty_no_range"] {
- let c=Case(mode);check(c.h.candidate != nil,"independent zero count proves unpublished empty value: \(mode)")
- check(c.attempt() && c.writes==1,"unpublished empty client receives focus only: \(mode)")
+ let c=Case(mode);check(c.h.candidate==nil,"zero count does not prove an unpublished value is empty: \(mode)")
+ check(!c.attempt() && c.writes==0,"unpublished value receives no focus request: \(mode)")
  check(!c.h.diagnosticState.contains("PRIVATE_DRAFT"),"value type/shape diagnosis never includes content")
 }
 for mode in ["absent_value_nonzero","absent_value_count_missing","absent_value_count_bool","absent_value_count_fraction","absent_value_bad_range","wrong_value_type_no_range","attributed_draft_no_range","unknown_count_fraction"] {
@@ -163,15 +162,15 @@ for (mode,kind,relation) in [("hint_placeholder",1,1),("hint_description",2,1),(
  check(!state.contains("PRIVATE_DRAFT") && !state.contains("OTHER_HINT"),"body and hint are never diagnostic payload")
 }
 for mode in ["display_zero","display_no_value"] {
- let c=Case(mode);check(c.h.candidate != nil,"independent zero editable domain prepares display-valued field")
- check(c.attempt() && c.writes==1,"only independently empty display-valued document receives focus")
- check(c.h.diagnosticState.contains("editableEmpty=1") && !c.h.diagnosticState.contains("PRIVATE_HINT"),"empty proof diagnostic contains no display text")
+ let c=Case(mode)
+ check(c.h.candidate==nil && c.h.emptyEntryBaseline(for:c.field,before:10.1)==nil,"range errors never prove a published nonempty value is empty")
+ check(!c.attempt() && c.writes==0,"unknown display leaves original routing untouched")
 }
 for mode in ["display_actual","display_bad_zero","display_timeout","display_unsupported","display_clamped","display_wrong_type","display_change","display_unknown","display_selection","display_bool_count"] {
  let c=Case(mode);check(!c.attempt() && c.writes==0,"display value never bypasses independent empty proof: \(mode)")
 }
 let changedProof=Case("display_zero")
-check(changedProof.h.candidate != nil,"initial empty domain prepared")
+check(changedProof.h.candidate == nil,"range-error domain remains unproved")
 changedProof.proofHasDraft=true
 check(!changedProof.attempt() && changedProof.writes==0,"new draft with identical display metadata is rechecked before first original key")
 let identity=Case("normal")
@@ -182,14 +181,13 @@ let differentIdentity=Case("normal")
 differentIdentity.h.enteredEditor(differentIdentity.other,text:"PRIVATE_DRAFT",selection:NSRange(location:0,length:0))
 check(differentIdentity.h.diagnosticState.contains("focusedMatch=2") && !differentIdentity.h.diagnosticState.contains("PRIVATE_DRAFT"),"different clicked field and value category remain content-free")
 for mode in ["known_hint","known_hint_lf"] {
- let c=Case(mode);check(c.h.candidate != nil,"exact historical Codex placeholder prepared")
- check(c.attempt() && c.writes==1 && c.h.diagnosticState.contains("editableEmpty=5"),"known published placeholder gets focus only and is not falsely called an empty range")
+ let c=Case(mode)
+ check(c.h.candidate==nil && c.h.emptyEntryBaseline(for:c.field,before:10.1)==nil,"historical hint text grants no empty-body or focus authority")
+ check(c.h.representedEntry(for:c.field,before:10.1) != nil,"raw representation retained only as read-only change evidence")
+ check(!c.attempt() && c.writes==0,"hint leaves original input routing untouched")
 }
 for mode in ["known_hint_suffix","known_hint_count","known_hint_selection","known_hint_unknown","known_hint_timeout","known_hint_clamped","known_hint_changed"] {
  let c=Case(mode);check(!c.attempt() && c.writes==0,"placeholder recognition never relaxes content/range/count/context safety")
-}
-for text in ["Codex와 함께 작업하세요 ","\nCodex와 함께 작업하세요","Codex와 함께 작업하세요\nUSER_TEXT","Codex와 함께 작업하세요\n\n","OTHER_HINT","PRIVATE_DRAFT"] {
- check(!OnsetFocusHandoff.knownCodexPlaceholder(text),"only the two exact known placeholder representations match")
 }
 let dense=Case("dense_default")
 check(dense.h.sceneCompleted && dense.h.sceneClipped && dense.h.candidate==nil,"long conversation structure reproduces production traversal clipping")
@@ -199,32 +197,27 @@ check(fullScene.writes==0,"scene measurement never focuses an editor")
 let ambiguousScene=Case("dense_ambiguous")
 check(ambiguousScene.h.sceneCompleted && ambiguousScene.h.candidate==nil && ambiguousScene.writes==0,"larger measurement does not turn multiple editors into a candidate")
 let unconfirmed=Case("unconfirmed");check(!unconfirmed.attempt(),"setter success alone is not focus acknowledgment")
-check(!unconfirmed.attempt() && unconfirmed.writes==1,"uncertain result never retried")
+check(!unconfirmed.attempt() && unconfirmed.writes==0,"uncertain result never retried")
 for (type,code,flags) in [(CGEventType.keyUp,UInt16(15),CGEventFlags()),(.keyDown,UInt16(18),CGEventFlags()),(.keyDown,UInt16(15),.maskCommand),(.keyDown,UInt16(15),.maskControl),(.keyDown,UInt16(15),.maskAlternate),(.keyDown,UInt16(15),.maskAlphaShift)] {
  let c=Case("normal");check(!c.attempt(type,code,flags) && c.writes==0,"non-first-text input unchanged")
 }
-let shifted=Case("normal");check(shifted.attempt(.keyDown,15,.maskShift),"initial Shift consonant supported")
-check(OnsetFocusHandoff.supports("com.openai.codex",arguments:[]),"current desktop target enabled")
-check(!OnsetFocusHandoff.supports("other",arguments:[]),"unrelated apps unchanged")
-check(!OnsetFocusHandoff.supports("taek.in.hanq.prefocus-fixture",arguments:[]),"owned fixture requires explicit test mode")
-check(OnsetFocusHandoff.supports("taek.in.hanq.prefocus-fixture",arguments:["--test-onset-focus-handoff"]),"bounded native fixture opt-in")
+let shifted=Case("normal");check(!shifted.attempt(.keyDown,15,.maskShift) && shifted.writes==0,"Shift original preserves native routing")
 let cached=Case("cache");check(cached.h.candidate != nil,"cached scene starts with complete unique proof")
 cached.clock+=0.3;cached.draftChanged=true;cached.h.advance(window:cached.root,outside:cached.outside)
 check(cached.h.candidate==nil && !cached.attempt() && cached.writes==0,"new draft invalidates cached empty editor")
 cached.h.reset();check(cached.h.candidate==nil,"layout notification invalidates scene proof")
-let skipped=OnsetRecoveryEngine(),skipGate=OnsetInputGate(marker:1234567),skipField=AXUIElementCreateApplication(4040)
-skipped.enabled=true;skipped.gate=skipGate;skipGate.beat();skipGate.configureEarly(true)
-skipped.testSource={onsetKoreanID};skipped.testTargetBundleID={"com.openai.codex"};skipped.testCanReplaceText={true};skipped.testCanSelect={true}
-skipped.testSnapshot={OnsetSnapshot(element:skipField,text:"\u{3131}\u{314f}\u{3134} ",selection:NSRange(location:4,length:0))}
-var unexpectedWrites=0
-skipped.testSetRange={_,_ in unexpectedWrites+=1;return .success};skipped.testReplaceText={_,_ in unexpectedWrites+=1;return .success}
-for code:UInt16 in [15,40,1,49]{for down in [true,false]{let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;event.flags=[];check(skipGate.receive(down ? .keyDown:.keyUp,event) != nil,"unprepared fallback passes originals")}}
-skipped.sample()
-check(unexpectedWrites==0 && !skipped.recovering && skipped.pending.isEmpty && skipGate.take().isEmpty,"Codex late fallback never selects, writes, or retains input")
-skipped.closeSession()
+let skipField=AXUIElementCreateApplication(4040)
+for bundle in ["com.openai.codex","com.microsoft.edgemac","org.example.editor"] {
+ let engine=OnsetRecoveryEngine();engine.testTargetBundleID={bundle};engine.testCanReplaceText={true}
+ check(engine.canReplaceCommittedText(skipField),"identical edit capability is independent of client identity")
+ var focusWrites=0;engine.testSetRange={_,_ in focusWrites+=1;return .failure};engine.testPost={_ in focusWrites+=1}
+ let event=CGEvent(keyboardEventSource:nil,virtualKey:15,keyDown:true)!
+ engine.prepareFocusForFirstInput(.keyDown,event)
+ check(focusWrites==0,"production routing never infers focus intent from application identity")
+}
 // A failed/ambiguous focus request must not throw away a proved empty
 // pre-key baseline. It authorizes only the matching actual focused field.
-for mode in ["normal","known_hint","known_hint_lf","ambiguous"] {
+for mode in ["normal","ambiguous"] {
  let c=Case(mode),time=10.1
  let baseline=c.h.emptyEntryBaseline(for:c.field,before:time)
  check(baseline?.text=="" && baseline?.selection==NSRange(location:0,length:0),"empty and display-only baseline normalized without restoring hint")
@@ -250,7 +243,7 @@ let restoredEntry=OnsetRecoveryEngine(),restoredGate=OnsetInputGate(marker:12345
 restoredEntry.enabled=true;restoredEntry.gate=restoredGate
 restoredEntry.testSource={onsetKoreanID};restoredEntry.testTargetBundleID={"com.openai.codex"};restoredEntry.testCanSelect={true}
 _ = restoredEntry.currentLayout()
-let observed=Case("known_hint",h:restoredEntry.focusHandoff)
+let observed=Case("normal",engine:restoredEntry)
 observed.clock=ProcessInfo.processInfo.systemUptime;observed.h.invalidateEmptyEntries();observed.h.reset()
 for _ in 0..<10{observed.h.advance(window:observed.root,outside:observed.outside)}
 var commitAttempts=0
@@ -264,13 +257,13 @@ check(commitAttempts==1,"proved-empty Codex entry reaches existing composition c
 restoredEntry.closeSession()
 // A stale empty display must not discard the reservation before the first
 // consonant arrives. These hooks never allocate or post OS input.
-for model in ["normal","terminal_lf","known_hint","known_hint_lf"] {
+for model in ["normal","terminal_lf"] {
  for deferred in [false,true] {
   let engine=OnsetRecoveryEngine(),gate=OnsetInputGate(marker:123456789)
   engine.enabled=true;engine.gate=gate
   engine.testSource={onsetKoreanID};engine.testTargetBundleID={"com.openai.codex"};engine.testCanSelect={true}
   _ = engine.currentLayout()
-  let observed=Case(model,h:engine.focusHandoff)
+  let observed=Case(model,engine:engine)
   observed.clock=ProcessInfo.processInfo.systemUptime;observed.h.invalidateEmptyEntries();observed.h.reset()
   for _ in 0..<10{observed.h.advance(window:observed.root,outside:observed.outside)}
   var commands=0,text=model=="normal" ? "":model=="terminal_lf" ? "\n":"Codex와 함께 작업하세요"+(model=="known_hint_lf" ? "\n":""),caret=0
@@ -302,10 +295,10 @@ check(!OnsetRecoveryEngine.awaitingEmptyEntryPublication(proof,current:.init(ele
 let passEngine=OnsetRecoveryEngine(),passGate=OnsetInputGate(marker:123456789)
 passEngine.enabled=true;passEngine.gate=passGate;passEngine.testSource={onsetKoreanID};passEngine.testTargetBundleID={"com.openai.codex"}
 _ = passEngine.currentLayout()
-let passObserved=Case("known_hint_lf",h:passEngine.focusHandoff)
+let passObserved=Case("normal",engine:passEngine)
 passObserved.clock=ProcessInfo.processInfo.systemUptime;passObserved.h.invalidateEmptyEntries();passObserved.h.reset()
 for _ in 0..<10{passObserved.h.advance(window:passObserved.root,outside:passObserved.outside)}
-var passText="Codex와 함께 작업하세요\n",passCaret=0,unexpectedCommits=0
+var passText="",passCaret=0,unexpectedCommits=0
 passEngine.testCommitComposition={_ in unexpectedCommits+=1;return false}
 passEngine.testSnapshot={.init(element:passObserved.field,text:passText,selection:NSRange(location:passCaret,length:0))}
 passGate.beat();passGate.configureEarly(true)
@@ -417,13 +410,15 @@ func draftScene(_ mode:String="ok")->Case {
  for _ in 0..<10{c.h.advance(window:c.root,outside:c.outside)}
  return c
 }
+let sameHintDraft=draftScene("hint")
+check(sameHintDraft.h.draftEntryBaseline(for:sameHintDraft.field,before:sameHintDraft.clock+0.05)?.text=="Codex와 함께 작업하세요","real draft equal to an old hint remains actual content")
 let draftOK=draftScene(),draftKeyTime=draftOK.clock+0.05
 let draftProof=draftOK.h.draftEntryBaseline(for:draftOK.field,before:draftKeyTime)
 check(draftProof?.text=="기존" && draftProof?.selection==NSRange(location:2,length:0),"fresh actual draft body and end caret are preserved")
 check(draftOK.h.sceneEditorCount==2 && draftOK.h.candidate==nil && draftOK.writes==0,"draft observation never relaxes multiple-editor focus safety")
 check(draftOK.h.draftEntryBaseline(for:draftOK.other,before:draftKeyTime)==nil,"draft evidence is never transferred to another editor")
 check(draftOK.h.draftEntryBaseline(for:draftOK.field,before:draftOK.clock)==nil,"a read completing at the key time is not a pre-key draft")
-for mode in ["hint","large","count_missing","count","middle","selected","disabled","hidden","secure","window","permission","secure_input","owner","front","late"] {
+for mode in ["large","count_missing","count","middle","selected","disabled","hidden","secure","window","permission","secure_input","owner","front","late"] {
  let c=draftScene(mode)
  check(c.h.draftEntryBaseline(for:c.field,before:c.clock+0.05)==nil,"draft baseline rejects \(mode)")
  check(c.writes==0,"draft rejection never writes \(mode)")
@@ -460,7 +455,7 @@ for prefix in ["","기존"] {
  let engine=OnsetRecoveryEngine()
  var proofCase:Case?
  if prefix.isEmpty {
-  let c=Case("normal",h:engine.focusHandoff);c.clock=ProcessInfo.processInfo.systemUptime;c.h.reset()
+  let c=Case("normal",engine:engine);c.clock=ProcessInfo.processInfo.systemUptime;c.h.reset()
   for _ in 0..<10{c.h.advance(window:c.root,outside:c.outside)}
   proofCase=c
  }
@@ -551,5 +546,28 @@ let fastDraftFlip=draftScene();publishDraftShape(fastDraftFlip,"",step:0.01);pub
 check(fastDraftFlip.h.draftEntryBaseline(for:fastDraftFlip.field,before:fastDraftFlip.clock+0.01)?.text=="기존","rapid draft-empty-draft publishes the latest pre-key state despite deduplication")
 let fastEmptyFlip=Case("normal");publishDraftShape(fastEmptyFlip,"기존",step:0.01);publishDraftShape(fastEmptyFlip,"",step:0.01)
 check(fastEmptyFlip.h.emptyEntryBaseline(for:fastEmptyFlip.field,before:fastEmptyFlip.clock+0.01) != nil,"rapid empty-draft-empty publishes the latest pre-key state despite deduplication")
+// A recycled field identity in a different window cannot reuse any pre-key proof.
+for kind in ["empty","draft","representation"] {
+ let c=kind=="draft" ? draftScene():Case(kind=="empty" ? "normal":"known_hint")
+ let before=c.clock+0.02
+ func proof()->Bool {
+  if kind=="empty"{return c.h.emptyEntryBaseline(for:c.field,before:before) != nil}
+  if kind=="draft"{return c.h.draftEntryBaseline(for:c.field,before:before) != nil}
+  return c.h.representedEntry(for:c.field,before:before) != nil
+ }
+ check(proof(),"same-window baseline exists before mutation")
+ let original=c.h.read
+ c.h.read={element,name in name==kAXWindowAttribute ? c.other:original(element,name)}
+ check(!proof(),"same field in changed window rejects every history kind")
+ c.h.read=original;c.h.owner={_ in 43}
+ check(!proof(),"changed owner rejects every history kind")
+}
+let windowCache=OnsetOutsideObservation(),windowField=AXUIElementCreateApplication(771),windowA=AXUIElementCreateApplication(772),windowB=AXUIElementCreateApplication(773)
+windowCache.clock={10};var currentWindow=windowA
+windowCache.read={_,name in name==kAXWindowAttribute ? currentWindow:nil}
+windowCache.remember(.init(element:windowField,text:"prior",selection:NSRange(location:5,length:0)),window:windowA)
+check(windowCache.baseline(for:windowField,before:10.1) != nil,"common observation retains same-window baseline")
+currentWindow=windowB
+check(windowCache.baseline(for:windowField,before:10.1)==nil,"common observation rejects recycled field across windows")
 print("\(failures==0 ? "PASS":"FAIL") \(checks) first-input focus handoff safety assertions; all AX injected; no keys posted")
 exit(failures==0 ? 0:1)

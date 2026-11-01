@@ -3,7 +3,7 @@ import AppKit
 // Read-only, bounded discovery of editors before an outside key chooses one.
 // Never focuses a field, posts input, or treats a post-key read as prior text.
 final class OnsetOutsideObservation {
-    struct Entry { let snapshot:OnsetSnapshot; let completed:Double }
+    struct Entry { let snapshot:OnsetSnapshot; let completed:Double; var window:AXUIElement?=nil }
     var entries:[Entry]=[]
     private var root:AXUIElement?
     private var queue:[(AXUIElement,Int)]=[]
@@ -18,7 +18,17 @@ final class OnsetOutsideObservation {
     }
     func reset(){entries=[];root=nil;queue=[];visited=[];nextCycle=0}
     func baseline(for field:AXUIElement,before time:Double)->OnsetSnapshot? {
-        entries.last{CFEqual($0.snapshot.element,field) && $0.completed<time && time-$0.completed<=0.75}?.snapshot
+        guard let entry=entries.last(where:{CFEqual($0.snapshot.element,field) && $0.completed<time && time-$0.completed<=0.75}) else{return nil}
+        if let window=entry.window {
+            guard let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID(),CFEqual(actual,window) else{return nil}
+        }
+        return entry.snapshot
+    }
+    func remember(_ snapshot:OnsetSnapshot,window:AXUIElement){
+        let completed=clock()
+        entries.removeAll{completed-$0.completed>0.75}
+        entries.append(Entry(snapshot:snapshot,completed:completed,window:window))
+        if entries.count>16{entries.removeFirst()}
     }
     func advance(root newRoot:AXUIElement,focused:AXUIElement?=nil){
         let start=clock()
@@ -65,7 +75,7 @@ final class OnsetOutsideObservation {
                 }
                 // Timestamp after all reads. A key arriving during the read
                 // makes this entry ineligible for that reservation.
-                let entry=Entry(snapshot:.init(element:node,text:text,selection:selection),completed:clock())
+                let entry=Entry(snapshot:.init(element:node,text:text,selection:selection),completed:clock(),window:newRoot)
                 entries.removeAll{CFEqual($0.snapshot.element,node)}
                 entries.append(entry)
                 if entries.count>16{entries.removeFirst()}

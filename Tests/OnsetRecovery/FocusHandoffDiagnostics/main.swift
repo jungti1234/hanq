@@ -25,7 +25,7 @@ let content=(try? String(contentsOf:file,encoding:.utf8)) ?? ""
 check(reads==0,"idle diagnostics issue no AX or source reads")
 check(!content.contains("PRIVATE_FOCUS_TEXT") && !content.contains("com.openai") && !content.contains("keycode") && !content.contains("sourceID"),"no body, application identity or key/source values")
 check(content.contains("onset.focus_idle")==traceExpected,"focus trace requires explicit opt-in")
-check(content.contains("onset.focus_key")==traceExpected,"decision trace requires explicit opt-in and idle flush")
+check(!content.contains("onset.focus_key"),"read-only routing produces no focus-write decision")
 engine.flushFocusHandoffDiagnostics()
 check(((try? String(contentsOf:file,encoding:.utf8)) ?? "")==content,"unchanged trace is coalesced")
 print("PASS \(checks) focus diagnostic opt-in, no callback writes/added reads, unchanged event and content-free idle flush checks; no OS keys")

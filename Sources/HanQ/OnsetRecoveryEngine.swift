@@ -165,7 +165,9 @@ final class OnsetRecoveryEngine:NSObject {
     var passedTime:Double?
     var passedBaseline:OnsetSnapshot?
     var passedField:AXUIElement?
-    func cancelDeferredObservation(){gate?.discardDeferred();deferredTime=nil;deferredBaseline=nil;deferredField=nil;passedTime=nil;passedBaseline=nil;passedField=nil}
+    func cancelDeferredObservation(){gate?.discardDeferred();deferredTime=nil;deferredBaseline=nil;deferredField=nil;passedTime=nil;passedBaseline=nil;passedField=nil;firstPublication=nil;firstPublicationAttemptedTime=nil}
+    var firstPublication:OnsetFirstPublication?
+    var firstPublicationAttemptedTime:Double?
     var publishedPassedBaselines:[(revision:Int,snapshot:OnsetSnapshot)]=[]
     var publishedPassedRevision=0
     func publishPassedBaseline(_ snap:OnsetSnapshot?){
@@ -192,6 +194,7 @@ final class OnsetRecoveryEngine:NSObject {
     func observePassedIdentity(){
         guard let p=gate?.passedObservation(),passedTime != p.first.time else{return}
         passedTime=p.first.time
+        firstPublication=nil;firstPublicationAttemptedTime=nil
         if let revision=p.baselineRevision {
             guard let baseline=publishedPassedBaselines.first(where:{$0.revision==revision})?.snapshot else{
                 gate?.discardPassed(reason:.baseline_missing);passedBaseline=nil;passedField=nil;return
@@ -210,9 +213,14 @@ final class OnsetRecoveryEngine:NSObject {
         if let observed=observedEmptyEntry(snap,before:p.first.time) ?? observedDraftEntry(snap,before:p.first.time) {
             passedBaseline=observed
         }
-        let baseline=passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
-        let allowObservedReplay=OnsetFocusHandoff.supports(testTargetBundleID?() ?? target?.bundleIdentifier)
-            && baseline != nil && baseline!.selection.location==baseline!.text.utf16.count
+        observeFirstPublication(p,snap)
+        let baseline=firstPublication?.matches(p,snap) == true ? nil:
+            passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
+        // A terminal plain Space selects the committed-word strategy even
+        // when a pre-key baseline could also prove an earlier split replay.
+        let committedBoundary=p.keys.last.map{$0.0==49 && !$0.1} ?? false
+        let allowObservedReplay = !committedBoundary && ((baseline != nil && baseline!.selection.location==baseline!.text.utf16.count)
+            || firstPublication?.matches(p,snap) == true)
         if allowObservedReplay,Self.awaitingEmptyEntryPublication(baseline,current:snap){return true}
         switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay) {
         case .waiting:traceReentryObservation("history_wait",hasSnapshot:true);return true
@@ -294,6 +302,7 @@ final class OnsetRecoveryEngine:NSObject {
         // IME composition from a detached onset. Observe the whole passed word
         // without sending a cursor command or quarantining subsequent keys.
         passedTime=first.time;passedBaseline=nil;passedField=snap.element
+        if let passed=gate?.passedObservation(){observeFirstPublication(passed,snap)}
         deferredTime=nil;deferredBaseline=nil;deferredField=nil
         earlyObservationTime=nil;earlyObservedField=nil;earlyWaiting=false;earlyBaseline=nil
         onset.cancel();currentPlan=nil;planElement=nil
@@ -303,11 +312,9 @@ final class OnsetRecoveryEngine:NSObject {
     }
     // Match observed content transitions, independent of application identity.
     func observedEmptyEntry(_ current:OnsetSnapshot,before time:Double)->OnsetSnapshot? {
-        guard OnsetFocusHandoff.supports(testTargetBundleID?() ?? target?.bundleIdentifier) else{return nil}
         return focusHandoff.emptyEntryBaseline(for:current.element,before:time)
     }
     func observedDraftEntry(_ current:OnsetSnapshot,before time:Double)->OnsetSnapshot? {
-        guard OnsetFocusHandoff.supports(testTargetBundleID?() ?? target?.bundleIdentifier) else{return nil}
         return focusHandoff.draftEntryBaseline(for:current.element,before:time)
     }
     // A focused editor can still publish its pre-key empty representation.
@@ -316,12 +323,12 @@ final class OnsetRecoveryEngine:NSObject {
         guard let previous,CFEqual(previous.element,current.element),previous.text.isEmpty,
               previous.selection==NSRange(location:0,length:0),current.selection.length==0 else{return false}
         if current.text=="\n" {return current.selection.location==0 || current.selection.location==1}
-        return current.selection.location==0 && (current.text.isEmpty || OnsetFocusHandoff.knownCodexPlaceholder(current.text))
+        return current.selection.location==0 && current.text.isEmpty
     }
     static func firstConsonantBaseline(_ previous:OnsetSnapshot?,current:OnsetSnapshot,observedEmptyEntry:Bool=false)->String? {
         // Restore the released empty-composer path only with an independently
-        // observed pre-key empty field. A placeholder observation is normalized
-        // to empty; it is never restored as user text. The detector still proves
+        // observed pre-key empty field. A nonempty display is never normalized
+        // to empty or restored as user text. The detector still proves
         // the original consonant/source/caret and commits composition first.
         if current.text.utf16.count == 1,current.selection == NSRange(location:1,length:0),current.text != previous?.text {
             guard observedEmptyEntry,let previous,CFEqual(previous.element,current.element),previous.text.isEmpty,previous.selection==NSRange(location:0,length:0) else{return nil}
@@ -345,8 +352,6 @@ final class OnsetRecoveryEngine:NSObject {
     private static var focusTraceLines=0
     private let focusTraceRequested=ProcessInfo.processInfo.arguments.contains("--trace-onset-focus")
     private var focusTraceNext=0.0,focusTracePrevious=""
-    private var focusKeySerial=0,focusKeyStage=0
-    private var firstFocusDecisionRecorded=false
     private lazy var sceneProbe=OnsetFocusHandoff()
     private var sceneProbeFinished=false,sceneProbeBegan=0.0
     private let sceneProbeRequested=ProcessInfo.processInfo.arguments.contains("--diagnose-onset-scene")
@@ -354,7 +359,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard sceneProbeRequested,InputDiagnostics.shared.isEnabled,!sceneProbeFinished,enabled,
               !recovering,!waitingForContext,pending.isEmpty,retainedInput.isEmpty,
               canBeginRepair(),AXIsProcessTrusted(),!IsSecureEventInputEnabled(),
-              let target,target.bundleIdentifier=="com.openai.codex",!target.isTerminated,let ax,
+              let target,!target.isTerminated,let ax,
               focusAccess.currentPID()==target.processIdentifier,
               let raw=attr(ax,kAXFocusedWindowAttribute),CFGetTypeID(raw)==AXUIElementGetTypeID() else{return}
         let time=ProcessInfo.processInfo.systemUptime
@@ -366,88 +371,31 @@ final class OnsetRecoveryEngine:NSObject {
             InputDiagnostics.shared.record("onset.scene_probe deadline=0 overProductionLimit=\(sceneProbe.sceneVisited>2048 || sceneProbe.sceneClipped ? 1:0) \(sceneProbe.diagnosticState)")
         }
     }
-    private var focusKeyDecisions:[(Int,Int,Int)]=[]
     func flushFocusHandoffDiagnostics(){
         guard focusTraceRequested,InputDiagnostics.shared.isEnabled,
               Self.focusTraceLines<1024 else{return}
         let time=ProcessInfo.processInfo.systemUptime
         guard time<Self.focusTraceDeadline,time>=focusTraceNext else{return}
         focusTraceNext=time+0.25
-        let state="scope=\(OnsetFocusHandoff.supports(target?.bundleIdentifier) ? 1:0) reason=\(InputIncidentTrace.ReadOutcome.snapshot(unavailableReason).rawValue) enabled=\(enabled ? 1:0) recovering=\(recovering ? 1:0) waiting=\(waitingForContext ? 1:0) pending=\(pending.count) retained=\(retainedInput.count) \(focusHandoff.diagnosticState)"
+        let state="scope=\(target != nil ? 1:0) reason=\(InputIncidentTrace.ReadOutcome.snapshot(unavailableReason).rawValue) enabled=\(enabled ? 1:0) recovering=\(recovering ? 1:0) waiting=\(waitingForContext ? 1:0) pending=\(pending.count) retained=\(retainedInput.count) \(focusHandoff.diagnosticState)"
         if state != focusTracePrevious {
             focusTracePrevious=state;Self.focusTraceLines+=1
             InputDiagnostics.shared.record("onset.focus_idle \(state)")
         }
-        for (sequence,stage,outcome) in focusKeyDecisions where Self.focusTraceLines<1024 {
-            Self.focusTraceLines+=1
-            InputDiagnostics.shared.record("onset.focus_key sequence=\(sequence) stage=\(stage) outcome=\(outcome)")
-        }
-        focusKeyDecisions.removeAll(keepingCapacity:true)
     }
-    // Only a proved empty, unique composer may receive this first-key focus
-    // handoff. It never consumes the key or enters the text-replacement path.
+    // Preserve native routing and invalidate observation on user context changes.
     func prepareFocusForFirstInput(_ type:CGEventType,_ event:CGEvent){
-        let traceKey=focusTraceRequested && InputDiagnostics.shared.isEnabled && type == .keyDown
-            && ProcessInfo.processInfo.systemUptime<Self.focusTraceDeadline
-        if type == .keyDown{focusKeyStage=1}
-        let recordDecision=type == .keyDown && InputIncidentTrace.shared.enabled && !firstFocusDecisionRecorded
-            && OnsetFocusHandoff.supports(target?.bundleIdentifier)
-            && PhysicalLetterKeys.printableCodes.contains(UInt16(event.getIntegerValueField(.keyboardEventKeycode)))
-            && event.getIntegerValueField(.keyboardEventKeycode) != 49
-            && event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty
-            && (unavailableReason=="not_supported_text_field" || lastEditable==nil || focusHandoff.candidate != nil)
-        defer{
-            if recordDecision{
-                firstFocusDecisionRecorded=true
-                let state:InputIncidentTrace.State
-                if focusKeyStage==3{state = .focusConfirmed}
-                else if focusKeyStage==2 && focusHandoff.lastOutcome == .unconfirmed{state = .focusRequestUnconfirmed}
-                else if focusKeyStage==11 && focusHandoff.sceneClipped{state = .focusSceneClipped}
-                else if focusKeyStage==11 && focusHandoff.sceneEditorCount>1{state = .focusMultipleEditors}
-                else if focusKeyStage==11 && focusHandoff.sceneScanning{state = .focusSceneScanning}
-                else if focusKeyStage==11{state = .focusCandidateUnavailable}
-                else{state = .focusGuardRejected}
-                InputIncidentTrace.shared.focusHandoffObservation(state)
-            }
-        }
-        if traceKey{focusKeySerial+=1}
-        defer{if traceKey,focusKeyDecisions.count<16{focusKeyDecisions.append((focusKeySerial,focusKeyStage,focusHandoff.lastOutcome.rawValue))}}
+        // A single discovered editor is not proof of keyboard destination.
+        // Preserve native routing; invalidate read-only history on user changes.
         if [.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].contains(type)
-            || (type == .keyDown && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty){firstFocusDecisionRecorded=false;focusHandoff.invalidateEmptyEntries();focusHandoff.reset();return}
-        guard type == .keyDown,enabled,!recovering,!waitingForContext,!replayStarted,
-              pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty else{return}
-        focusKeyStage=10
-        guard let target,!target.isTerminated,OnsetFocusHandoff.supports(target.bundleIdentifier) else{return}
-        focusKeyStage=11
-        guard let ax,focusHandoff.candidate != nil else{return}
-        focusKeyStage=12
-        guard canBeginRepair() else{return}
-        focusKeyStage=13
-        guard let gate,gate.healthy(),!gate.hasActiveReplayHold(),gate.reservation()==nil,
-              gate.deferredReservation()==nil,gate.passedObservation()==nil else{return}
-        focusKeyStage=14
-        guard let layout=currentLayout() else{return}
-        focusKeyStage=2
-        AXUIElementSetMessagingTimeout(focusAccess.system,0.003)
-        defer{AXUIElementSetMessagingTimeout(focusAccess.system,0.05)}
-        guard focusHandoff.prepare(type,event,application:ax,pid:target.processIdentifier,
-              sourceID:layout.sourceID,currentSource:currentSource,
-              normal:Set(layout.normal.keys),shifted:Set(layout.shifted.keys),systemFocus:{[self] in
-                  guard let actual=focusAccess.focusedElement(application:ax,pid:target.processIdentifier),
-                        focusAccess.lastRoute==1 || event.getIntegerValueField(.eventTargetUnixProcessID)==Int64(target.processIdentifier) else{return nil}
-                  return actual
-              }) else{return}
-        focusKeyStage=3
-        // Let the normal main/mismatch/boundary observers see this untouched
-        // first key on the now-focused field. No early hold is needed.
-        gate.configureEarly(false,sourceID:layout.sourceID,normal:Set(layout.normal.keys),shifted:Set(layout.shifted.keys))
-        gate.configurePassedBaseline(nil);cancelDeferredObservation();onset.cancel()
-        earlyBaseline=nil;lastEditable=nil
-        log("first_input_focus_confirmed")
+            || (type == .keyDown && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty) {
+            focusHandoff.invalidateEmptyEntries();focusHandoff.reset()
+            firstPublication=nil;firstPublicationAttemptedTime=nil
+        }
     }
     func observeFocusHandoff(){
         guard testSnapshot==nil,let target,!target.isTerminated,
-              OnsetFocusHandoff.supports(target.bundleIdentifier),let ax,
+              let ax,
               canBeginRepair(),focusAccess.currentPID()==target.processIdentifier,
               let raw=attr(ax,kAXFocusedWindowAttribute),CFGetTypeID(raw)==AXUIElementGetTypeID(),
               let outside=focusAccess.focusedElement(application:ax,pid:target.processIdentifier) else{return}
@@ -457,6 +405,9 @@ final class OnsetRecoveryEngine:NSObject {
             let status=AXObserverAddNotification(observer,window,kAXLayoutChangedNotification as CFString,Unmanaged.passUnretained(self).toOpaque())
             focusHandoff.sceneCacheEnabled=status == .success
             focusLayoutWindow=window
+        }
+        focusHandoff.observeSnapshot={ [weak self] snapshot in
+            self?.outsideObservation.remember(snapshot,window:window)
         }
         focusHandoff.advance(window:window,outside:outside)
     }
@@ -531,8 +482,7 @@ final class OnsetRecoveryEngine:NSObject {
         let eligible=observed==nil && unavailableReason=="not_supported_text_field" && layout != nil
         if eligible {
             earlyBaseline=lastEditable
-            if OnsetFocusHandoff.supports(target?.bundleIdentifier){observeFocusHandoff()}
-            else{observeOutsideEditors()}
+            observeFocusHandoff()
         }
         else if let observed{focusHandoff.enteredEditor(observed.element,text:observed.text,selection:observed.selection)}
         gate.configureEarly(eligible,sourceID:layout?.sourceID ?? "",normal:Set(layout?.normal.keys.map{$0} ?? []),shifted:Set(layout?.shifted.keys.map{$0} ?? []))
@@ -632,7 +582,7 @@ final class OnsetRecoveryEngine:NSObject {
     func emergencyStop(_ reason:String){
         traceSafety(.stop,reason:reason)
         guard enabled || recovering || waitingForContext else{return}
-        recoveryEpoch+=1;waitingForContext=false
+        recoveryEpoch+=1;waitingForContext=false;firstPublication=nil
         retainPrefixRemainder()
         gate?.stop();collectHeld()
         enabled=false;recovering=false;rollingBack=false;onset.cancel()
@@ -791,7 +741,6 @@ final class OnsetRecoveryEngine:NSObject {
         }
         focusHandoff.diagnosticsEnabled=focusTraceRequested && InputDiagnostics.shared.isEnabled
         focusHandoff.beginDiagnosticObservation()
-        if focusTraceRequested,InputDiagnostics.shared.isEnabled{focusKeyDecisions.reserveCapacity(16)}
         gate.beat();gateThread=OnsetGateThread(gate)
         enabled=true;recovering=false;lastEditable=nil;pending=[];locked=nil;lastText=nil;lastSource=InputSourceAccess.currentID();focusHandoff.reset();focusLayoutWindow=nil;focusHandoff.sceneCacheEnabled=false
         log("session_start",["toolVersion":"0.1.19","build":20,"mode":"first_consonant","targetPID":target.processIdentifier,"source":lastSource])
@@ -834,8 +783,7 @@ final class OnsetRecoveryEngine:NSObject {
     func beginRecovery(_ candidate:OnsetRecoveryPlan,_ snap:OnsetSnapshot,deferred:OnsetInputGate.Reservation?=nil,passed:OnsetInputGate.PassedInput?=nil){
         guard canBeginRepair() else{onset.cancel();emergencyStop("manual_edit_busy");return}
         if candidate.isObservedReplay {
-            guard OnsetFocusHandoff.supports(testTargetBundleID?() ?? target?.bundleIdentifier),
-                  let passed,passed.pressed.isEmpty,passed.keys.count==candidate.codes.count,
+            guard let passed,passed.pressed.isEmpty,passed.keys.count==candidate.codes.count,
                   zip(passed.keys,candidate.codes).allSatisfy({$0.0==$0.1}),
                   currentSource()==passed.first.sourceID else{return}
         }
@@ -1124,7 +1072,7 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func closeSession(){
         traceSafety(.sessionEnd)
-        recoveryEpoch+=1;waitingForContext=false
+        recoveryEpoch+=1;waitingForContext=false;firstPublication=nil
         if let axObserver {
             CFRunLoopRemoveSource(CFRunLoopGetMain(),AXObserverGetRunLoopSource(axObserver),.commonModes)
         }

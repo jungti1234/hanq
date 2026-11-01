@@ -5,10 +5,6 @@ extension OnsetRecoveryEngine {
     // A completed late word is already committed input. Replace it through the
     // original AX element, never by queuing physical keys to the current focus.
     func canReplaceCommittedText(_ field:AXUIElement)->Bool {
-        // This provider advertised a writable selection but did not confirm the
-        // actual edit. The empty-composer handoff preserves original IME input;
-        // never select/hold a late word here based only on the advertised flag.
-        guard (testTargetBundleID?() ?? target?.bundleIdentifier) != "com.openai.codex" else{return false}
         if let testCanReplaceText{return testCanReplaceText()}
         var writable:DarwinBoolean=false
         return AXUIElementIsAttributeSettable(field,kAXSelectedTextAttribute as CFString,&writable) == .success && writable.boolValue

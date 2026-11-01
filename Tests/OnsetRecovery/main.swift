@@ -43,6 +43,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
             if name==kAXRoleAttribute{return kAXWindowRole as CFString}
             if name==kAXChildrenAttribute{return [field] as CFArray}
         }else if CFEqual(node,field){
+            if name==kAXWindowAttribute{return root}
             if name==kAXRoleAttribute{return kAXTextFieldRole as CFString}
             if name==kAXValueAttribute{return "abc" as CFString}
             if name==kAXSelectedTextRangeAttribute{var range=CFRange(location:3,length:0);return AXValueCreate(.cfRange,&range)}
