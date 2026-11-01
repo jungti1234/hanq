@@ -29,7 +29,13 @@ func runRecoveryStartTests(){
             engine.testSetRange={_,_ in posts+=1;return .success};engine.testPost={_ in posts+=1}
             engine.canObserve={true};engine.canBeginRepair={true}
             trace.decision(.handoff,.handoffAccepted)
-            engine.consumeIdleSnapshot(snap);trace.flush()
+            engine.consumeIdleSnapshot(snap)
+            if reason == .interruptedComposition {
+                probeTestCheck(!engine.recovering && selections==0 && posts==0,"an interrupted frame first remains observational")
+                RunLoop.current.run(until:Date().addingTimeInterval(0.025))
+                engine.consumeIdleSnapshot(snap)
+            }
+            trace.flush()
             probeTestCheck(engine.recovering && selections==1 && posts==0,"diagnostic does not change initial source/replay scheduling")
             if enabled {
                 probeTestCheck(captures.count==1,"real recovery emits its own pre capture")

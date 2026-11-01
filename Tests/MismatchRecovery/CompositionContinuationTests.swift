@@ -48,6 +48,9 @@ func runCompositionContinuationTests(){
         text=(text as NSString).replacingCharacters(in:range,with:suffix);range=NSRange(location:start+2,length:0)
         let up=CGEvent(keyboardEventSource:nil,virtualKey:40,keyDown:false)!;up.flags=[]
         _=p.event(.keyUp,up);p.sample(synchronous:true)
+        // Model the controller's next existing idle poll. A single partial
+        // composition frame no longer starts a destructive edit immediately.
+        RunLoop.current.run(until:Date().addingTimeInterval(0.025));p.sample(synchronous:true)
         let until=Date().addingTimeInterval(1.5)
         while p.recovering,Date()<until{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
         check(text=="앞🙂"+committed+"가나뒤" && range==NSRange(location:start+2,length:0),"verified 간 + \(suffix) automatically replays the full known RKS K interval: actual=\(text), plan=\(p.plan?.replayRoman ?? "nil"), rollback=\(p.rollbackReason)")

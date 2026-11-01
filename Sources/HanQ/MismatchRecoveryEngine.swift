@@ -50,7 +50,7 @@ final class MismatchRecoveryEngine:NSObject {
     func switchTarget(to next:NSRunningApplication?){
         guard next?.processIdentifier != target?.processIdentifier else{return}
         if recovering{park("frontmost_app_changed")}
-        recoveryEpoch+=1;plan=nil;planElement=nil;locked=nil;lastText=nil;heldKeys=[]
+        recoveryEpoch+=1;plan=nil;planElement=nil;locked=nil;lastText=nil;heldKeys=[];resetCompositionObservation()
         activationPID=NSWorkspace.shared.frontmostApplication?.processIdentifier
         target=next;ax=next.map{AXUIElementCreateApplication($0.processIdentifier)}
         if let ax{AXUIElementSetMessagingTimeout(ax,0.05)}
@@ -148,6 +148,14 @@ final class MismatchRecoveryEngine:NSObject {
     var plan:MismatchRecoveryPlan?
     var planElement:AXUIElement?
     var planStart=0.0
+    private struct CompositionObservation {
+        let revision:Int
+        let plan:MismatchRecoveryPlan
+        let snapshot:MismatchSnapshot
+        let began:Double
+    }
+    private var compositionObservation:CompositionObservation?
+    private var compositionWaitState=0
     var verifiedDeliveryHistory:((MismatchSnapshot,Bool)->(plan:MismatchRecoveryPlan,lastKeyAt:Double)?)?
     var recovering=false
     var pending:[CGEvent]=[]
@@ -440,7 +448,7 @@ final class MismatchRecoveryEngine:NSObject {
     func sourceChanged(_ now:String,_ snap:MismatchSnapshot){
         guard now != lastSource else{return}
         let previous=lastSource;lastSource=now;log("source_change",["from":previous,"to":now])
-        plan=nil
+        plan=nil;resetCompositionObservation()
         if previous.hasPrefix("com.apple.keylayout."){englishID=previous}
 
     }
@@ -468,6 +476,7 @@ final class MismatchRecoveryEngine:NSObject {
                 incidentTrace.sourceEvidence(.rejected,evidence.diagnostic(selected:source),event:event)
             }
             if evidence.deferredSource(for:source) != nil {
+                resetCompositionObservation()
                 if plan != nil {deferredCandidateEpoch=evidence.epoch}
                 if source.hasPrefix("com.apple.keylayout."){incidentTrace.decision(site,.romanSource,event:event)}
                 // Keep only verified history/candidates. New physical keys are
@@ -486,6 +495,7 @@ final class MismatchRecoveryEngine:NSObject {
             }
         }
         guard source.hasPrefix("com.apple.keylayout.") else{return false}
+        resetCompositionObservation()
         incidentTrace.decision(site,.romanSource,event:event)
         plan=nil;planElement=nil;lastSampleSnapshot=nil
         lastSource=source;englishID=source
@@ -676,7 +686,7 @@ final class MismatchRecoveryEngine:NSObject {
         // preservation/safety gate before it can clear a deferred candidate.
         if enabled,!suspended,!recovering,skipRomanObservation(){return}
         observeAvailability(observed)
-        guard let snap=observed else{incidentTrace.decision(.sample,.snapshotUnavailable);return}
+        guard let snap=observed else{resetCompositionObservation();incidentTrace.decision(.sample,.snapshotUnavailable);return}
         lastSampleSnapshot=snap
         sourceChanged(currentSource(),snap)
         if incidentTrace.enabled {
@@ -694,7 +704,7 @@ final class MismatchRecoveryEngine:NSObject {
             NSLog("입력 불일치 전달 이력 인계")
         }
         if !InputFocusAccess.sameText(lastText,snap.text){log("text",["text":snap.text,"source":InputSourceAccess.currentID(),"selection":[snap.selection.location,snap.selection.length]]);lastText=snap.text}
-        guard let candidate=plan else{incidentTrace.decision(.sample,.noCandidate);return}
+        guard let candidate=plan else{resetCompositionObservation();incidentTrace.decision(.sample,.noCandidate);return}
         if ProcessInfo.processInfo.systemUptime-planStart>5{incidentTrace.decision(.sample,.candidateExpired);log("candidate_cancelled",["reason":"timeout"]);plan=nil;return}
         let verified:MismatchRecoveryPlan?
         let detectionReason:InputIncidentTrace.RecoveryReason
@@ -711,14 +721,35 @@ final class MismatchRecoveryEngine:NSObject {
             }
         }else{verified=nil;detectionReason = .unspecifiedMismatch}
         if let verified {
-            if candidate.interruptedCompositionPlan(text:snap.text,selection:snap.selection) != nil {
+            if detectionReason == .interruptedComposition {
+                // An exact partial rendering alone does not prove that the
+                // current composition is finished. Observe through release and
+                // one unchanged existing poll before taking edit ownership.
+                guard compositionHasSettled(candidate,snap) else{return}
                 NSLog("입력 불일치 후속 조합 복구 확인")
-            }
-            // Exact text/range + the observed physical sequence establishes the
-            // mismatch. Do not wait for all keys to be released: their up events
-            // are preserved in the same ordered queue as subsequent down events.
+            }else{resetCompositionObservation()}
             if detectionOnly{reportMismatch(verified,snap)}else{beginRecovery(verified,snap,reason:detectionReason)}
-        }else{incidentTrace.decision(.sample,.candidateTextMismatch)}
+        }else{resetCompositionObservation();incidentTrace.decision(.sample,.candidateTextMismatch)}
+    }
+    private func resetCompositionObservation(){compositionObservation=nil;compositionWaitState=0}
+    private func compositionHasSettled(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot)->Bool {
+        func wait(_ state:Int){
+            if compositionWaitState != state {
+                compositionWaitState=state
+                log(state==1 ? "composition_key_release_wait":"composition_settlement_wait")
+            }
+        }
+        guard heldKeys.isEmpty else{compositionObservation=nil;wait(1);return false}
+        let now=ProcessInfo.processInfo.systemUptime
+        if let prior=compositionObservation,prior.revision==detectionRevision,
+           prior.plan.sourceID==candidate.sourceID,prior.plan.before==candidate.before,prior.plan.caret==candidate.caret,
+           prior.plan.codes.elementsEqual(candidate.codes,by:{$0.0==$1.0 && $0.1==$1.1}),
+           CFEqual(prior.snapshot.element,snap.element),prior.snapshot.text==snap.text,prior.snapshot.selection==snap.selection {
+            guard now-prior.began>=0.02 else{return false}
+            resetCompositionObservation();log("composition_settled");return true
+        }
+        compositionObservation=CompositionObservation(revision:detectionRevision,plan:candidate,snapshot:snap,began:now)
+        wait(2);return false
     }
     func beginRecovery(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot,reason:InputIncidentTrace.RecoveryReason = .unspecifiedMismatch){
         guard canBeginRepair() else{incidentTrace.decision(.repair,.repairBlocked);return}
@@ -737,7 +768,7 @@ final class MismatchRecoveryEngine:NSObject {
         willBeginRepair()
         recovering=true;rollingBack=false;replayStarted=false;currentPlan=candidate;plan=nil;pending=[];nextBufferedID=0;postedBuffered=0
         rollbackCaretObservedAt=nil;rollbackFirstEditDelivered=false
-        deliveredHeldKeys=heldKeys
+        deliveredHeldKeys=heldKeys;resetCompositionObservation()
         intendedSource=recoverySourceID;recoverySourceBoundaries=[];pendingSources=[:];pendingTimestamps=[:];bufferedIdentities=[:];keyDownSources=Dictionary(uniqueKeysWithValues:heldKeys.map{($0,recoverySourceID)})
         clearSourceInteraction();systemSwitch.reset(currentSource());lastIntendedKorean=recoverySourceID
         koreanRetries=0;activationFallbackTried=false;interruptedSourceRestores=0;ledger=nil;ledgerAfterRepair=nil;snapshotWaitStarted=nil
@@ -1171,7 +1202,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard recovering,rollingBack==rollback else{return}
         if sourceWorkPaused{deferRecovery{[weak self] in self?.drain(rollback:rollback)};return}
         if !pending.isEmpty || queuedSelectAll || currentSource() != intendedSource{drain(rollback:rollback,verifiedSnapshot:verifiedSnapshot);return}
-        recoveryEpoch+=1;recovering=false;rollingBack=false;currentPlan=nil;lastSource=currentSource();heldKeys=[];deliveredHeldKeys=[];queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
+        recoveryEpoch+=1;recovering=false;rollingBack=false;currentPlan=nil;lastSource=currentSource();heldKeys=[];deliveredHeldKeys=[];resetCompositionObservation();queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
         if !rollback,let ledger,let snap=verifiedSnapshot {
             if currentSource()==mismatchKoreanID,ledger.text==snap.text,ledger.selection==snap.selection,
                let continuation=ledger.lastTwoSetPlan() {
@@ -1240,7 +1271,7 @@ final class MismatchRecoveryEngine:NSObject {
         retained.append(contentsOf:pending);pending=[]
         suspended=true
         didRetainInput()
-        recovering=false;rollingBack=false;plan=nil;planElement=nil;currentPlan=nil;heldKeys=[];deliveredHeldKeys=[];queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
+        recovering=false;rollingBack=false;plan=nil;planElement=nil;currentPlan=nil;heldKeys=[];deliveredHeldKeys=[];resetCompositionObservation();queuedSelectAll=false;queuedSelectAllText=nil;selectAllReleases=0
         log("monitor_suspended")
 
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
@@ -1274,7 +1305,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard let app,app.processIdentifier != ProcessInfo.processInfo.processIdentifier else{return false}
         return !app.isTerminated
     }
-    func cancelDetection(){detectionRevision+=1;plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[]}
+    func cancelDetection(){detectionRevision+=1;plan=nil;planElement=nil;lastSampleSnapshot=nil;heldKeys=[];resetCompositionObservation()}
     static func failureReasonCode(_ reason:String)->Int {
         // Only ordinal codes from fixed product reasons, never arbitrary strings.
         // Keep retired reason slots stable for existing diagnostic codes.
@@ -1295,7 +1326,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         // Deliberately never evaluate fields: they can contain typed text, keys,
         // editor identifiers or clipboard content copied from the experiment.
-        if ["key_received","candidate_recorded","candidate_cancelled","field_changed","source_change","observation_blocked","user_source_boundary","mismatch_confirmed","korean_result_verified","recovery_finished","pending_retained","rollback_finished","start_failed","caps_source_wait","caps_source_confirmed","caps_source_unchanged","source_menu_paused","source_work_resumed","cycle_english","cycle_korean","selection_requested","replay_started"].contains(kind) {
+        if ["key_received","candidate_recorded","candidate_cancelled","field_changed","source_change","observation_blocked","user_source_boundary","mismatch_confirmed","korean_result_verified","recovery_finished","pending_retained","rollback_finished","start_failed","caps_source_wait","caps_source_confirmed","caps_source_unchanged","source_menu_paused","source_work_resumed","cycle_english","cycle_korean","selection_requested","replay_started","composition_key_release_wait","composition_settlement_wait","composition_settled"].contains(kind) {
             InputDiagnostics.shared.record("mismatch."+kind)
         }
     }

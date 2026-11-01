@@ -13,6 +13,8 @@ guard CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:false) != nil else{
 let app=NSApplication.shared;let owner=MismatchRecoveryEngine(detectionOnly: ProcessInfo.processInfo.arguments.contains("--detect-only"));app.setActivationPolicy(.regular)
 if ProcessInfo.processInfo.arguments.contains("--test-recovery-start") {
     runRecoveryStartTests()
+} else if ProcessInfo.processInfo.arguments.contains("--test-composition-settlement") {
+    runCompositionSettlementTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-rollback-boundary") {
     runRollbackBoundaryTests()
 } else if ProcessInfo.processInfo.arguments.contains("--test-replay-acknowledgment") {

@@ -71,6 +71,13 @@ for kind in ["live","committed","ascii","detached","delayed-detached","switch","
  }
  f.sample("post-consonant")
  let failure=["ascii","delayed-detached"].contains(kind)
+ if failure && f.engine.detectionCount==0 {
+  // A complete interrupted rendering is now observed through the final key
+  // release and the controller's next stable idle poll before detection.
+  f.event(positions[kind=="delayed-detached" ? "o":"e"]!,down:false)
+  f.sample("released-consonant")
+  RunLoop.current.run(until:Date().addingTimeInterval(0.025));f.sample("settled-consonant")
+ }
  check(f.engine.detectionCount==(failure ? 1:0),"\(kind): only proved ASCII/detached failure is repaired")
  if !failure {
   check(f.barrier.expected?.0==f.text && f.barrier.expected?.1==f.range,"\(kind): exact body/caret history remains switchable")
@@ -85,6 +92,10 @@ for kind in ["live","committed","ascii","detached","delayed-detached","switch","
    f.event(positions["o"]!)
    f.text=kind=="detached" ? "sample 달제시ㄷㅐ":"sample 달제시대"
    f.sample("post-vowel")
+   if kind=="detached",f.engine.detectionCount==0 {
+    f.event(positions["o"]!,down:false);f.sample("released-vowel")
+    RunLoop.current.run(until:Date().addingTimeInterval(0.025));f.sample("settled-vowel")
+   }
    check(f.engine.detectionCount==(kind=="detached" ? 1:0),"\(kind): normal next syllable preserved, actual detached vowel still repaired")
    if kind=="repeat-delete" {
     f.event(positions["o"]!,down:false);f.event(51);f.text="sample 달제시ㄷ";f.event(51,down:false)
@@ -116,6 +127,8 @@ let vowel=Fixture()
 for c in "rksr" {vowel.press(c)}
 vowel.event(51);vowel.codes.removeLast();vowel.text="sample 간";vowel.sample("deleted");vowel.event(51,down:false)
 vowel.event(positions["k"]!);vowel.text="sample 간ㅏ";vowel.sample("failed-vowel")
+vowel.event(positions["k"]!,down:false);vowel.sample("released-failed-vowel")
+RunLoop.current.run(until:Date().addingTimeInterval(0.025));vowel.sample("settled-failed-vowel")
 check(vowel.engine.detectionCount==1,"post-delete vowel-only failure still starts full engine detection")
 check(vowel.forbiddenSideEffects==0,"vowel failure has no real effects")
 
