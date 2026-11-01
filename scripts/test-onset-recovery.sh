@@ -115,8 +115,8 @@ swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -m
 hanq_test_run "$stage/focus-handoff-diagnostics" --diagnose-input "$stage/focus-off.log"
 hanq_test_run "$stage/focus-handoff-diagnostics" --trace-onset-focus --diagnose-input "$stage/focus-on.log"
 
-# Identity-independent editor observation and first publication.
-for group in EditorSearch StructurePublication; do
+# Identity-independent observation and one preselected native committed edit.
+for group in EditorSearch StructurePublication CommittedUnicode; do
     swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift "Tests/OnsetRecovery/$group/main.swift" -o "$stage/$group"
     hanq_test_run "$stage/$group"
 done

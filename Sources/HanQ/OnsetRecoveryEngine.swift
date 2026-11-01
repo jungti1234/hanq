@@ -500,6 +500,10 @@ final class OnsetRecoveryEngine:NSObject {
     var testCanSelect:(()->Bool)?
     var testCanReplaceText:(()->Bool)?
     var testTargetBundleID:(()->String?)?
+    var committedNativeIssued=false
+    var committedCaretObservedAt:Double?
+    var testSelectedText:((AXUIElement)->String?)?
+    var testPostCommittedUnicode:((AXUIElement,[CGEvent])->Bool)?
     var testReplaceText:((AXUIElement,String)->AXError)?
     var testOriginalSnapshot:((AXUIElement)->OnsetSnapshot?)?
     var testSetRange:((AXUIElement,NSRange)->AXError)?
@@ -782,6 +786,7 @@ final class OnsetRecoveryEngine:NSObject {
 
     func beginRecovery(_ candidate:OnsetRecoveryPlan,_ snap:OnsetSnapshot,deferred:OnsetInputGate.Reservation?=nil,passed:OnsetInputGate.PassedInput?=nil){
         guard canBeginRepair() else{onset.cancel();emergencyStop("manual_edit_busy");return}
+        committedNativeIssued=false
         if candidate.isObservedReplay {
             guard let passed,passed.pressed.isEmpty,passed.keys.count==candidate.codes.count,
                   zip(passed.keys,candidate.codes).allSatisfy({$0.0==$0.1}),
@@ -816,7 +821,7 @@ final class OnsetRecoveryEngine:NSObject {
             if skipSupersededRepair(candidate,current){return}
             abort("pre_edit_mismatch");return
         }
-        if candidate.supportsReplay {
+        if candidate.supportsReplay || (candidate.isCommittedLate && testReplaceText==nil) {
             commitConsonantComposition(candidate,current)
             return
         }
@@ -880,6 +885,11 @@ final class OnsetRecoveryEngine:NSObject {
             }
             if remaining>0{scheduleRecovery(0.002){[weak self] in self?.awaitSelection(candidate,before,range,remaining:remaining-1)}}
             else{abort("selection_not_applied")}
+            return
+        }
+        if candidate.isCommittedLate,testReplaceText==nil,committedSelectedText(selected.element) != candidate.roman {
+            guard remaining>0,ProcessInfo.processInfo.systemUptime-selectionRequestAt<0.12 else{cancelCommittedSelection(candidate);return}
+            scheduleRecovery(0.002){[weak self] in self?.awaitSelection(candidate,before,range,remaining:remaining-1)}
             return
         }
         log("selected_replacement_started")

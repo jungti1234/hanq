@@ -58,7 +58,7 @@ extension OnsetRecoveryEngine {
             guard CFEqual(current.element,before.element),current.text==before.text else {
                 park("composition_commit_context_changed");return
             }
-            let expectedCaret=NSRange(location:candidate.isObservedReplay ? before.selection.location-1:candidate.caret,length:0)
+            let expectedCaret=NSRange(location:(candidate.isObservedReplay || candidate.isCommittedLate) ? before.selection.location-1:candidate.caret,length:0)
             if current.selection==expectedCaret {
                 if candidate.isObservedReplay{replayCommitCaret=expectedCaret}
                 log("composition_commit_confirmed")

@@ -2,12 +2,17 @@ import AppKit
 import Carbon
 
 extension OnsetRecoveryEngine {
-    // A completed late word is already committed input. Replace it through the
-    // original AX element, never by queuing physical keys to the current focus.
+    // One preselected native replacement strategy for committed words. A
+    // provider's advertised AX text setter is not used as a delivery proof.
     func canReplaceCommittedText(_ field:AXUIElement)->Bool {
         if let testCanReplaceText{return testCanReplaceText()}
+        guard AXIsProcessTrusted(),!IsSecureEventInputEnabled(),CGPreflightPostEventAccess() else{return false}
         var writable:DarwinBoolean=false
-        return AXUIElementIsAttributeSettable(field,kAXSelectedTextAttribute as CFString,&writable) == .success && writable.boolValue
+        return AXUIElementIsAttributeSettable(field,kAXSelectedTextRangeAttribute as CFString,&writable) == .success && writable.boolValue
+    }
+    func committedSelectedText(_ field:AXUIElement)->String? {
+        if let testSelectedText{return testSelectedText(field)}
+        return attr(field,kAXSelectedTextAttribute) as? String
     }
     func originalSnapshot(_ field:AXUIElement)->OnsetSnapshot? {
         if let testOriginalSnapshot{return testOriginalSnapshot(field)}
@@ -41,12 +46,12 @@ extension OnsetRecoveryEngine {
         guard let field=planElement,let snap=originalSnapshot(field),
               snap.text==candidate.expected else{park("committed_cancel_unverified");return}
         let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
-        if snap.selection==caret{log("committed_replacement_cancelled");finishCommittedReplacement(snap);return}
-        guard snap.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{park("committed_cancel_unverified");return}
+        if snap.selection==caret,testReplaceText != nil{log("committed_replacement_cancelled");finishCommittedReplacement(snap);return}
+        guard snap.selection==caret || snap.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{park("committed_cancel_unverified");return}
         // A successful range setter is not an acknowledgment. Issue cleanup
         // once, then wait for the original element's actual caret within the
         // existing input hold. Never repeat the uncertain text operation.
-        committedCaretRestoring=true;committedReplacementAwaiting=true
+        committedCaretRestoring=true;committedReplacementAwaiting=true;committedCaretObservedAt=nil
         committedCaretRestoreDeadline=ProcessInfo.processInfo.systemUptime+0.12
         guard restoreCommittedCaret(candidate,snap) else{park("committed_cancel_unverified");return}
         verifyCommittedCaretRestoration()
@@ -58,10 +63,19 @@ extension OnsetRecoveryEngine {
         if let restored=originalSnapshot(field){
             guard restored.text==candidate.expected else{park("committed_result_changed");return}
             let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
-            if restored.selection==caret{
-                log("committed_replacement_cancelled");finishCommittedReplacement(restored);return
+            if restored.selection==caret {
+                if testReplaceText != nil {log("committed_replacement_cancelled");finishCommittedReplacement(restored);return}
+                let now=ProcessInfo.processInfo.systemUptime
+                if committedSelectedText(field)?.isEmpty == true {
+                    if let observed=committedCaretObservedAt,now-observed>=0.02 {
+                        log("committed_replacement_cancelled");finishCommittedReplacement(restored);return
+                    }
+                    if committedCaretObservedAt==nil{committedCaretObservedAt=now}
+                }else{committedCaretObservedAt=nil}
+            }else{
+                committedCaretObservedAt=nil
+                guard restored.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{park("committed_cancel_unverified");return}
             }
-            guard restored.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{park("committed_cancel_unverified");return}
         }
         guard ProcessInfo.processInfo.systemUptime<committedCaretRestoreDeadline else{park("committed_cancel_unverified");return}
         scheduleRecovery(0.002){[weak self] in self?.verifyCommittedCaretRestoration()}
@@ -71,13 +85,13 @@ extension OnsetRecoveryEngine {
               gate?.healthy() ?? true,currentSource()==repairSourceID,
               let live=snapshot(),CFEqual(live.element,selected.element),live.text==candidate.expected,
               live.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{cancelCommittedSelection(candidate);return}
-        // One request only, including when AX returns an ambiguous error. Read
+        // One request only, including when delivery is uncertain. Read
         // the original target to confirm; never retry the edit or replay keys.
         replayStarted=true;committedReplacementAwaiting=true
         committedReplacementDeadline=ProcessInfo.processInfo.systemUptime+0.15
         let result:AXError
         if let testReplaceText{result=testReplaceText(live.element,replacement)}
-        else{result=AXUIElementSetAttributeValue(live.element,kAXSelectedTextAttribute as CFString,replacement as CFString)}
+        else{result=postCommittedUnicode(replacement,live.element) ? .success:.failure}
         log(result == .success ? "committed_replacement_requested":"committed_replacement_result_uncertain")
         verifyCommittedReplacement()
     }
@@ -94,6 +108,9 @@ extension OnsetRecoveryEngine {
             }
             if snap.text != candidate.expected{park("committed_result_changed");return}
             if now>=committedReplacementDeadline {
+                // Posted input may still be pending in the target. Selection
+                // cleanup and release of later originals would race that edit.
+                if committedNativeIssued{park("committed_native_unconfirmed");return}
                 beginCommittedCaretRestoration(candidate);return
             }
         }

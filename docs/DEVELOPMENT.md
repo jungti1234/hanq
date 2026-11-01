@@ -303,7 +303,7 @@ KeyboardStateMirror는 소비한 키를 별도 표식의 새 상태 전용 이�
 
 `OnsetEditorSearch.swift`는 문서가 두 검색 속성을 모두 광고한 경우에만 제한된 입력칸 검색을 수행한다. `AXUIElementCountForSearchPredicate`와 `AXUIElementsForSearchPredicate`는 [Chromium의 WebKit 호환 확장 구현](https://chromium.googlesource.com/chromium/src.git/+/f3dc2485fff2fc4ff77cc167dd875c2c658b63ce/ui/accessibility/platform/browser_accessibility_cocoa.mm)에 근거한 선택 기능이며 모든 AX 제공자에 보장된 공개 API로 가정하지 않는다. 앱·URL별 허용 목록은 없다. `EditorSearch` 검사는 지원/오류/잘못된 결과·시간 상한·복수 요소·다른 창·숨김·네이티브 입력칸을 대조한다. 반환 요소의 일반 검증과 전체 창의 유일성 판단은 분리한다.
 
-`OnsetLateSequenceDetector.swift`는 다섯 한국어 입력기의 배열별 통과 이력과 본문·커서의 정확 일치를 검사하고, `OnsetCommittedReplacement.swift`는 공백으로 확정된 입력만 원래 AX 요소에서 한 번 치환한다. 쓰기 미지원·실제 대상 변경·소스 변경·추가 입력 경합에서는 편집을 강행하지 않는다. 보정 전 미확인 입력의 통과, 전송별 확인 기한, 일시 조회 실패, 재개 상태·기준 갱신과 확인된 빈 전달의 비동기 완료를 각각 회귀 검사한다. 접두부 직후 비동기로 추가되는 100개 입력의 개수·순서 검사는 유지한다.
+`OnsetCommittedReplacement.swift`와 `OnsetCommittedUnicode.swift`는 확정 단어에 한 가지 전략만 선택한다. 조합 확정·정확한 선택 문자열을 확인한 뒤 원래 프로세스로 Unicode 한 쌍을 보내고 전체 본문·커서로 반영을 확인한다. `CommittedUnicode` 검사는 선택 지연·미반영·늦은 반영·전송 불확실·문맥 변경과 선택 취소 시 후속 키 보존을 검사한다. 기존 `testReplaceText` 대역은 추상 교체 상태기의 회귀이며 실제 Unicode/IME 검증으로 세지 않는다. 실제 앱 시험에서는 권한 확인 후 별도 입력칸에서 정상 조합, 기존 본문 뒤 입력, Space 없는 분리 복구와 Space 후 확정 보정을 구분한다. 대역 성공은 실제 앱·물리 키의 성공을 대신하지 않는다.
 
 마지막 키가 Shift 없는 Space이면 확정 단어 경로를 먼저 판정한다. 그 앞의 분리 문자열만 보고 통과 이력 재입력으로 인수하지 않는다. 이미 포커스된 빈 입력칸과 알려진 기존 본문에서도 이 경계를 확인하며, Space 없는 분리는 원래 키 재입력 조건을 유지한다.
 
