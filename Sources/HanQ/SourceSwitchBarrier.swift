@@ -367,7 +367,18 @@ final class SourceSwitchBarrier {
         priorKeyLedger=nil;lastKeyAt=now();historyStarted=MismatchRecoveryEngine.sourceEventTime()
         trace("repair_history_adopted")
     }
+    /// The onset engine reports its own successful posts synchronously. A
+    /// newly created CGEvent still has timestamp zero here; Quartz stamps the
+    /// delivered copy later. Use the post observation time for history only,
+    /// without changing the event or inventing receipt by the editor.
+    func observePostedOnsetEvent(_ event:CGEvent) {
+        let timestamp=event.timestamp>0 ? event.timestamp:MismatchRecoveryEngine.sourceEventTime()
+        observe(event.type,event,historyTimestamp:timestamp)
+    }
     func observe(_ type:CGEventType,_ event:CGEvent) {
+        observe(type,event,historyTimestamp:event.timestamp)
+    }
+    private func observe(_ type:CGEventType,_ event:CGEvent,historyTimestamp:CGEventTimestamp) {
         sourceEvidence?.observeInteraction(type,event)
         let heldCode=event.getIntegerValueField(.keyboardEventKeycode)
         if type == .keyDown {deliveredHeld.insert(heldCode)}
@@ -430,7 +441,7 @@ final class SourceSwitchBarrier {
         // new (empty) source interval. Timestamp its first accepted key rather
         // than treating the old ledger as an already initialized new interval.
         if ledger?.segments.last?.source != id || ledger?.segments.last?.keys.isEmpty == true {
-            historyStarted=event.timestamp
+            historyStarted=historyTimestamp
         }
         priorKeyLedger=ledger;priorKeyAt=lastKeyAt;lastKeyAt=now()
         ledger?.append(source:id,keys:[(code,event.flags.contains(.maskShift))])

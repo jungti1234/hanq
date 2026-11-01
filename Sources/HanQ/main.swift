@@ -26,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.sourceSwitchBarrier.beginOnsetReplay(field:field,before:text,caret:caret)
         }
         controller.didPostReplayEvent = { [weak self] event in
-            self?.sourceSwitchBarrier.observe(event.type,event)
+            self?.sourceSwitchBarrier.observePostedOnsetEvent(event)
         }
         controller.didProcessPhysicalKey = { [weak self] event,passed in
             self?.sourceSwitchBarrier.confirmOnsetDelivery(event,passed:passed)

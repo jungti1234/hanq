@@ -1,5 +1,7 @@
 import AppKit
 import Carbon
+// Exercise the same posted-event observation wired by AppDelegate.
+runPostedOnsetHistoryTests()
 var checks=0
 func check(_ value:Bool,_ label:String){checks+=1;if !value{fputs("FAIL: "+label+"\n",stderr);exit(1)}}
 func key(_ code:CGKeyCode,_ flags:CGEventFlags=[])->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!;e.flags=flags;return e}
