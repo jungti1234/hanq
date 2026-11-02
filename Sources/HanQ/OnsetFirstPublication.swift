@@ -20,35 +20,35 @@ extension OnsetRecoveryEngine {
     @discardableResult
     func observeFirstPublication(_ passed:OnsetInputGate.PassedInput,_ snap:OnsetSnapshot)->Bool {
         let first=passed.first
-        guard firstPublication==nil,firstPublicationAttemptedTime != first.time,
-              canBeginRepair(),currentSource()==first.sourceID,
-              let previous=focusHandoff.representedEntry(for:snap.element,before:first.time) else{return false}
+        guard firstPublication==nil,firstPublicationAttemptedTime != first.time else{return false}
+        func decision(_ reason:InputIncidentTrace.OnsetReason){decisionTrace.onsetDecision(.publication,reason,firstTime:first.time,keys:passed.keys.count)}
+        guard canBeginRepair() else{decision(.publicationBlocked);return false}
+        guard currentSource()==first.sourceID else{decision(.sourceChanged);return false}
+        guard let witness=focusHandoff.representationWitness(for:snap.element,before:first.time) else{decision(.representationMissing);return false}
+        let previous=witness.snapshot
         // The provider may still be publishing the original display. Waiting
         // never holds a key, treats a label as empty, or writes to the editor.
-        guard !InputFocusAccess.literalTextEqual(previous.text,snap.text) else{return false}
+        guard !InputFocusAccess.literalTextEqual(previous.text,snap.text) else{decision(.representationUnchanged);return false}
         let time=ProcessInfo.processInfo.systemUptime
-        guard time>=first.time,time-first.time<0.15,
-              (1...2).contains(passed.keys.count),
-              passed.keys[0].0==first.code,passed.keys[0].1==first.shift,
-              let layout=currentLayout() else{firstPublicationAttemptedTime=first.time;return false}
+        guard time>=first.time,time-first.time<0.15 else{firstPublicationAttemptedTime=first.time;decision(.publicationDeadline);return false}
+        guard (1...2).contains(passed.keys.count),passed.keys[0].0==first.code,passed.keys[0].1==first.shift else{firstPublicationAttemptedTime=first.time;decision(.historySize);return false}
+        guard let layout=currentLayout() else{firstPublicationAttemptedTime=first.time;decision(.layoutUnavailable);return false}
         let firstOnly=snap.text.utf16.count==1 && snap.selection==NSRange(location:1,length:0)
             && layout.variants(code:first.code,shift:first.shift).contains(snap.text)
         // AX can publish the first character after both original keys passed.
         // This exact prefix only permits observation within the original limit;
         // it neither creates a replay proof nor holds any following input.
-        if passed.keys.count==2,firstOnly{return true}
+        if passed.keys.count==2,firstOnly{decision(.partialPrefixWaiting);return true}
         firstPublicationAttemptedTime=first.time
         if passed.keys.count==1 {
-            guard firstOnly else{return false}
+            guard firstOnly else{decision(.firstBodyMismatch);return false}
         }else{
             guard case .candidate(let proof)=OnsetLateSequenceDetector.inspect(keys:passed.keys,before:"",caret:0,
                 text:snap.text,selection:snap.selection,sourceID:first.sourceID,allowObservedReplay:true),
-                proof.isObservedReplay else{return false}
+                proof.isObservedReplay else{decision(.firstBodyMismatch);return false}
         }
-        let observer=focusHandoff,field=snap.element
-        firstPublication=OnsetFirstPublication(first:first,field:field,isCurrent:{
-            observer.representedEntry(for:field,before:first.time) != nil
-        })
+        firstPublication=OnsetFirstPublication(first:first,field:snap.element,isCurrent:witness.isCurrent)
+        decision(.publicationObserved)
         log("first_publication_observed")
         return false
     }

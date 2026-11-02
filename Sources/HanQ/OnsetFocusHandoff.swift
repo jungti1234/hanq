@@ -21,6 +21,7 @@ final class OnsetFocusHandoff {
     var sceneEditorCount:Int{editors}
     private var emptyEntries:[(field:AXUIElement,window:AXUIElement,time:Double)]=[]
     private var representedEntries:[(snapshot:OnsetSnapshot,window:AXUIElement,time:Double)]=[]
+    private var representationEpoch:UInt64=0
     private var draftEntries:[(snapshot:OnsetSnapshot,window:AXUIElement,time:Double)]=[]
     // A recently observed editor is only a search hint. Pointer/shortcut input
     // still clears every proof; this reference can authorize no write.
@@ -41,7 +42,7 @@ final class OnsetFocusHandoff {
         return proof.snapshot
     }
     // Pointer/shortcut input invalidates both empty and existing-body evidence.
-    func invalidateEmptyEntries(){emptyEntries=[];draftEntries=[];representedEntries=[]}
+    func invalidateEmptyEntries(){emptyEntries=[];draftEntries=[];representedEntries=[];representationEpoch &+= 1}
     private var nextRefresh=0.0
     var sceneCacheEnabled=false
     private var queue:[(AXUIElement,Int)]=[]
@@ -251,9 +252,24 @@ final class OnsetFocusHandoff {
     }
     // This is a prior displayed value, not an empty-body or focus proof.
     func representedEntry(for field:AXUIElement,before time:Double)->OnsetSnapshot? {
+        representationWitness(for:field,before:time)?.snapshot
+    }
+    struct RepresentationWitness {
+        let snapshot:OnsetSnapshot
+        let isCurrent:()->Bool
+    }
+    // Once an exact first publication has been witnessed, the pre-key display
+    // cache's 1.1s expiry must not revoke it mid-word. This frozen witness keeps
+    // the original 2s input-history limit, context checks and explicit invalidation.
+    func representationWitness(for field:AXUIElement,before time:Double)->RepresentationWitness? {
         guard let entry=representedEntries.last(where:{CFEqual($0.snapshot.element,field) && $0.time<time && time-$0.time<=0.75}),
               now()>=entry.time,now()-entry.time<=1.1,currentContext(field,window:entry.window) else{return nil}
-        return entry.snapshot
+        let epoch=representationEpoch,window=entry.window
+        return RepresentationWitness(snapshot:entry.snapshot,isCurrent:{[weak self] in
+            guard let self,self.representationEpoch==epoch,
+                  self.now()>=time,self.now()-time<2 else{return false}
+            return self.currentContext(field,window:window)
+        })
     }
     func currentContext(_ field:AXUIElement,window:AXUIElement)->Bool {
         guard ready(),let pid=frontPID(),owner(field)==pid,owner(window)==pid,

@@ -20,6 +20,7 @@ func capture(_ id: Int, _ phase: Int, runID: String? = nil, trigger: Int? = nil)
         ["kind": 11, "category": 0, "controlEvidence": ["runtime": 3, "incomingFlags": 7]],
         ["kind": 6, "category": 1], ["kind": 6, "category": 5],
         ["kind": 7, "category": 8], ["kind": 10, "edge": 2, "sourceEvidence": ["selected": 1, "confirmed": 1, "target": 6]], ["kind": 8, "category": 10], ["kind": 8, "category": 999],
+        ["kind": 13, "edge": 2, "category": 12, "onsetEvidence": ["keys": 1, "firstKeyAgeMicros": 80000]],
         ["kind": 1, "workEvidence": ["cpuState": 3]],
         ["kind": 2, "category": 2, "durationMicros": 95000], ["kind": 999, "text": "SECRET_UNKNOWN"]]
     let object: [String: Any] = ["schema": 1, "build": "296", "runID": runID ?? run,
@@ -60,7 +61,7 @@ for file in rawFiles {
 check(try files.last!.data == Data(contentsOf: snapshotURL.appendingPathComponent("storage-status.json")), "storage status keeps exact writer-snapshot bytes")
 let rawObject = try JSONSerialization.jsonObject(with: before.data) as! [String: Any]
 let rawFrames = rawObject["frames"] as! [[String: Any]]
-check(rawObject["runID"] as? String == run && rawFrames.count == 11, "raw run identity and every frame survive")
+check(rawObject["runID"] as? String == run && rawFrames.count == 12, "raw run identity and every frame survive")
 check(rawFrames.last?["kind"] as? Int == 999 && rawFrames.last?["text"] as? String == "SECRET_UNKNOWN", "unknown raw fields and synthetic sentinel values are not silently projected away")
 check((rawFrames[0]["eventEvidence"] as? [String: Any])?["timestampMicros"] as? Int == 123456789, "original event timing survives export")
 check(before.readableText == before.previewDocument?.readableText, "screen interpretation stays separate from original bytes")
@@ -235,3 +236,5 @@ check(spacePreview.incidents[0].title=="공백 처리 관측" && !spacePreview.i
 let spaceText=spacePreview.incidents[0].documents[0]!.readableText
 check(spaceText.contains("공백 소비·보관 단서") && spaceText.contains("원인을 확정하지 않습니다"),"review distinguishes intervention evidence from root cause")
 print("PASS: diagnostic review \(checks) checks (selection, original bytes, parsed preview, ZIP integrity, failure preservation)")
+
+check(text.contains("첫 글자 반영 확인"), "fixed onset decision is readable in the review")

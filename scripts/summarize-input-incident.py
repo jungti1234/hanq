@@ -70,6 +70,9 @@ def describe_ax(value):
                 document_truth='unverified_AX_provider_only')
 
 
+ONSET_SITES={1:'reservation',2:'publication',3:'history',4:'claim'}
+ONSET_REASONS=dict(enumerate(['baseline_missing','baseline_available','publication_blocked','source_changed','representation_missing','representation_unchanged','publication_deadline','history_size','layout_unavailable','first_body_mismatch','partial_prefix_waiting','publication_observed','proof_current','proof_unavailable','history_waiting','history_complete','history_rejected','history_candidate','keys_still_down','claim_rejected','claim_accepted','guard_failed','field_changed','reservation_released','selection_not_writable'],start=1))
+
 SELECTION_MOTIONS={0:'unknown',1:'unchanged',2:'backward',3:'forward',4:'selection_started',5:'selection_collapsed',6:'selection_changed',7:'invalid_range'}
 
 def work_evidence(value):
@@ -318,8 +321,8 @@ def summarize(data):
                 except (ValueError,TypeError):raise ValueError('invalid observation code')
                 if str(code)!=key or not 0<=code<2560 or type(n) is not int or n<=0:raise ValueError('invalid observation code/count')
                 operation,rest=divmod(code,256);lane,detail=divmod(rest,32)
-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
-                if not valid or (group=='coalesced' and not (operation==3 or (operation==5 and lane==3 and detail>0))):raise ValueError('invalid observation detail')
+                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
+                if not valid or (group=='coalesced' and not (operation==3 or (operation==5 and ((lane==3 and detail>0) or (lane==2 and 17<=detail<=20))))):raise ValueError('invalid observation detail')
                 row=dict(operation=names[operation],lane=lanes[lane+1],detail=detail,count=n)
                 if operation==5 and lane<3 and 8<=detail<=12:row.update(control_role=CONTROL_ROLES[detail-8])
                 if operation==0:row.update(edge={1:'down',2:'up',3:'other'}[detail%4],consumed=detail>=4)
@@ -353,6 +356,7 @@ def summarize(data):
     shape_rows=[]
     key_rows=[]
     hud_rows=[]
+    onset_rows=[]
     work_rows=[]
     read_rows=[]
     focus_rows=[]
@@ -385,6 +389,12 @@ def summarize(data):
             if frame['kind'] not in [1,11] or frame['lane'] not in [1,2] or frame['event']<=0 or value['observedAtMicros']//1000!=frame['milliseconds']:raise ValueError('invalid event evidence frame')
             key_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],kind=frame['kind'],edge=frame['edge'],inputOrigin=frame['inputOrigin'],lane=lane,key_class_name=KEY_CLASSES[value['keyClass']],**value))
             key_rows[-1]['os_to_observation_us']=clock_origin+value['observedAtMicros']-value['timestampMicros'] if clock_origin is not None and value['timestampMicros']>0 else None
+        if frame['kind']==13 or 'onsetEvidence' in frame:
+            value=frame.get('onsetEvidence')
+            if set(frame)!=set(['sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','consumed','durationMicros','count','selected','field','observationTiming','onsetEvidence']) or any(type(frame.get(k)) is not int for k in ['sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','durationMicros','count','field']) or type(frame.get('consumed')) is not bool or type(frame.get('selected')) is not bool or frame['kind']!=13 or frame['lane']!=3 or frame['edge'] not in ONSET_SITES or frame['category'] not in ONSET_REASONS or not isinstance(value,dict) or set(value)-{'firstKeyAgeMicros'}!={'keys'} or type(value['keys']) is not int or not 0<=value['keys']<=16:raise ValueError('invalid onset decision')
+            if 'firstKeyAgeMicros' in value and (type(value['firstKeyAgeMicros']) is not int or not 0<=value['firstKeyAgeMicros']<=60_000_000):raise ValueError('invalid onset key age')
+            if not frame.get('observationTiming') or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False) or any(k in frame for k in ['decisionTiming','sourceEvidence','shapeEvidence','controlEvidence','eventEvidence','workEvidence','readOutcome','focusEvidence']):raise ValueError('invalid onset frame')
+            onset_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],site=ONSET_SITES[frame['edge']],reason=ONSET_REASONS[frame['category']],**value,interpretation='branch_evidence_only_not_IME_root_cause'))
         if frame['kind']==12:
             if any(type(frame[k]) is not int for k in ['lane','edge','category','event']) or frame['lane']!=2 or frame['edge'] not in HUD_STAGES or frame['category'] not in range(5) or frame['event']<0 or not frame.get('observationTiming') or any(frame.get(k,0)!=0 for k in ['inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False) or any(k in frame for k in ['controlEvidence','sourceEvidence','shapeEvidence','eventEvidence']):raise ValueError('invalid HUD frame')
             hud_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],presentation_id=frame['event'],stage=HUD_STAGES[frame['edge']],source_class=frame['category']))
@@ -476,7 +486,7 @@ def summarize(data):
             'callback_work_timelines':work_timelines(work_rows,shape_rows),'work_interval_evidence':work_rows,
             'snapshot_focus_observations':focus_rows,'snapshot_read_outcomes':read_rows,'snapshot_read_outcome_counts':dict(collections.Counter(r['lane']+':'+r['outcome'] for r in read_rows)),
             'space_observations':None if preservation is None else [dict(r,reason={1:'rapid_space_downs',2:'space_consumed',3:'hanq_replay_marker',4:'repeat_flag'}[r['detail']],interpretation='observation_only_not_duplicate_text_or_root_cause') for r in preservation['requests'] if r['trigger']==7],
-            'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
+            'onset_decisions':onset_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,

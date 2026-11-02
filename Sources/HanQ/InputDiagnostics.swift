@@ -341,7 +341,19 @@ struct InputIncidentShapeProbe {
 final class InputIncidentTrace {
     let fieldRegistry=InputIncidentFieldRegistry()
     enum Lane:Int,Codable {case hid=1,main,onset,mismatch,boundary,onsetAX,mismatchAX,sourceBoundary}
-    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud}
+    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision}
+    enum OnsetSite:Int {case reservation=1,publication,history,claim}
+    enum OnsetReason:Int {
+        case baselineMissing=1,baselineAvailable,publicationBlocked,sourceChanged,representationMissing,representationUnchanged
+        case publicationDeadline,historySize,layoutUnavailable,firstBodyMismatch,partialPrefixWaiting,publicationObserved
+        case proofCurrent,proofUnavailable,historyWaiting,historyComplete,historyRejected,historyCandidate,keysStillDown
+        case claimRejected,claimAccepted,guardFailed,fieldChanged,reservationReleased,selectionNotWritable
+    }
+    struct OnsetEvidence:Codable {
+        // 0 keys = unmeasured. nil age = no first-key clock or out of range.
+        let keys:Int
+        let firstKeyAgeMicros:Int?
+    }
     enum HUDStage:Int {case requested=1,ordered,firstDraw,suppressed,unavailable}
     struct EventEvidence:Codable {
         let observedAtMicros:Int;let timestampMicros:Int;let keyClass:Int
@@ -517,6 +529,7 @@ final class InputIncidentTrace {
         var workEvidence:WorkEvidence?=nil
         var readOutcome:ReadOutcome?=nil
         var focusEvidence:InputIncidentFocusEvidence?=nil
+        var onsetEvidence:OnsetEvidence?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -634,6 +647,7 @@ final class InputIncidentTrace {
     private var position=0,stored=0,sequence=0,overwritten=0,eventSequence=0
     private var identities:[Identity:Int]=[:]
     private var lastDecisions:[DecisionSite:DecisionReason]=[:]
+    private var lastOnsetDecisions:[Int:(first:Double,keys:Int)]=[:]
     private var lastSourceEvidence:[Int:Int]=[:]
     private var shapes:[Lane:Shape]=[:]
     private var fields:[UInt:Int]=[:]
@@ -715,7 +729,7 @@ final class InputIncidentTrace {
                 }
                 windows.removeAll();drainScheduled=false
                 ring=Array(repeating:nil,count:configured ? capacity:0);position=0;stored=0
-                reads.removeAll();shapes.removeAll();identities.removeAll();lastDecisions.removeAll();lastSourceEvidence.removeAll()
+                reads.removeAll();shapes.removeAll();identities.removeAll();lastDecisions.removeAll();lastOnsetDecisions.removeAll();lastSourceEvidence.removeAll()
                 fields.removeAll();lastEdit = -Double.infinity;lastTrigger = -Double.infinity
                 lastSpaceDown.removeAll();lastSpaceCapture.removeAll()
                 if active,configured{captures=max(captures,last);_ = gate.activate(paused)}
@@ -1271,6 +1285,27 @@ final class InputIncidentTrace {
         let time=clock()
         _ = submit(.state,.onset,state.rawValue,observedAt:time){[self] timing in
             append(.onset,.state,observedAt:time,observationTiming:timing,category:state.rawValue)
+        }
+    }
+    // Existing numeric branch results only. No additional AX/source query,
+    // event objects, synchronous lock or file I/O on the caller.
+    func onsetDecision(_ site:OnsetSite,_ reason:OnsetReason,firstTime:Double?=nil,keys:Int=0){
+        guard enabled,!IsSecureEventInputEnabled() else{return}
+        let time=clock(),count=max(0,min(keys,16))
+        let age=firstTime.flatMap{first -> Int? in
+            let elapsed=time-first
+            return elapsed.isFinite && elapsed>=0 && elapsed<=60 ? Int(elapsed*1_000_000):nil
+        }
+        _ = submit(.context,.onset,16+site.rawValue,observedAt:time){[self] timing in
+            let code=site.rawValue*32+reason.rawValue
+            if let firstTime,let prior=lastOnsetDecisions[code],prior.first==firstTime,prior.keys==count {
+                observationCoalesced[observationCode(.context,.onset,16+site.rawValue),default:0]+=1
+                return
+            }
+            if let firstTime{lastOnsetDecisions[code]=(firstTime,count)}
+            append(.onset,.onsetDecision,observedAt:time,observationTiming:timing,edge:site.rawValue,category:reason.rawValue)
+            ring[(position-1+capacity)%capacity]?.onsetEvidence=OnsetEvidence(keys:count,firstKeyAgeMicros:age)
+            updatePreservedLastFrame()
         }
     }
     func sourceEvidence(_ action:SourceEvidenceAction,_ value:SourceEvidence,event:CGEvent?=nil){

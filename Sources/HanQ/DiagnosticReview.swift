@@ -261,6 +261,7 @@ final class DiagnosticReviewSnapshot {
                          21: "경계 변경으로 인계 불허", 22: "인계할 이력 없음", 23: "인계 기한 초과", 24: "본문 불일치로 인계 불허",
                          25: "검증한 상태 인계", 26: "수동 변환 중", 27: "키보드 설정 중", 28: "첫 자음 보정 중", 29: "첫 자음 처리 예약 중",
                          30: "초기 관측 미완료", 31: "입력 관측 허용"]
+        let onsetReasons = [1:"입력 전 본문 관측 없음",2:"입력 전 본문 관측 있음",3:"다른 작업으로 첫 글자 확인 보류",4:"첫 입력 소스 변경",5:"이전 표시 관측 없음",6:"첫 글자 반영 대기",7:"첫 글자 확인 기한 초과",8:"첫 입력 이력 불일치",9:"첫 입력 자판 미확인",10:"첫 글자와 본문 불일치",11:"첫 글자 부분 반영 대기",12:"첫 글자 반영 확인",13:"첫 글자 확인 유지",14:"첫 글자 확인 무효화",15:"후속 본문 반영 대기",16:"정상 조합 확인",17:"후속 본문과 입력 이력 불일치",18:"후속 입력 복구 후보 확인",19:"누른 키의 놓음 대기",20:"복구 인수 거절",21:"복구 인수 확인",22:"복구 안전 조건 미충족",23:"첫 입력칸 변경",24:"편집 없는 첫 입력 예약 해제",25:"첫 입력 선택 변경 불가"]
         for frame in frames {
             let kind = integer(frame["kind"]) ?? 0, code = integer(frame["category"]) ?? 0
             let duration = integer(frame["durationMicros"])
@@ -294,6 +295,7 @@ final class DiagnosticReviewSnapshot {
             if kind == 6 { counts[states[code] ?? "해석하지 못한 처리 상태", default: 0] += 1 }
             if kind == 7 { counts[boundaries[code] ?? "해석하지 못한 경계 상태", default: 0] += 1 }
             if kind == 8 { counts[decisions[code] ?? "해석하지 못한 판단 사유", default: 0] += 1 }
+            if kind == 13 { counts[onsetReasons[code] ?? "해석하지 못한 첫 입력 판단", default: 0] += 1 }
             if kind == 10 {
                 let action = integer(frame["edge"]) ?? 0
                 counts[sourceActions[action] ?? "해석하지 못한 소스 관측", default: 0] += 1

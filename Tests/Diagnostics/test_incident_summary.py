@@ -9,6 +9,22 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_onset_decisions_are_fixed_and_scoped(self):
+        timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
+        row=dict(sequence=1,milliseconds=80,lane=3,kind=13,event=0,edge=2,category=12,inputOrigin=0,consumed=False,durationMicros=0,count=0,selected=False,field=0,observationTiming=timing,onsetEvidence=dict(keys=1,firstKeyAgeMicros=80000))
+        parsed=summary.summarize(dict(schema=1,trigger=1,frames=[row]))['onset_decisions'][0]
+        self.assertEqual((parsed['site'],parsed['reason'],parsed['firstKeyAgeMicros']),('publication','publication_observed',80000))
+        for patch in [dict(kind=6),dict(lane=4),dict(edge=5),dict(edge=True),dict(category=True),dict(count=False),dict(text='private'),dict(category=26),dict(event=1),dict(inputOrigin=1),dict(count=1),dict(text='unused',onsetEvidence=dict(keys=1,text='private')),dict(onsetEvidence=dict(keys=True)),dict(onsetEvidence=dict(keys=17)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=-1)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=60000001)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=True)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=None))]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
+        self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[]))['onset_decisions'],[])
+
+    def test_onset_context_counters_are_bounded(self):
+        counters=dict(capacity=4,readCapacity=1,processed={'1361':1},coalesced={'1361':2},overflow={},omitted={})
+        result=summary.summarize(dict(schema=1,trigger=1,frames=[],observationDelivery=counters))
+        self.assertEqual(result['observation_delivery']['coalesced'][0]['lane'],'onset')
+        counters['coalesced']={'1365':2}
+        with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[],observationDelivery=counters))
+
     def test_snapshot_focus_evidence_is_fixed_and_scoped(self):
         focus=dict(path=1,role=6,route=1,ownerRelation=1,elementRelation=3,withinRead=0)
         row=dict(frame(6,2,event=7,category=2,ms=40),sequence=1,readOutcome=8,focusEvidence=focus)

@@ -4,6 +4,7 @@ import Carbon
 let onsetKoreanID="com.apple.inputmethod.Korean.2SetKorean"
 struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange }
 final class OnsetRecoveryEngine:NSObject {
+    var decisionTrace=InputIncidentTrace.shared
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
     var canBeginRepair: () -> Bool = { true }
     var willBeginRepair: () -> Void = {}
@@ -206,14 +207,14 @@ final class OnsetRecoveryEngine:NSObject {
         guard let gate,let p=gate.passedObservation(),!p.keys.isEmpty else{return false}
         guard canBeginRepair(),currentSource()==p.first.sourceID,currentLayout() != nil,
               pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
-              gate.seenCount()>=postedToGate else{traceReentryObservation("history_guard_failed",hasSnapshot:snap != nil);gate.discardPassed(reason:.guard_failed);return false}
+              gate.seenCount()>=postedToGate else{decisionTrace.onsetDecision(.history,.guardFailed,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_guard_failed",hasSnapshot:snap != nil);gate.discardPassed(reason:.guard_failed);return false}
         guard let snap else{
             // A lone passed key is not a pending repair. Keep the existing
             // outside/field observation path available when no body is read.
             if p.keys.count==1{return false}
             if !transientReadFailure{gate.discardPassed()};return true
         }
-        if let field=passedField,!CFEqual(field,snap.element){traceReentryObservation("history_field_changed",hasSnapshot:true);gate.discardPassed(reason:.field_changed);return false}
+        if let field=passedField,!CFEqual(field,snap.element){decisionTrace.onsetDecision(.history,.fieldChanged,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_field_changed",hasSnapshot:true);gate.discardPassed(reason:.field_changed);return false}
         passedField=snap.element
         if let observed=observedEmptyEntry(snap,before:p.first.time) ?? observedDraftEntry(snap,before:p.first.time) {
             passedBaseline=observed
@@ -222,7 +223,9 @@ final class OnsetRecoveryEngine:NSObject {
         // Record the first actual publication, including a contradictory one,
         // before a later two-key body can become eligible. One key never edits.
         guard p.keys.count>=2 else{return false}
-        let baseline=firstPublication?.matches(p,snap) == true ? nil:
+        let publicationMatches=firstPublication?.matches(p,snap) == true
+        if firstPublication != nil{decisionTrace.onsetDecision(.history,publicationMatches ? .proofCurrent:.proofUnavailable,firstTime:p.first.time,keys:p.keys.count)}
+        let baseline=publicationMatches ? nil:
             passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
         // A terminal plain Space selects the committed-word strategy even
         // when a pre-key baseline could also prove an earlier split replay.
@@ -231,13 +234,14 @@ final class OnsetRecoveryEngine:NSObject {
             || firstPublication?.matches(p,snap) == true)
         if allowObservedReplay,Self.awaitingEmptyEntryPublication(baseline,current:snap){return true}
         switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay) {
-        case .waiting:traceReentryObservation("history_wait",hasSnapshot:true);return true
-        case .complete:traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
-        case .rejected:traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
+        case .waiting:decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_wait",hasSnapshot:true);return true
+        case .complete:decisionTrace.onsetDecision(.history,.historyComplete,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
+        case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
         case .candidate(let candidate):
+            decisionTrace.onsetDecision(.history,.historyCandidate,firstTime:p.first.time,keys:p.keys.count)
             traceReentryObservation("history_candidate",hasSnapshot:true)
-            if candidate.isObservedReplay {guard p.pressed.isEmpty else{return true}}
-            else {guard p.pressed.isEmpty || p.onlyFinalPlainSpaceDown else{return true}}
+            if candidate.isObservedReplay {guard p.pressed.isEmpty else{decisionTrace.onsetDecision(.claim,.keysStillDown,firstTime:p.first.time,keys:p.keys.count);return true}}
+            else {guard p.pressed.isEmpty || p.onlyFinalPlainSpaceDown else{decisionTrace.onsetDecision(.claim,.keysStillDown,firstTime:p.first.time,keys:p.keys.count);return true}}
             planElement=snap.element;repairSourceID=p.first.sourceID
             beginRecovery(candidate,snap,passed:p);return true
         }
@@ -306,6 +310,7 @@ final class OnsetRecoveryEngine:NSObject {
     func observeUnclaimedOnset(_ first:OnsetInputGate.Reservation,_ snap:OnsetSnapshot){
         guard pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
               gate?.observeUnclaimed(first)==true else{abandonUneditedReservation();return}
+        decisionTrace.onsetDecision(.reservation,.reservationReleased,firstTime:first.time)
         // A new field or its first isolated character cannot distinguish live
         // IME composition from a detached onset. Observe the whole passed word
         // without sending a cursor command or quarantining subsequent keys.
@@ -453,8 +458,10 @@ final class OnsetRecoveryEngine:NSObject {
             let emptyEntry=observedEmptyEntry(snap,before:reservation.time)
             let prior=emptyEntry ?? observedDraftEntry(snap,before:reservation.time) ?? earlyBaseline
             guard let baseline=Self.firstConsonantBaseline(prior,current:snap,observedEmptyEntry:emptyEntry != nil) else {
+                decisionTrace.onsetDecision(.reservation,.baselineMissing,firstTime:reservation.time)
                 observeUnclaimedOnset(reservation,snap);return
             }
+            decisionTrace.onsetDecision(.reservation,.baselineAvailable,firstTime:reservation.time)
             var detector=OnsetRecoveryDetector(layout:layout)
             detector.outsideKey(code:reservation.code,shift:reservation.shift,time:reservation.time,korean:true,plain:true)
             detector.entered(time:now)
@@ -805,8 +812,9 @@ final class OnsetRecoveryEngine:NSObject {
         }
         var writable:DarwinBoolean=false
         let canSelect=testCanSelect?() ?? (AXUIElementIsAttributeSettable(snap.element,kAXSelectedTextRangeAttribute as CFString,&writable) == .success && writable.boolValue)
-        guard canSelect else{log("recovery_unsupported",["reason":"selection_not_writable"]);emergencyStop("early_selection_not_writable");return}
+        guard canSelect else{decisionTrace.onsetDecision(.claim,.selectionNotWritable,firstTime:passed?.first.time ?? deferred?.time,keys:passed?.keys.count ?? 0);log("recovery_unsupported",["reason":"selection_not_writable"]);emergencyStop("early_selection_not_writable");return}
         let claimed=passed.map{gate?.claimPassed($0) ?? false} ?? deferred.map{gate?.claimDeferred($0) ?? false} ?? (gate?.claimEarly() ?? true)
+        decisionTrace.onsetDecision(.claim,claimed ? .claimAccepted:.claimRejected,firstTime:passed?.first.time ?? deferred?.time,keys:passed?.keys.count ?? 0)
         guard claimed else{return}
         if deferred != nil{log("deferred_candidate")}
         if passed != nil{log("passed_sequence_candidate")}
