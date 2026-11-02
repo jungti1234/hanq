@@ -129,6 +129,36 @@ for continued in [false,true] {
 }
 }
 }
+// Both keys passed, but the first AX publication lags by one key.
+for priorReadable in [false,true] {
+for mode in ["split", "normal", "late", "third", "wrong", "caret", "selected", "field", "window", "source", "manual", "pointer", "shortcut"] {
+    let c=Case(label:"arbitrary changing display")
+    if priorReadable{c.visible=true;c.text="arbitrary changing display";c.selection=NSRange(location:0,length:0);c.e.sample()}
+    c.original(15,true);c.original(46,true);c.original(15,false)
+    c.publish(mode=="wrong" ? "ㅁ":"ㄱ")
+    check(c.commands==0 && c.selections==0 && c.posts.isEmpty,"partial publication cannot authorize editing")
+    c.original(46,false)
+    c.e.sample()
+    if mode=="late"{RunLoop.current.run(until:Date(timeIntervalSinceNow:0.16))}
+    if mode=="third"{c.original(3,true);c.original(3,false)}
+    if mode=="field"{c.changedField=true}
+    if mode=="window"{c.changedWindow=true}
+    if mode=="source"{c.source="com.apple.keylayout.ABC"}
+    if mode=="manual"{c.e.canBeginRepair={false}}
+    if mode=="pointer"{_ = c.g.receive(.leftMouseDown,key(0,true))}
+    if mode=="shortcut"{let event=key(0,true);event.flags = .maskCommand;_ = c.g.receive(.keyDown,event)}
+    c.text=mode=="normal" ? "그":(mode=="third" ? "ㄱㅡㄹ":"ㄱㅡ")
+    c.selection=mode=="caret" ? NSRange(location:0,length:0):(mode=="selected" ? NSRange(location:0,length:2):NSRange(location:c.text.utf16.count,length:0))
+    c.e.sample();c.spin()
+    if mode=="split" {
+        check(c.text=="그" && c.posts.map{$0.0}==[15,15,46,46],"lagging one-key publication can advance to exact two-key repair")
+        check(c.commands==2 && c.writes==0 && !c.e.recovering && c.e.retainedInput.isEmpty,"lagging publication completes one verified repair")
+    } else {
+        check(c.commands==0 && c.selections==0 && c.posts.isEmpty && c.writes==0,"lagging publication preserves guard \(mode)")
+    }
+    c.close()
+}
+}
 for mode in ["normal","prefix","suffix","caret","selected","missing_prior","unchanged","window","window_after","source","manual","repeat","pointer","shortcut","late","three_keys","wrong_split","field","race"] {
     let c=Case(label:mode=="unchanged" ? "ㄱㅡ":"uninterpreted prior value");c.original(15,true);c.original(46,true);c.original(15,false)
     if mode=="repeat"{let e=key(46,true);e.setIntegerValueField(.keyboardEventAutorepeat,value:1);_ = c.g.receive(.keyDown,e)}
@@ -152,12 +182,38 @@ for mode in ["normal","prefix","suffix","caret","selected","missing_prior","unch
     check(c.commands==0 && c.selections==0 && c.posts.isEmpty && c.writes==0,"unproved/normal two-key publication \(mode) remains untouched")
     c.close()
 }
+for priorReadable in [false,true] {
 for wrong in [false,true] {
     let c=Case(label:"Uninterpreted display")
+    if priorReadable{c.visible=true;c.text="Uninterpreted display";c.selection=NSRange(location:0,length:0);c.e.sample()}
     c.first(wrong ? "wrong_initial":"normal")
     c.pair();c.spin()
     check(wrong ? c.posts.isEmpty:c.text=="그","first readable mismatch is terminal; exact one-key publication can extend to split pair")
     c.close()
+}
+}
+
+// Both fixed words keep their original following composition after a delayed
+// first publication over a readable prior representation. No OS input is sent.
+for (codes,word):([UInt16],String) in [([15,46,3,38,0],"그럼"),([0,37,15,31,12,40,2],"미개방")] {
+for firstBeforeSecond in [false,true] {
+    let c=Case(label:"arbitrary prior representation")
+    c.visible=true;c.text="arbitrary prior representation";c.selection=NSRange(location:0,length:0);c.e.sample()
+    let initial=OnsetKeyboardLayout.load(sourceID:c.source)!.variants(code:codes[0],shift:false).first!
+    c.original(codes[0],true)
+    if firstBeforeSecond{c.publish(initial)}
+    c.original(codes[0],false);c.original(codes[1],true)
+    c.publish(initial)
+    check((firstBeforeSecond || c.e.firstPublication==nil) && c.g.passedObservation() != nil && c.commands==0 && c.selections==0 && c.posts.isEmpty,"partial publication retains history but never authorizes editing")
+    let layout=KoreanKeyboardLayout.load(sourceID:c.source)!
+    let vowel=layout.keys[Character(PhysicalLetterKeys.letters[codes[1]]!)]!
+    c.publish(initial+String(vowel));c.original(codes[1],false);c.e.sample()
+    for code in codes.dropFirst(2){for down in [true,false]{let event=key(code,down);c.e.observeDeferredBeforeInput(event.type,event);check(c.g.receive(event.type,event)==nil,"only proved repair owns following word keys")}}
+    c.spin()
+    check(c.text==word && c.posts.map{$0.0}==codes.flatMap{[$0,$0]},"full normal word and exact once replay after delayed representation")
+    check(c.writes==0 && !c.e.recovering && c.e.pending.isEmpty && c.e.retainedInput.isEmpty && c.g.held.isEmpty,"following composition drains without text write or retained input")
+    c.close()
+}
 }
 print("\(failures==0 ? "PASS":"FAIL") \(checks) two-key first-publication engine/gate checks; no OS keys posted")
 exit(failures==0 ? 0:1)

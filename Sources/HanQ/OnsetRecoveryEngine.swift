@@ -203,17 +203,25 @@ final class OnsetRecoveryEngine:NSObject {
         }else{passedBaseline=earlyBaseline;passedField=earlyObservedField}
     }
     func samplePassed(_ snap:OnsetSnapshot?)->Bool {
-        guard let gate,let p=gate.passedObservation(),p.keys.count>=2 else{return false}
+        guard let gate,let p=gate.passedObservation(),!p.keys.isEmpty else{return false}
         guard canBeginRepair(),currentSource()==p.first.sourceID,currentLayout() != nil,
               pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
               gate.seenCount()>=postedToGate else{traceReentryObservation("history_guard_failed",hasSnapshot:snap != nil);gate.discardPassed(reason:.guard_failed);return false}
-        guard let snap else{if !transientReadFailure{gate.discardPassed()};return true}
+        guard let snap else{
+            // A lone passed key is not a pending repair. Keep the existing
+            // outside/field observation path available when no body is read.
+            if p.keys.count==1{return false}
+            if !transientReadFailure{gate.discardPassed()};return true
+        }
         if let field=passedField,!CFEqual(field,snap.element){traceReentryObservation("history_field_changed",hasSnapshot:true);gate.discardPassed(reason:.field_changed);return false}
         passedField=snap.element
         if let observed=observedEmptyEntry(snap,before:p.first.time) ?? observedDraftEntry(snap,before:p.first.time) {
             passedBaseline=observed
         }
-        observeFirstPublication(p,snap)
+        if observeFirstPublication(p,snap){return true}
+        // Record the first actual publication, including a contradictory one,
+        // before a later two-key body can become eligible. One key never edits.
+        guard p.keys.count>=2 else{return false}
         let baseline=firstPublication?.matches(p,snap) == true ? nil:
             passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
         // A terminal plain Space selects the committed-word strategy even
