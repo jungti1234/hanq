@@ -56,20 +56,6 @@ final class SelectionPreservingSourceSwitch {
             }
             return true
         }
-        postCommitAndSelectAll = { [weak self] field in
-            guard CGPreflightPostEventAccess(),let events=self?.commitSelectionEvents() else{return false}
-            var pid:pid_t=0
-            guard AXUIElementGetPid(field,&pid) == .success,pid>0 else{return false}
-            for event in events {event.postToPid(pid)}
-            return true
-        }
-        postSelectAll = { [weak self] field in
-            guard CGPreflightPostEventAccess(),let events=self?.commitSelectionEvents() else{return false}
-            var pid:pid_t=0
-            guard AXUIElementGetPid(field,&pid) == .success,pid>0 else{return false}
-            for event in events.dropFirst(2){event.postToPid(pid)}
-            return true
-        }
         // Bound each AX request in both the asynchronous barrier path and the
         // synchronous fallback. A cursor commit is posted once, then verified;
         // neither path sleeps or pumps the run loop.
@@ -98,69 +84,6 @@ final class SelectionPreservingSourceSwitch {
         range.location >= 0 && range.length > 0 && range.location <= length && range.length <= length - range.location
     }
 
-    var postSelectAll:(AXUIElement)->Bool = {_ in false}
-    var postCommitAndSelectAll:(AXUIElement)->Bool = {_ in false}
-    func commitSelectionEvents()->[CGEvent]? {
-        guard let source=commitSource else{return nil}
-        let marker:Int64=0x48414E514155544F
-        source.userData=marker
-        let recipe:[(CGKeyCode,Bool,CGEventType,CGEventFlags)]=[
-            (124,true,.keyDown,[]),(124,false,.keyUp,[]),
-            (55,true,.flagsChanged,.maskCommand),(0,true,.keyDown,.maskCommand),
-            (0,false,.keyUp,.maskCommand),(55,false,.flagsChanged,[])]
-        let events=recipe.compactMap{code,down,type,flags -> CGEvent? in
-            guard let event=CGEvent(keyboardEventSource:source,virtualKey:code,keyDown:down) else{return nil}
-            event.type=type;event.flags=flags
-            event.setIntegerValueField(.eventSourceUserData,value:marker);return event
-        }
-        return events.count==recipe.count ? events:nil
-    }
-    /// The user explicitly requested select-all. Order its native command after
-    /// composition commit, rather than racing an AX selection with the IME.
-    func commitSelection(field:AXUIElement,text expectedText:String,range expectedRange:NSRange,asynchronous:Bool=false)->OSStatus {
-        if pendingSelectAll != nil{return resumeSelectAll(field:field,text:expectedText,range:expectedRange)}
-        guard !expectedText.isEmpty,currentSource().hasPrefix("com.apple.inputmethod.Korean.") else{return noErr}
-        guard allowed() else{return -50}
-        guard let current=focus() else{return AXError.cannotComplete.rawValue}
-        guard CFEqual(current,field),editable(field),expectedRange==NSRange(location:0,length:expectedText.utf16.count) else{return -50}
-        guard let value=text(field) else{return AXError.cannotComplete.rawValue}
-        guard value==expectedText else{return -50}
-        if asynchronous {
-            guard postCommit(field,124) else{return -50}
-            pendingSelectAll=PendingSelectAll(field:field,text:expectedText,source:currentSource(),deadline:now()+0.30,selectionPosted:false)
-            trace(.commitPosted);return AXError.cannotComplete.rawValue
-        }
-        guard postCommitAndSelectAll(field) else{return -50}
-        trace(.commitPosted);return noErr
-    }
-    private struct PendingSelectAll {
-        let field:AXUIElement
-        let text:String
-        let source:String
-        let deadline:Double
-        var selectionPosted:Bool
-    }
-    private var pendingSelectAll:PendingSelectAll?
-    private func resumeSelectAll(field:AXUIElement,text expectedText:String,range expectedRange:NSRange)->OSStatus {
-        guard var pending=pendingSelectAll else{return -50}
-        func stop(_ stage:Stage)->OSStatus {pendingSelectAll=nil;trace(stage);return -50}
-        guard CFEqual(field,pending.field),expectedText==pending.text,
-              expectedRange==NSRange(location:0,length:pending.text.utf16.count),
-              allowed(),currentSource()==pending.source else{return stop(.changedContext)}
-        guard now()<pending.deadline else{return stop(.commitUnconfirmed)}
-        guard let current=focus() else{return AXError.cannotComplete.rawValue}
-        guard CFEqual(current,field) else{return stop(.changedContext)}
-        guard let value=text(field),let selected=range(field) else{return AXError.cannotComplete.rawValue}
-        guard value==pending.text else{return stop(.changedContext)}
-        if !pending.selectionPosted {
-            guard Self.equal(selected,CFRange(location:pending.text.utf16.count,length:0)) else{return AXError.cannotComplete.rawValue}
-            guard postSelectAll(field) else{return stop(.collapseFailed)}
-            pending.selectionPosted=true;pendingSelectAll=pending
-            return AXError.cannotComplete.rawValue
-        }
-        guard Self.equal(selected,CFRange(location:0,length:pending.text.utf16.count)) else{return AXError.cannotComplete.rawValue}
-        pendingSelectAll=nil;return noErr
-    }
     private struct PendingSwitch {
         let field:AXUIElement
         let text:String
@@ -171,7 +94,7 @@ final class SelectionPreservingSourceSwitch {
     }
     private var pendingSwitch:PendingSwitch?
     var isPending:Bool {pendingSwitch != nil}
-    func cancelPending(){pendingSwitch=nil;pendingSelectAll=nil}
+    func cancelPending(){pendingSwitch=nil}
     private func resumeSwitch(_ target:String)->OSStatus {
         guard let pending=pendingSwitch else{return -50}
         func stop(_ stage:Stage)->OSStatus {pendingSwitch=nil;trace(stage);return -50}

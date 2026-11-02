@@ -222,9 +222,9 @@ print("PASS: queued user switch preserves preceding Korean candidate and advance
 do {
  let app=AppDelegate(), field=AXUIElementCreateApplication(23456)
  let b=app.sourceSwitchBarrier, c=app.onsetRecovery
- var text="abc ㄱ",range=NSRange(location:5,length:0),source=mismatchKoreanID,ready=false
+ var text="abc ㄱ",range=NSRange(location:5,length:0),source=mismatchKoreanID,ready=false,selectionWrites=0
  b.read={.init(field:field,text:text,selection:range)};b.readFocus={field};b.source={source};b.ready={ready}
- b.applySelection={_,r in range=r;return true};b.commitSelection={_ in noErr}
+ b.applySelection={_,r in selectionWrites+=1;range=r;return true}
  b.select={source=$0;return noErr}
  c.launchEngine={$0.enabled=true};c.replaceStoppedEngine()
  let engine=c.engine!
@@ -252,8 +252,11 @@ do {
  b.observe(.keyDown,all);b.step()
  precondition(range.length==0,"posting alone cannot authorize select-all before editor text")
  text="abc 강";range=NSRange(location:5,length:0)
+ b.step()
+ precondition(!b.busy && selectionWrites==0 && range.length==0,"native Cmd+A observation never owns input or commits composition")
+ range=NSRange(location:0,length:5) // Editor acknowledges the original Cmd+A.
  b.step();b.step();b.step()
- precondition(!b.busy && range==NSRange(location:0,length:5),"one select-all after onset replay completes at acknowledged body")
+ precondition(!b.busy && selectionWrites==0 && range==NSRange(location:0,length:5),"one native select-all after onset replay completes at acknowledged body")
  precondition(b.request("com.apple.keylayout.ABC"));b.step();b.step()
  b.observe(.keyDown,observedKey(0))
  precondition(b.expected?.0=="a","source switch and replacement preserve post-onset selected range")

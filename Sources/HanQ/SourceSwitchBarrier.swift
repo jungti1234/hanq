@@ -18,7 +18,6 @@ final class SourceSwitchBarrier {
     var selectionPending:()->Bool = {false}
     var cancelSelection:()->Void = {}
     private var switchSnapshot:Snapshot?
-    private var selectionCommitSnapshot:Snapshot?
     var didSelect:(CGEventTimestamp)->Void = {_ in}
     var send:(CGEvent)->Void = {$0.post(tap:.cgSessionEventTap)}
     var retained:([CGEvent])->Void = {_ in}
@@ -36,7 +35,6 @@ final class SourceSwitchBarrier {
     private var historyStarted:CGEventTimestamp=0
     private var selectedRange:NSRange?
     private var pendingSelectAll=false
-    private var selectionCommitPending=false
     private var awaitingSelection=false
     private var selectionAttempts=0
     private var selectionRetryAt=0.0
@@ -45,7 +43,6 @@ final class SourceSwitchBarrier {
         guard let raw=AXValueCreate(.cfRange,&value) else{return false}
         return AXUIElementSetAttributeValue(field,kAXSelectedTextRangeAttribute as CFString,raw) == .success
     }
-    var commitSelection:(Snapshot)->OSStatus = {_ in noErr}
     private var queued:[CGEvent]=[]
     private var deliveredHeld:Set<Int64>=[]
     private var target:String?
@@ -221,7 +218,7 @@ final class SourceSwitchBarrier {
     /// without treating arbitrary editor changes as a new baseline.
     private func acknowledgeSourceInitialBodyRemoval(_ snap:Snapshot) {
         guard target != nil,switchSnapshot == nil,!pendingSelectAll,
-              !awaitingSelection,!selectionCommitPending,
+              !awaitingSelection,
               let field,CFEqual(field,snap.field),let previous=ledger,
               previous.caret==0,!previous.before.isEmpty,!previous.insertion.isEmpty else{return}
         var acknowledged=MismatchReplayLedger(before:"",caret:0)
@@ -231,7 +228,7 @@ final class SourceSwitchBarrier {
         ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil
         trace("source_initial_body_removed")
     }
-    func resetObservation(){deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;selectionCommitPending=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
     // Backspace can remove one component of live Hangul rather than commit the
     // remaining syllable. Reuse only our observed key prefix, after the editor
     // proves its entire text and caret. Never decompose existing editor text.
@@ -392,6 +389,14 @@ final class SourceSwitchBarrier {
             }
             externalEditPending=false
         }
+        // A native Cmd+A may only commit live composition. Until a real
+        // source/repair transaction owns input, the next original key belongs
+        // to the editor. Rebase from its actual selection, never the requested
+        // full range, when observing that key below.
+        if pendingSelectAll && !busy {
+            resetObservation()
+            trace("native_select_all_input_resumed")
+        }
         let flags=event.flags.intersection([.maskCommand,.maskControl,.maskAlternate])
         if heldCode==51,flags.isEmpty,!event.flags.contains(.maskShift) {
             let snap=read()
@@ -411,11 +416,11 @@ final class SourceSwitchBarrier {
             if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)}
             selectedRange=ledger.map{NSRange(location:0,length:$0.text.utf16.count)}
             pendingSelectAll=selectedRange != nil
-            selectionCommitPending=pendingSelectAll
             selectionAttempts=0
-            if pendingSelectAll,let field {
-                if !busy{transactionField=field}
-                busy=true;deadline=now()+1;trace("waiting_for_select_all");schedule()
+            if pendingSelectAll {
+                deadline=now()+1
+                trace(busy ? "waiting_for_select_all":"observing_native_select_all")
+                schedule()
             }
             return
         }
@@ -474,10 +479,10 @@ final class SourceSwitchBarrier {
         beginRepairBoundary(type,event)
         guard busy else{return false}
         // A native select-all has already reached the editor. Before any AX
-        // selection/commit write, a contradictory body cannot authorize repair.
+        // source-switch write, a contradictory body cannot authorize repair.
         // Resume its original keys instead of parking them behind stale history.
         if target == nil,pendingSelectAll,!awaitingSelection,selectionAttempts==0,
-           selectionCommitSnapshot == nil,!externalEditPending,isReady(),
+           !externalEditPending,isReady(),
            repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,queued.isEmpty {
             let code=event.getIntegerValueField(.keyboardEventKeycode)
             if type == .flagsChanged,code==55{return false} // unmapped left Command
@@ -487,7 +492,7 @@ final class SourceSwitchBarrier {
             }
         }
         if type == .keyDown,target != nil,switchSnapshot == nil,
-           !pendingSelectAll,!awaitingSelection,!selectionCommitPending,
+           !pendingSelectAll,!awaitingSelection,
            isReady(),repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,
            queued.allSatisfy({$0.type == .flagsChanged && $0.getIntegerValueField(.keyboardEventKeycode)==54}),
            let snap=mismatchedSnapshot {
@@ -532,15 +537,33 @@ final class SourceSwitchBarrier {
         wait(textMatches ? "waiting_for_caret":"waiting_for_text")
     }
     private func schedule(){
-        guard busy,!scheduled else{return};scheduled=true
+        guard busy || pendingSelectAll,!scheduled else{return};scheduled=true
         let token=generation
         DispatchQueue.main.asyncAfter(deadline:.now()+0.002){[weak self] in
             guard let self,self.generation==token else{return}
             self.scheduled=false;self.step()
         }
     }
+    private func observeNativeSelection() {
+        guard pendingSelectAll else{return}
+        guard now()<deadline else {
+            resetObservation();trace("native_select_all_observation_expired");return
+        }
+        // Read-only observation cannot compete with an edit that owns input.
+        guard isReady(),!externalEditPending,repairInFlight.isEmpty,
+              onsetInFlight.isEmpty,!awaitingReplay else{schedule();return}
+        guard let snap=read() else{schedule();return}
+        guard let field,CFEqual(field,snap.field) else {
+            resetObservation();trace("native_select_all_context_changed");return
+        }
+        if !matchesText(snap){acknowledgeInitialBodyRemoval(snap)}
+        noteTextMatch(snap)
+        guard matches(snap) else{schedule();return}
+        pendingSelectAll=false
+        trace("native_select_all_observed")
+    }
     func step(){
-        guard busy else{return}
+        guard busy else{observeNativeSelection();return}
         // A repair has its own bounded edit/verification transaction. Do not
         // expire our editor-ack deadline or compete with its AX reads meanwhile.
         if !isReady() {
@@ -560,7 +583,7 @@ final class SourceSwitchBarrier {
             if transactionField == nil {transactionField=field}
             waitingForRepairBoundary=false
         }
-        if target == nil,!pendingSelectAll,!awaitingSelection,!selectionCommitPending,
+        if target == nil,!pendingSelectAll,!awaitingSelection,
            !externalEditPending,!queued.isEmpty {
             // Release a key already delivered by this transaction even if focus
             // moved; a release cannot insert text and must not leave a held key.
@@ -591,13 +614,9 @@ final class SourceSwitchBarrier {
             if !matchesText(snap) {acknowledgeInitialBodyRemoval(snap)}
             guard matchesText(snap) else{waitForMatch(snap);return}
             guard let selectedRange else{schedule();return}
-            if snap.selection != selectedRange {
-                guard applySelection(snap.field,selectedRange) else{fail("select_all_failed");return}
-                // Keep subsequent editing keys behind the selection acknowledgment.
-                pendingSelectAll=false;awaitingSelection=true
-                selectionAttempts=1;selectionRetryAt=now()+0.01
-                trace("select_all_applied");schedule();return
-            }
+            // The original Cmd+A already belongs to the editor. Observe its
+            // result without a competing AX selection or composition cursor key.
+            guard snap.selection==selectedRange else{waitForMatch(snap);return}
             pendingSelectAll=false
         }
         if awaitingSelection {
@@ -612,19 +631,6 @@ final class SourceSwitchBarrier {
                 waitForMatch(snap);return
             }
             awaitingSelection=false
-        }
-        if selectionCommitPending {
-            if selectionCommitSnapshot == nil {
-                guard matches(snap) else{waitForMatch(snap);return}
-                selectionCommitSnapshot=snap
-            }
-            let result=commitSelection(selectionCommitSnapshot!)
-            if result==AXError.cannotComplete.rawValue {wait("waiting_for_selection_commit");return}
-            guard result==noErr else{fail("select_all_commit_failed");return}
-            selectionCommitSnapshot=nil
-            selectionCommitPending=false;awaitingSelection=true
-            selectionAttempts=1;selectionRetryAt=now()+0.01
-            trace("select_all_committed");schedule();return
         }
         if let target {
             guard isReady() else{wait("waiting_for_repair");return}
@@ -681,7 +687,7 @@ final class SourceSwitchBarrier {
     func fail(_ reason:String){
         manualEdit=nil;manualEditSequence+=1
 
-        cancelSelection();switchSnapshot=nil;selectionCommitSnapshot=nil
+        cancelSelection();switchSnapshot=nil
         repairInFlight.removeAll()
         onsetInFlight.removeAll();onsetPendingCount=0
         repairWaitStarted=nil;waitReason=nil

@@ -7,6 +7,20 @@ func check(_ value:Bool,_ label:String){checks+=1;if !value{fputs("FAIL: "+label
 func key(_ code:CGKeyCode,_ flags:CGEventFlags=[])->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!;e.flags=flags;return e}
 let en="com.apple.keylayout.ABC",ko="com.apple.inputmethod.Korean.2SetKorean"
 let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(456)
+runNativeObservationTests()
+// A native select-all is an observation boundary, never an edit command.
+for body in ["ㄱㅡ럼", "그럼", "ordinary"] {
+ let b=SourceSwitchBarrier();var range=NSRange(location:body.utf16.count,length:0),writes=0,posts=0
+ b.source={ko};b.read={.init(field:field,text:body,selection:range)}
+ b.applySelection={_,_ in writes+=1;return true}
+ b.send={_ in posts+=1}
+ b.observe(.keyDown,key(0,.maskCommand));b.step()
+ check(writes==0 && posts==0,"native Cmd+A waits without editing live composition")
+ range=NSRange(location:0,length:body.utf16.count);b.step()
+ check(writes==0 && posts==0 && !b.busy,"native Cmd+A acknowledgment injects no direction/selection keys")
+ b.fail("test_end")
+}
+
 do {
  let b=SourceSwitchBarrier();var text="",range=NSRange(location:0,length:0),source=en,switches=0,posts=0
  b.read={.init(field:field,text:text,selection:range)};b.source={source};b.select={source=$0;switches+=1;return noErr}
@@ -139,8 +153,8 @@ do {
  b.observe(.keyDown,key(0,.maskCommand));check(b.request(ko),"lost native selection request accepted")
  b.step();check(writes==0 && switches==0,"do not apply select-all before preceding insertion appears")
  text="as";range=NSRange(location:2,length:0);b.step()
- check(writes==1 && switches==0,"apply explicit selection but wait for its acknowledgment")
- b.step();check(writes==1 && switches==0,"selection write is not repeatedly posted")
+ check(writes==0 && switches==0,"wait for native selection without applying AX range")
+ b.step();check(writes==0 && switches==0,"observation never posts selection writes")
  range=NSRange(location:0,length:2);b.step();b.step();check(switches==1,"switch only after restored select-all is observed")
  b.fail("test_end")
 }
@@ -150,21 +164,23 @@ do {
  b.applySelection={_,_ in writes+=1;return true}
  b.send={e in posts+=1;_ = b.receive(e.type,e);b.observe(e.type,e)}
  b.observe(.keyDown,key(0,.maskCommand))
- check(b.busy && b.receive(.keyDown,key(51)),"standalone select-all queues a following delete without requiring language switch")
- b.step();check(writes==1 && posts==0,"delete cannot overtake select-all application")
- b.step();check(posts==0,"delete still waits for editor selection acknowledgment")
- range=NSRange(location:0,length:2);b.step();b.step();check(posts==1,"delete follows acknowledged full selection")
+ let deletion=key(51)
+ check(!b.busy && !b.receive(.keyDown,deletion),"standalone native selection leaves following delete with editor")
+ b.observe(.keyDown,deletion)
+ b.step();check(writes==0 && posts==0,"native observer never edits or reposts deletion")
+ b.step();check(posts==0,"native deletion has no synthetic replay")
+ range=NSRange(location:0,length:2);b.step();b.step();check(posts==0,"native full selection never reposts an already passed deletion")
  b.fail("test_end")
 }
 do {
  let b=SourceSwitchBarrier();var time=0.0,text="ab",range=NSRange(location:2,length:0),writes=0
  b.now={time};b.source={en};b.read={.init(field:field,text:text,selection:range)}
  b.applySelection={_,_ in writes+=1;return true}
- b.observe(.keyDown,key(0,.maskCommand));b.step();check(writes==1,"initial selection applied")
- time=0.02;b.step();check(writes==2,"unchanged editor may retry ignored selection")
- text="changed";time=0.04;b.step();check(writes==2,"changed text forbids selection retry")
- text="ab";b.step();check(writes==3,"last bounded selection retry")
- time=0.1;b.step();check(writes==3,"selection retries are bounded")
+ b.observe(.keyDown,key(0,.maskCommand));b.step();check(writes==0,"native selection is observed without applying it")
+ time=0.02;b.step();check(writes==0,"unchanged editor cannot trigger a selection retry")
+ text="changed";time=0.04;b.step();check(writes==0,"changed text forbids selection retry")
+ text="ab";b.step();check(writes==0,"restored text does not authorize a selection write")
+ time=0.1;b.step();check(writes==0,"repeated observation remains read-only")
  range=NSRange(location:0,length:2);b.step();b.step();check(!b.busy,"late selection acknowledgment completes standalone action")
 }
 for consumed in [false,true] {
@@ -201,20 +217,25 @@ do {
  ready=true;b.step();check(switches==1,"editor acknowledgment gets its own deadline after repair")
  b.fail("test_end")
 }
-for success in [false,true] {
- let b=SourceSwitchBarrier();var range=NSRange(location:0,length:3),commits=0,posts=0,retained=0
- b.source={ko};b.read={.init(field:field,text:"알트탭",selection:range)}
- b.applySelection={_,_ in true}
- b.commitSelection={_ in commits+=1;range=NSRange(location:0,length:0);return success ? noErr:-50}
- b.send={_ in posts+=1};b.retained={retained+=$0.count}
- b.observe(.keyDown,key(0,.maskCommand));_=b.receive(.keyDown,key(51));b.step()
- check(commits==1 && posts==0,"delete waits for native composition commit")
- if success {
-  b.step();check(posts==0,"successful commit still requires restored full selection")
-  range=NSRange(location:0,length:3);b.step();check(posts==1 && commits==1,"delete follows commit and restored selection exactly once")
- } else {check(!b.busy && retained==1,"failed commit retains subsequent delete")}
- b.fail("test_end")
+// Missing/partial selection, changed body/field, and timeout never send a
+// synthetic commit or force a range, and never take ownership of deletion.
+for failure in ["partial", "missing", "body", "field", "timeout"] {
+ let b=SourceSwitchBarrier();var time=0.0,range=NSRange(location:3,length:0),text="그럼뒤",focused=field,readable=true,writes=0,posts=0,retained=0
+ b.now={time};b.source={ko};b.read={readable ? .init(field:focused,text:text,selection:range):nil}
+ b.applySelection={_,_ in writes+=1;return true};b.send={_ in posts+=1};b.retained={retained+=$0.count}
+ b.observe(.keyDown,key(0,.maskCommand));check(!b.receive(.keyDown,key(51)),"native deletion is not captured")
+ switch failure {
+ case "partial":range=NSRange(location:0,length:1)
+ case "missing":readable=false
+ case "body":text="changed"
+ case "field":focused=other
+ default:break
+ }
+ b.step();check(writes==0 && posts==0,"unverified native selection never edits or delivers delete")
+ time=1.1;b.step()
+ check(!b.busy && retained==0 && writes==0 && posts==0,"failed native observation cannot retain an original deletion")
 }
+
 do {
  let b=SourceSwitchBarrier();var source=ko,range=NSRange(location:0,length:3),posts=0
  b.source={source};b.read={.init(field:field,text:"알트탭",selection:range)}
@@ -343,6 +364,7 @@ do {
  b.observe(.keyDown,key(0,.maskCommand))
  check(b.expected?.0==text && b.expected?.1==NSRange(location:0,length:text.utf16.count),"replacement select-all is bounded to new text")
  check(b.request(ko),"source toggle joins new-field select-all boundary")
+ range=NSRange(location:0,length:text.utf16.count)
  for _ in 0..<4 {b.step()}
  check(switches==1 && source==ko && !b.busy,"new-field selection is acknowledged before switching")
 }
@@ -396,7 +418,7 @@ for unreadable in [false,true] {
  b.observe(.keyDown,key(0))
  b.observe(.keyDown,key(0,.maskCommand));missing=unreadable
  b.step();clock=2;b.step()
- check(!b.busy && traces.contains("deadline"),"unconfirmed read and mismatched body both end at bounded deadline")
+ check(!b.busy && traces.contains("native_select_all_observation_expired"),"unconfirmed native observation expires without owning input")
  check(!traces.joined().contains("PRIVATE_CONTENT"),"wait diagnosis does not log editor content")
 }
 // An editor may remove its initial AX body on the first key. Select-all can
@@ -421,7 +443,7 @@ for scenario in 0..<8 {
  b.step()
  if scenario<2 {
   check(b.expected?.0=="ab" && b.expected?.1==NSRange(location:0,length:2),"explicit select-all acknowledges all typed keys without initial body")
-  b.step();b.step();check(!b.busy,"selection completes without stale initial body deadline")
+  range=NSRange(location:0,length:text.utf16.count);b.step();b.step();check(!b.busy,"selection completes without stale initial body deadline")
  } else {
   check(writes==0,"partial delivery, changed text, caret, selection or field cannot authorize selection")
   check(b.expected?.0 != "ab","unverified removal never replaces prediction")
@@ -497,7 +519,7 @@ do {
  b.applySelection={_,r in range=r;return true}
  b.observe(.keyDown,key(0));b.observe(.keyDown,key(40))
  text="마";range=NSRange(location:1,length:0)
- b.observe(.keyDown,key(0,.maskCommand));b.step();b.step();b.step()
+ b.observe(.keyDown,key(0,.maskCommand));range=NSRange(location:0,length:1);b.step();b.step();b.step()
  check(!b.busy && b.expected?.0=="마","Korean insertion acknowledges removed initial body")
  b.observe(.keyDown,key(2));check(b.expected?.0=="ㅇ","typing after select-all replaces selected Korean body once")
  b.fail("test_cleanup")
@@ -814,10 +836,10 @@ for ready in [true,false] {
  text="ㄱㅏㄴ ";range=NSRange(location:0,length:4);b.observe(.keyDown,key(0,.maskCommand));b.step()
  if !ready{isReady=false}
  let release=key(55);release.type = .flagsChanged
- check(b.receive(.flagsChanged,release) == !ready,"native left Command release bypasses only the idle unwritten selection boundary")
- check(b.receive(.keyDown,key(37)) == !ready,"contradictory native select-all resumes next original letter when no edit owns input")
+ check(!b.receive(.flagsChanged,release),"native left Command release always bypasses passive observation")
+ let next=key(37);check(!b.receive(.keyDown,next),"native observer never owns the next original letter");b.observe(.keyDown,next)
  if ready {
   check(!b.busy && retained==0 && posts==0 && writes==0,"empty-onset select-all cancellation never edits or strands following input")
-  check(stages.contains("native_select_all_diverged_input_resumed"),"fixed content-free cancellation reason")
+  check(stages.contains("native_select_all_input_resumed"),"fixed content-free cancellation reason")
  }else{isReady=true;b.fail("test_cleanup")}
 }

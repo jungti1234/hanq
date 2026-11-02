@@ -130,9 +130,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         barrier.didSelect = { [weak self] timestamp in
             self?.mismatchRecovery.engine.noteUserSourceSwitch(at:timestamp)
         }
-        barrier.commitSelection = { [weak self] snap in
-            self?.selectionSourceSwitch.commitSelection(field:snap.field,text:snap.text,range:snap.selection,asynchronous:true) ?? -50
-        }
         barrier.retained = { [weak self] events in
             guard let self else{return}
             InputIncidentTrace.shared.sourceBoundary(.retained,queued:events.count,awaitingOnset:0)

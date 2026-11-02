@@ -20,10 +20,6 @@ final class Fixture {
             let range=CFRange(location:key==124 ? self.selection.location+self.selection.length:self.selection.location,length:0)
             self.writes.append(range);self.selection=range;return true
         }
-        owner.postCommitAndSelectAll={ [unowned self] _ in
-            self.writes.append(CFRange(location:self.value.utf16.count,length:0))
-            self.selection=CFRange(location:0,length:self.value.utf16.count);self.writes.append(self.selection);return true
-        }
         owner.focus = { [unowned self] in self.element }
         owner.editable = { _ in true }
         owner.text = { [unowned self] _ in self.value }
@@ -96,22 +92,8 @@ for unavailable in ["focus", "text", "range"] {
     if unavailable=="range" {f.owner.range={_ in if committed {reads+=1;if reads==1{return nil}};return f.selection}}
     f.run();check(f.selection.length==3,"transient \(unavailable) failure during commit retains selection")
 }
-let commitOnly=Fixture()
-check(commitOnly.owner.commitSelection(field:commitOnly.element,text:commitOnly.value,range:NSRange(location:0,length:3))==0,"explicit selection can commit without changing language")
-check(commitOnly.selectedTargets.isEmpty && commitOnly.source.hasPrefix("com.apple.inputmethod.Korean."),"commit-only never requests an input-source change")
-check(commitOnly.writes.count==2 && commitOnly.selection.length==3,"commit-only restores full selection after cursor acknowledgment")
-for context in ["field","text","range"] {
- let f=Fixture()
- let result=f.owner.commitSelection(field:context=="field" ? f.other:f.element,text:context=="text" ? "changed":f.value,range:NSRange(location:0,length:context=="range" ? 2:3))
- check(result != 0 && f.writes.isEmpty && f.selectedTargets.isEmpty,"commit-only pins requested \(context)")
-}
-let lostNativeSelection=Fixture();lostNativeSelection.selection=CFRange(location:3,length:0)
-check(lostNativeSelection.owner.commitSelection(field:lostNativeSelection.element,text:lostNativeSelection.value,range:NSRange(location:0,length:3))==0 && lostNativeSelection.selection.length==3,"native select-all survives an IME collapsing the earlier AX selection")
-let nativeRecipe=SelectionPreservingSourceSwitch().commitSelectionEvents()!
-check(nativeRecipe.map{$0.getIntegerValueField(.keyboardEventKeycode)}==[124,124,55,0,0,55],"native commit precedes complete Command-A press/release")
-check(nativeRecipe.last!.flags.isEmpty && Set(nativeRecipe.map{$0.getIntegerValueField(.eventSourceStateID)}).count==1,"native selection uses one private state and releases Command")
 // Deferred editor acknowledgment must yield, never repost or mistake the old
-// full selection for completion of a newly posted cursor/select-all sequence.
+// full selection for completion of a newly posted source-switch cursor.
 do {
  let f=Fixture();var time=0.0,posts=0
  f.owner.now={time};f.owner.postCommit={_,_ in posts+=1;return true}
@@ -135,38 +117,5 @@ for reason in ["focus","text","source","timeout","cancel"] {
  }
  if reason != "cancel" {_=f.owner.select("com.apple.keylayout.ABC",asynchronous:true)}
  check(!f.owner.isPending && f.selectedTargets.isEmpty && f.writes.isEmpty,"deferred switch safely ends on \(reason)")
-}
-do {
- let f=Fixture();var time=0.0,cursorPosts=0,selectPosts=0
- f.owner.now={time};f.owner.postCommit={_,key in check(key==124,"select-all commits towards selection end");cursorPosts+=1;return true}
- f.owner.postSelectAll={_ in selectPosts+=1;return true}
- func poll()->OSStatus{f.owner.commitSelection(field:f.element,text:"알트탭",range:NSRange(location:0,length:3),asynchronous:true)}
- check(poll()==AXError.cannotComplete.rawValue,"select-all yields after commit")
- time=0.08
- check(poll()==AXError.cannotComplete.rawValue && cursorPosts==1 && selectPosts==0,"stale full selection is not acknowledgment")
- f.selection=CFRange(location:3,length:0)
- check(poll()==AXError.cannotComplete.rawValue && selectPosts==1,"select-all posted only after cursor acknowledgment")
- check(poll()==AXError.cannotComplete.rawValue && selectPosts==1,"wait for actual full selection without duplicate shortcut")
- f.selection=CFRange(location:0,length:3)
- check(poll()==noErr && f.selectedTargets.isEmpty,"selection acknowledged without changing source")
-}
-// A delayed select-all must not post its shortcut after the original editor,
-// text, source or permission changed, or after its acknowledgment deadline.
-for reason in ["focus","text","source","permission","timeout"] {
- let f=Fixture();var time=0.0,cursorPosts=0,selectPosts=0
- f.owner.now={time};f.owner.postCommit={_,_ in cursorPosts+=1;return true}
- f.owner.postSelectAll={_ in selectPosts+=1;return true}
- func poll()->OSStatus{f.owner.commitSelection(field:f.element,text:"알트탭",range:NSRange(location:0,length:3),asynchronous:true)}
- check(poll()==AXError.cannotComplete.rawValue,"select-all starts before \(reason)")
- f.selection=CFRange(location:3,length:0)
- switch reason {
- case "focus":f.owner.focus={f.other}
- case "text":f.value="changed"
- case "source":f.source="com.apple.keylayout.ABC"
- case "permission":f.owner.allowed={false}
- default:time=0.31
- }
- check(poll() == -50,"select-all rejects changed \(reason)")
- check(cursorPosts==1 && selectPosts==0 && f.selectedTargets.isEmpty && f.writes.isEmpty,"no delayed shortcut or source switch after \(reason)")
 }
 print("PASS: selection-preserving source switch \(checks) checks")
