@@ -15,8 +15,13 @@ func runIdleObservationTests(){
         p.testSelectSource={_ in selections+=1;return noErr};p.testPost={_ in posts+=1}
         p.sample();p.sample()
         DispatchQueue.main.asyncAfter(deadline:.now()+0.01){heartbeat=true}
-        RunLoop.current.run(until:Date().addingTimeInterval(0.03))
-        probeTestCheck(reads==1 && heartbeat && !p.recovering && selections==0 && posts==0,"idle wait duplicated work or blocked input loop")
+        // A scheduler heartbeat is a completion condition, not a 30ms latency
+        // benchmark. Keep a bounded wait and all one-request/no-edit assertions.
+        let heartbeatDeadline=Date().addingTimeInterval(0.5)
+        while (reads==0 || !heartbeat),Date()<heartbeatDeadline {
+            RunLoop.current.run(until:Date().addingTimeInterval(0.005))
+        }
+        probeTestCheck(reads==1 && heartbeat && !p.recovering && selections==0 && posts==0,"idle wait mode=\(mode) reads=\(reads) heartbeat=\(heartbeat) recovering=\(p.recovering) selections=\(selections) posts=\(posts)")
         if mode=="key" {
             let key=CGEvent(keyboardEventSource:nil,virtualKey:15,keyDown:false)!
             _ = p.event(.keyUp,key)

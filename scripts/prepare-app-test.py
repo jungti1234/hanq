@@ -150,8 +150,8 @@ class MacOS:
     def launch(self, app):
         return self._launch(app, [])
 
-    def launch_diagnostics(self, app, directory, token):
-        return self._launch(app, ['--preserve-input-incidents', directory,
+    def launch_diagnostics(self, app, directory, token, mode='preserve'):
+        return self._launch(app, [diagnostic_flag(mode), directory,
                                   '--diagnostic-readiness-token', token])
 
     def _launch(self, app, arguments):
@@ -164,11 +164,11 @@ class MacOS:
             time.sleep(0.1)
         raise PreflightError('지정한 새 한Q의 실행을 확인할 수 없습니다.')
 
-    def diagnostic_probe(self, app, directory):
+    def diagnostic_probe(self, app, directory, mode='preserve'):
         temporary_root = run(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).stdout.strip()
         with tempfile.TemporaryDirectory(prefix='hanq-storage-', dir=temporary_root) as temporary:
             run(['/usr/bin/open', '-n', '-g', app, '--args', '--diagnostic-storage-probe', temporary,
-                 '--preserve-input-incidents', directory])
+                 diagnostic_flag(mode), directory])
             path = pathlib.Path(temporary) / 'result.json'
             end = time.monotonic() + 7
             while time.monotonic() < end:
@@ -267,21 +267,36 @@ def diagnostic_directory(path, create=True):
     return str(directory)
 
 
-def prepare_diagnostics(identity, path, operations):
+def diagnostic_flag(mode):
+    if mode not in ('preserve', 'bounded'):
+        raise PreflightError('알 수 없는 진단 저장 모드입니다.')
+    return '--bounded-input-incidents' if mode == 'bounded' else '--preserve-input-incidents'
+
+
+def prepare_diagnostics(identity, path, operations, mode='preserve'):
+    diagnostic_flag(mode)
     info = plistlib.loads((pathlib.Path(identity['path']) / 'Contents/Info.plist').read_bytes())
     if type(info.get('HanQDiagnosticReadinessVersion')) is not int or info['HanQDiagnosticReadinessVersion'] != 1:
         raise PreflightError('이 앱은 실제 진단 저장 준비 검증을 지원하지 않습니다.')
+    if mode == 'bounded' and (type(info.get('HanQBoundedDiagnosticStorageVersion')) is not int or
+                              info['HanQBoundedDiagnosticStorageVersion'] != 1):
+        raise PreflightError('이 앱은 별도 경로의 용량 제한 저장을 지원하지 않습니다. 기존 앱을 유지합니다.')
     directory = diagnostic_directory(path)
-    result = operations.diagnostic_probe(identity['path'], directory)
+    result = (operations.diagnostic_probe(identity['path'], directory, mode='bounded') if mode == 'bounded'
+              else operations.diagnostic_probe(identity['path'], directory))
     ensure_same_app(identity)
     if result.get('build') != identity['build_number'] or result.get('readiness', {}).get('ready') is not True:
         raise PreflightError('실제 앱의 진단 파일 쓰기·다시 읽기 검증 실패. 기존 앱을 유지하고 입력 시험을 중단합니다.')
-    return {'directory': directory, 'token': str(uuid.uuid4()), 'probe': result,
+    if mode == 'bounded' and result.get('bounded') is not True:
+        raise PreflightError('새 앱의 용량 제한 모드를 확인하지 못했습니다. 기존 앱을 유지합니다.')
+    return {'directory': directory, 'token': str(uuid.uuid4()), 'probe': result, 'mode': mode,
             'status': 'awaiting_current_process_receipt'}
 
 
 def diagnostic_receipt(record, main):
     expected = record['diagnostics']
+    mode = expected.get('mode', 'preserve')
+    diagnostic_flag(mode)
     directory = diagnostic_directory(expected['directory'], create=False)
     receipt = read_private_json(pathlib.Path(directory) / f".preflight-{expected['token']}.json")
     if (type(receipt.get('schema')) is not int or receipt['schema'] != 1 or receipt.get('token') != expected['token'] or
@@ -289,6 +304,8 @@ def diagnostic_receipt(record, main):
             receipt.get('build') != record['app']['build_number'] or receipt.get('ready') is not True or
             not isinstance(receipt.get('runID'), str)):
         raise PreflightError('현재 앱의 진단 저장 완료 증명이 없습니다. 입력 시험을 시작하지 마세요.')
+    if mode == 'bounded' and receipt.get('bounded') is not True:
+        raise PreflightError('현재 프로세스의 용량 제한 저장 증명이 없습니다. 입력 시험을 시작하지 마세요.')
     try:
         uuid.UUID(receipt['runID'])
     except ValueError as error:
@@ -299,11 +316,13 @@ def diagnostic_receipt(record, main):
 def launch_prepared(operations, record):
     if 'diagnostics' in record:
         d = record['diagnostics']
+        if d.get('mode', 'preserve') == 'bounded':
+            return operations.launch_diagnostics(record['app']['path'], d['directory'], d['token'], mode='bounded')
         return operations.launch_diagnostics(record['app']['path'], d['directory'], d['token'])
     return operations.launch(record['app']['path'])
 
 
-def reuse_permissions(app, previous_record, previous_app, output=None, operations=None, diagnostics=None):
+def reuse_permissions(app, previous_record, previous_app, output=None, operations=None, diagnostics=None, diagnostic_mode='preserve'):
     """Verify certificate continuity and real permission before launching a new main app."""
     identity = app_identity(app)
     baseline = json.loads(pathlib.Path(previous_record).read_text())
@@ -337,7 +356,7 @@ def reuse_permissions(app, previous_record, previous_app, output=None, operation
     save_record(record_path, record)
     try:
         if diagnostics is not None:
-            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations)
+            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations, mode=diagnostic_mode)
             save_record(record_path, record)
         operations.stop(operations.processes())
         record['steps']['previous_app_stopped'] = 'completed'
@@ -363,7 +382,7 @@ def reuse_permissions(app, previous_record, previous_app, output=None, operation
         raise
 
 
-def prepare(app, output=None, dry_run=False, operations=None, diagnostics=None):
+def prepare(app, output=None, dry_run=False, operations=None, diagnostics=None, diagnostic_mode='preserve'):
     identity = app_identity(app)
     operations = operations or MacOS()
     processes = operations.processes()
@@ -390,7 +409,7 @@ def prepare(app, output=None, dry_run=False, operations=None, diagnostics=None):
     save_record(record_path, record)
     try:
         if diagnostics is not None:
-            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations)
+            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations, mode=diagnostic_mode)
             save_record(record_path, record)
         operations.stop(processes)
         record['steps']['previous_app_stopped'] = 'completed'
@@ -489,7 +508,7 @@ def check(record_path, operations=None, require_diagnostics=False):
         print('권한 미허용: GUI에서 승인한 뒤 다시 check하세요. 실제 입력 테스트는 아직 시작하지 마세요.')
         return 2
     print('권한·현재 실행본의 진단 파일 쓰기/읽기 확인 완료. 실입력 시험 준비가 됐습니다.' if receipt else
-          '권한만 확인했습니다. 로그가 필요한 입력 조사는 --preserve-input-incidents로 다시 준비하세요.')
+          '권한만 확인했습니다. 로그가 필요한 조사는 --preserve-input-incidents 또는 --bounded-input-incidents로 다시 준비하세요.')
     return 0
 
 
@@ -503,8 +522,11 @@ def main():
     prepare_parser.add_argument('--reuse-permissions-from', type=pathlib.Path,
                                 help='같은 인증서·경로의 이전 승인 기록 (초기화 없이 실제 권한 검사)')
     prepare_parser.add_argument('--previous-app', type=pathlib.Path, help='승인 당시의 보존된 앱 사본')
-    prepare_parser.add_argument('--preserve-input-incidents', type=pathlib.Path,
+    diagnostic_group = prepare_parser.add_mutually_exclusive_group()
+    diagnostic_group.add_argument('--preserve-input-incidents', type=pathlib.Path,
                                 help='실제 앱 쓰기/읽기와 현재 프로세스 증명을 필수로 확인할 진단 폴더')
+    diagnostic_group.add_argument('--bounded-input-incidents', type=pathlib.Path,
+                                  help='새 전용 경로에 자동32MiB·수동16MiB 한도와 현재 프로세스 저장 증명을 적용')
     check_parser = commands.add_parser('check', help='GUI 승인 후 새 앱의 권한 확인')
     check_parser.add_argument('record', type=pathlib.Path)
     check_parser.add_argument('--require-diagnostics', action='store_true',
@@ -512,18 +534,21 @@ def main():
     diagnostic_parser = commands.add_parser('verify-diagnostics', help='기존 앱 유지 상태에서 새 앱의 진단 저장만 사전 검증')
     diagnostic_parser.add_argument('app', type=pathlib.Path)
     diagnostic_parser.add_argument('--directory', required=True, type=pathlib.Path)
+    diagnostic_parser.add_argument('--bounded', action='store_true', help='별도 경로의 용량 제한 모드로 검사')
     args = parser.parse_args()
     try:
         if args.command == 'prepare':
+            diagnostic_mode = 'bounded' if args.bounded_input_incidents is not None else 'preserve'
+            diagnostic_path = args.bounded_input_incidents if args.bounded_input_incidents is not None else args.preserve_input_incidents
             if args.reuse_permissions_from or args.previous_app:
                 if not (args.reuse_permissions_from and args.previous_app) or args.dry_run:
                     raise PreflightError('재사용 검사는 이전 기록·앱 사본이 모두 필요하며 dry-run과 함께 사용할 수 없습니다.')
                 return reuse_permissions(args.app, args.reuse_permissions_from, args.previous_app, args.output,
-                                         diagnostics=args.preserve_input_incidents)
-            return prepare(args.app, args.output, args.dry_run, diagnostics=args.preserve_input_incidents)
+                                         diagnostics=diagnostic_path, diagnostic_mode=diagnostic_mode)
+            return prepare(args.app, args.output, args.dry_run, diagnostics=diagnostic_path, diagnostic_mode=diagnostic_mode)
         if args.command == 'verify-diagnostics':
             identity = app_identity(args.app)
-            verified = prepare_diagnostics(identity, args.directory, MacOS())
+            verified = prepare_diagnostics(identity, args.directory, MacOS(), mode='bounded' if args.bounded else 'preserve')
             print(json.dumps({'app': identity, 'diagnostics': verified, 'main_app_launched': False,
                               'existing_app_stopped': False}, ensure_ascii=False, indent=2))
             return 0
