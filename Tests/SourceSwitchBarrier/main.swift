@@ -7,6 +7,7 @@ func check(_ value:Bool,_ label:String){checks+=1;if !value{fputs("FAIL: "+label
 func key(_ code:CGKeyCode,_ flags:CGEventFlags=[])->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!;e.flags=flags;return e}
 let en="com.apple.keylayout.ABC",ko="com.apple.inputmethod.Korean.2SetKorean"
 let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(456)
+runInitialLayoutTests()
 runNativeObservationTests()
 runBoundaryDiagnosticTests()
 // A native select-all is an observation boundary, never an edit command.
