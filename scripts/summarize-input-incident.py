@@ -230,6 +230,23 @@ def capture_backlog(value):
         if not isinstance(d,dict) or len(d)>7 or any(k not in ['1','2','3','4','5','6','7'] or type(v) is not int or v<=0 for k,v in d.items()):raise ValueError('invalid capture backlog counters')
     return value
 
+def monitor_status(value):
+    keys={'observedAtMilliseconds','stage','reason','tapState','active','enabled','suspended','recovering','rollingBack','restartAllowed','pending','retained','attempts','failures','failureKind','stopReason','receivedEvents'}
+    booleans={'active','enabled','suspended','recovering','rollingBack','restartAllowed'}
+    def sample(row):
+        if not isinstance(row,dict) or set(row)-{'lastEventAgeMicros'}!=keys:raise ValueError('invalid monitor sample fields')
+        if any(type(row[k]) is not bool for k in booleans):raise ValueError('invalid monitor boolean')
+        if any(type(row[k]) is not int or not 0<=row[k]<=9_000_000_000_000_000 for k in keys-booleans):raise ValueError('invalid monitor counter')
+        for key,maximum in [('stage',4),('reason',11),('tapState',2),('failureKind',3),('stopReason',6),('lastEventAgeMicros',60_000_000)]:
+            if key in row and (type(row[key]) is not int or not 0<=row[key]<=maximum):raise ValueError('invalid monitor code')
+        return row
+    if not isinstance(value,dict) or set(value)!={'current','transitions','discardedTransitions'} or not isinstance(value['transitions'],list) or len(value['transitions'])>16 or type(value['discardedTransitions']) is not int or value['discardedTransitions']<0:raise ValueError('invalid monitor status')
+    current=sample(value['current']);transitions=[sample(r) for r in value['transitions']]
+    times=[r['observedAtMilliseconds'] for r in transitions]+[current['observedAtMilliseconds']]
+    if times!=sorted(times):raise ValueError('invalid monitor time order')
+    reasons=['ready','controller_inactive','input_unavailable','probe_active','accessibility_unavailable','secure_input','launch_disabled','taps_unhealthy','restart_rate_limit','safe_restart_refused','start_failed','retry_delay']
+    return dict(value,current_reason=reasons[current['reason']],interpretation='controller_samples_and_last_16_state_changes_no_keys_no_editor_internal_IME_state')
+
 def summarize(data):
     if data.get('schema') != 1 or not isinstance(data.get('frames'), list):
         raise ValueError('unsupported incident schema')
@@ -269,6 +286,7 @@ def summarize(data):
     storage=storage_status(data['storageBeforeWrite']) if 'storageBeforeWrite' in data else None
     preservation=capture_preservation(data['capturePreservation']) if 'capturePreservation' in data else None
     backlog=capture_backlog(data['captureBacklog']) if 'captureBacklog' in data else None
+    monitor=monitor_status(data['monitorStatus']) if 'monitorStatus' in data else None
     delivery=data.get('decisionDelivery')
     queue_overflow=[]
     if delivery is not None:
@@ -321,7 +339,7 @@ def summarize(data):
                 except (ValueError,TypeError):raise ValueError('invalid observation code')
                 if str(code)!=key or not 0<=code<2560 or type(n) is not int or n<=0:raise ValueError('invalid observation code/count')
                 operation,rest=divmod(code,256);lane,detail=divmod(rest,32)
-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
+                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0,31]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
                 if not valid or (group=='coalesced' and not (operation==3 or (operation==5 and ((lane==3 and detail>0) or (lane==2 and 17<=detail<=20))))):raise ValueError('invalid observation detail')
                 row=dict(operation=names[operation],lane=lanes[lane+1],detail=detail,count=n)
                 if operation==5 and lane<3 and 8<=detail<=12:row.update(control_role=CONTROL_ROLES[detail-8])
@@ -425,7 +443,7 @@ def summarize(data):
             source_evidence_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],action=source_actions[frame['edge']],**value))
         if frame['kind']==9:
             op=frame['category'];detail=frame['edge']
-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
+            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
             if not observed or not 1<=op<=10 or detail not in allowed or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False):raise ValueError('invalid observation wait frame')
         if frame['kind']==8:
             site=decision_sites.get(frame['edge'],'unknown')
@@ -490,7 +508,7 @@ def summarize(data):
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,
-            'capture_preservation':preservation,'capture_backlog':backlog,
+            'capture_preservation':preservation,'capture_backlog':backlog,'monitor_status':monitor,
             'observation_wait_totals':observation_totals,'observation_lock_waits':observation_lock_waits,'capture_timing':capture_timing,
             'decision_wait_totals':timing_totals,'decision_lock_waits':lock_waits,'decision_delays':decision_delays,'observation_delays':observation_delays,
             'detection_decision_counts':dict(decision_counts),'correlated_detection_decisions':event_decisions,
