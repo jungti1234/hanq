@@ -1,0 +1,171 @@
+{
+  "version": "0.3.2-beta.1",
+  "baseBuild": 362,
+  "baseTree": "a15f55a97a3b8f4ca66f47caa278d2f9f5f3d5a0",
+  "stages": [
+    {
+      "build": 363,
+      "file": "363-monitor-and-export.patch",
+      "tree": "689591c6eed44bbcee90909c27b2a274d7be03c7",
+      "sha256": "653170b973aab3a7d78599fad35751615ec48f628565e5ed852cd910dd1b0f16",
+      "paths": [
+        "CHANGELOG.md",
+        "Sources/HanQ/DiagnosticReview.swift",
+        "Sources/HanQ/DiagnosticReviewController.swift",
+        "Sources/HanQ/InputDiagnostics.swift",
+        "Sources/HanQ/MismatchMonitorLifecycle.swift",
+        "Sources/HanQ/MismatchRecoveryController.swift",
+        "Sources/HanQ/MismatchRecoveryEngine.swift",
+        "Tests/DiagnosticReview/main.swift",
+        "Tests/DiagnosticReviewIntegration/main.swift",
+        "Tests/Diagnostics/test_incident_summary.py",
+        "Tests/MismatchRecovery/MonitorLifecycleTests.swift",
+        "Tests/SourceEvidence/main.swift",
+        "Tools/InputTestRecorder/RecorderCore.swift",
+        "docs/SPEC.md",
+        "scripts/summarize-input-incident.py",
+        "version.env"
+      ]
+    },
+    {
+      "build": 364,
+      "file": "364-cursor-diagnostics.patch",
+      "tree": "4afe6eaae5765aab4b8bf10b51441212ec10cc38",
+      "sha256": "0fba8d0d04a98fecaa7e663c09598f656aae1b511126ebbfcbd972735afc6459",
+      "paths": [
+        "CHANGELOG.md",
+        "Sources/HanQ/DiagnosticReview.swift",
+        "Sources/HanQ/InputDiagnostics.swift",
+        "Sources/HanQ/SourceSwitchBarrier.swift",
+        "Sources/HanQ/main.swift",
+        "Tests/DiagnosticReview/main.swift",
+        "Tests/Diagnostics/BoundaryComparison/main.swift",
+        "Tests/Diagnostics/test_incident_summary.py",
+        "Tests/SourceSwitchBarrier/BoundaryDiagnostics.swift",
+        "Tests/SourceSwitchBarrier/main.swift",
+        "Tools/InputTestRecorder/RecorderCore.swift",
+        "docs/SPEC.md",
+        "scripts/summarize-input-incident.py",
+        "scripts/test-diagnostics.sh",
+        "version.env"
+      ]
+    },
+    {
+      "build": 365,
+      "file": "365-bounded-storage.patch",
+      "tree": "ed8ab4fc01d8a463a89f5ac20ce098750b494aad",
+      "sha256": "8f1abd31e40bd99ebc49975674a7932fda2e09f98c29bc3fe50be85aa09ce208",
+      "paths": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "Sources/HanQ/InputDiagnostics.swift",
+        "Tests/AppTestPreparation/test_diagnostic_readiness.py",
+        "Tests/Diagnostics/Bounded/main.swift",
+        "Tests/MismatchRecovery/IdleObservationTests.swift",
+        "docs/DEVELOPMENT.md",
+        "docs/SPEC.md",
+        "scripts/build-app.sh",
+        "scripts/prepare-app-test.py",
+        "scripts/test-diagnostics.sh",
+        "version.env"
+      ]
+    },
+    {
+      "build": 366,
+      "file": "366-first-keys.patch",
+      "tree": "9ef8266073291cca24352d87f4582591d3bcd8d7",
+      "sha256": "5f7bc6bef6e8e93b174d7cf152c1ea852aea5b7b359363f6314de269c6ab7f9a",
+      "paths": [
+        "CHANGELOG.md",
+        "Sources/HanQ/InputDiagnostics.swift",
+        "Sources/HanQ/MismatchRecoveryPlan.swift",
+        "Sources/HanQ/SourceSwitchBarrier.swift",
+        "Sources/HanQ/main.swift",
+        "Tests/MismatchRecovery/DetectionDecisionTests.swift",
+        "Tests/MismatchRecovery/DisappearingContextTests.swift",
+        "Tests/SourceSwitchBarrier/InitialLayoutTests.swift",
+        "Tests/SourceSwitchBarrier/main.swift",
+        "docs/SPEC.md",
+        "version.env"
+      ]
+    },
+    {
+      "build": 367,
+      "file": "367-outside-editor.patch",
+      "tree": "2d71b67168fe4a90fb77b2a68ac86f616b2e3e69",
+      "sha256": "73d7332599d30887a1704470324c6987cd1711912ba295ab16529f8b6d10c35c",
+      "paths": [
+        "CHANGELOG.md",
+        "README.md",
+        "Sources/HanQ/DiagnosticReview.swift",
+        "Sources/HanQ/InputDiagnostics.swift",
+        "Sources/HanQ/OnsetCompositionCommit.swift",
+        "Sources/HanQ/OnsetInputGate.swift",
+        "Sources/HanQ/OnsetLateSequenceDetector.swift",
+        "Sources/HanQ/OnsetRecoveryController.swift",
+        "Sources/HanQ/OnsetRecoveryEngine.swift",
+        "Sources/HanQ/OnsetRecoveryPlan.swift",
+        "Sources/HanQ/SourceSwitchBarrier.swift",
+        "Sources/HanQ/main.swift",
+        "Tests/Diagnostics/Observations/main.swift",
+        "Tests/OnsetRecovery/StructurePublication/main.swift",
+        "Tests/SourceSwitchBarrier/InitialLayoutTests.swift",
+        "Tools/InputTestRecorder/RecorderCore.swift",
+        "docs/SPEC.md",
+        "scripts/summarize-input-incident.py",
+        "version.env"
+      ]
+    },
+    {
+      "build": 368,
+      "file": "368-draft-safety.patch",
+      "tree": "7709c59353344498385e717a780d4d5d25145d6c",
+      "sha256": "6682af610647af1ea7594541c370c87add9de39c72b376c3521f5294a9a883b8",
+      "paths": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "Sources/HanQ/DiagnosticReview.swift",
+        "Sources/HanQ/InputDiagnostics.swift",
+        "Sources/HanQ/OnsetFocusHandoff.swift",
+        "Sources/HanQ/OnsetLateSequenceDetector.swift",
+        "Sources/HanQ/OnsetOutsideObservation.swift",
+        "Sources/HanQ/OnsetRecoveryController.swift",
+        "Sources/HanQ/OnsetRecoveryEngine.swift",
+        "Sources/HanQ/SourceSwitchBarrier.swift",
+        "Sources/HanQ/main.swift",
+        "Tests/DiagnosticReview/main.swift",
+        "Tests/Diagnostics/test_incident_summary.py",
+        "Tests/OnsetRecovery/StructurePublication/main.swift",
+        "Tests/OnsetRecovery/WitnessDiagnostics/main.swift",
+        "Tests/SourceSwitchBarrier/InitialLayoutTests.swift",
+        "Tools/InputTestRecorder/RecorderCore.swift",
+        "docs/SPEC.md",
+        "scripts/summarize-input-incident.py",
+        "version.env"
+      ]
+    },
+    {
+      "build": 369,
+      "file": "369-window-proof.patch",
+      "tree": "701401aeab99a59a800f0583e1f7479905a654a1",
+      "sha256": "20f533d7a8b3bf378af30417d0a3a977f456f27c02bb81ba168290343900430a",
+      "paths": [
+        "CHANGELOG.md",
+        "Sources/HanQ/DiagnosticReview.swift",
+        "Sources/HanQ/InputDiagnostics.swift",
+        "Sources/HanQ/InputFocusAccess.swift",
+        "Sources/HanQ/MismatchRecoveryEngine.swift",
+        "Sources/HanQ/OnsetRecoveryEngine.swift",
+        "Sources/HanQ/SourceSwitchBarrier.swift",
+        "Sources/HanQ/main.swift",
+        "Tests/OnsetRecovery/StructurePublication/main.swift",
+        "Tests/OnsetRecovery/WitnessDiagnostics/main.swift",
+        "Tests/SourceSwitchBarrier/InitialLayoutTests.swift",
+        "Tools/InputTestRecorder/RecorderCore.swift",
+        "docs/SPEC.md",
+        "scripts/summarize-input-incident.py",
+        "version.env"
+      ]
+    }
+  ]
+}

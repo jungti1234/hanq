@@ -1,0 +1,389 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 981609253518b29b8961d9b90e9a3f83d5bb9967..d5cbfe15588bca026f1b8e5a66e1136e5d298103 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3 +3,3 @@
+-## 0.3.2-beta.1 (빌드 365) — 미배포
++## 0.3.2-beta.1 (빌드 366) — 미배포
++
++- 명시적 두벌식 전환 직후 첫 문자에서 선택 소스와 자판이 어긋나면 원래 키를 순서대로 보호. 기존 본문이 사라진 경우 앞 키를 제외한 일부만 보정하는 동작 방지.
+diff --git a/Sources/HanQ/InputDiagnostics.swift b/Sources/HanQ/InputDiagnostics.swift
+index aa78ec63887bda8d361a6a9e9ba91c71b5cc5bf8..f919ae01047a6a43b6600705ac203650764ea248 100644
+--- a/Sources/HanQ/InputDiagnostics.swift
++++ b/Sources/HanQ/InputDiagnostics.swift
+@@ -460,0 +461 @@
++        case initialLayoutWait,initialLayoutReady,initialLayoutDeadline,initialContextChanged,initialSourceChanged,initialNativeBatchObserved,initialOriginalResumed
+@@ -462,0 +464,7 @@
++            case "initial_original_resumed":return .initialOriginalResumed
++            case "initial_native_batch_observed":return .initialNativeBatchObserved
++            case "initial_layout_wait":return .initialLayoutWait
++            case "initial_layout_ready":return .initialLayoutReady
++            case "initial_layout_deadline":return .initialLayoutDeadline
++            case "initial_context_changed":return .initialContextChanged
++            case "initial_source_changed":return .initialSourceChanged
+diff --git a/Sources/HanQ/MismatchRecoveryPlan.swift b/Sources/HanQ/MismatchRecoveryPlan.swift
+index b5fbccd0fa3503d4216a8b839dc3aede7b08d200..6f1c37a25fa6d69918f0405ffe1ca2e4b39a2917 100644
+--- a/Sources/HanQ/MismatchRecoveryPlan.swift
++++ b/Sources/HanQ/MismatchRecoveryPlan.swift
+@@ -54,0 +55,15 @@
++    private func ambiguousWholePrefix(text:String,selection:NSRange)->Bool {
++        // A different document as a whole, not an ordinary insertion within
++        // intact text. This match can preserve a candidate, never start a write.
++        guard !before.isEmpty,pendingCompletion==nil,verifiedReplacement==nil,
++              !codes.isEmpty,codes.count<256,selection.length==0,
++              selection.location==text.utf16.count,!text.isEmpty,hasLetters,
++              !sameObservedSurroundings("") else{return false}
++        // Lengths are UTF-16. Compare exact keyboard output or an already
++        // supported mixed rendering, without normalizing a draft or moving a caret.
++        if text.utf16.count==roman.utf16.count && text.lowercased()==roman.lowercased(){return true}
++        guard text.utf16.count<=codes.count*3 else{return false}
++        var shape=MismatchRecoveryPlan(before:"",caret:0,sourceID:sourceID)
++        shape.codes=codes;shape.roman=roman
++        return shape.mixedInsertion(text:text,selection:selection) != nil
++    }
+@@ -80,0 +96,7 @@
++            } else if previous.ambiguousWholePrefix(text:text,selection:selection) {
++                // The complete displayed body could be our earlier keys OR a
++                // restored draft. Losing their surroundings does not authorize
++                // erasing them, nor does it make a suffix-only repair complete.
++                // Keep the original coordinates. If they reappear, the ordinary
++                // full-context verifier can recover every key.
++                candidate=previous
+diff --git a/Sources/HanQ/SourceSwitchBarrier.swift b/Sources/HanQ/SourceSwitchBarrier.swift
+index d1871c0805aafed56714a460d67800609dccacd1..1abd017c20bb4b53093ff2ef16d1346fd79fd3a1 100644
+--- a/Sources/HanQ/SourceSwitchBarrier.swift
++++ b/Sources/HanQ/SourceSwitchBarrier.swift
+@@ -19,0 +20,30 @@
++    // Only an explicit switch can arm this guard. A layout report cannot
++    // authorize an edit to text the application already owns.
++    enum InitialLayout {case conflicting, ready, unknown, sourceChanged}
++    var initialLayout:(()->InitialLayout)?
++    var fieldWindow:(AXUIElement)->AXUIElement? = { field in
++        var raw:CFTypeRef?
++        guard AXUIElementCopyAttributeValue(field,kAXWindowAttribute as CFString,&raw) == .success,
++              let raw,CFGetTypeID(raw)==AXUIElementGetTypeID() else{return nil}
++        return (raw as! AXUIElement)
++    }
++    private struct Entry {let field:AXUIElement;let at:Double}
++    private struct HeldStart {let snapshot:Snapshot;let window:AXUIElement;let until:Double}
++    private var entry:Entry?
++    private var heldStart:HeldStart?
++    private struct NativeBatch {
++        let field:AXUIElement,window:AXUIElement
++        let layout:InitialLayout
++        var keys:[(UInt16,Bool)]=[]
++        var expected:String?
++    }
++    private var nativeBatch:NativeBatch?
++    private var nextLayoutCheck=0.0
++    static func classifyInitialLayout(first:String,layout:String,override:String?,last:String)->InitialLayout {
++        let target=KoreanKeyboardLayout.twoSetID, keyboard="com.apple.keylayout.2SetHangul"
++        guard first==last else{return .unknown}
++        guard first==target else{return first=="unknown" ? .unknown:.sourceChanged}
++        if layout=="com.apple.keylayout.ABC",override==nil{return .conflicting}
++        let korean=[target,keyboard]
++        return korean.contains(layout) && (override==nil || korean.contains(override!)) ? .ready:.unknown
++    }
+@@ -243 +273 @@
+-    func resetObservation(){let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
++    func resetObservation(){entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
+@@ -490,0 +521,76 @@
++    private func isInitialLetter(_ event:CGEvent)->Bool {
++        guard event.type == .keyDown,event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskSecondaryFn,.maskAlphaShift]).isEmpty,
++              event.getIntegerValueField(.keyboardEventAutorepeat)==0,
++              let code=UInt16(exactly:event.getIntegerValueField(.keyboardEventKeycode)) else{return false}
++        return PhysicalLetterKeys.letters[code] != nil
++    }
++    // Called before a native key passes, or immediately before the first
++    // queued key is posted. Never derive ownership from a displayed string.
++    private func holdFirstIfNeeded(_ event:CGEvent,alreadyQueued:Bool)->Bool {
++        guard let candidate=entry,heldStart==nil else{return heldStart != nil}
++        let age=now()-candidate.at
++        guard age>=0,age<=MismatchSourceEvidence.confirmationSeconds else{entry=nil;return false}
++        if event.type == .keyUp{return false}
++        if event.type == .flagsChanged {
++            if !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{entry=nil}
++            return false
++        }
++        guard isInitialLetter(event),let initialLayout else{entry=nil;return false}
++        entry=nil // at most once, including the ordinary fast path
++        guard initialLayout() == .conflicting,isReady(),!externalEditPending,
++              repairInFlight.isEmpty,onsetInFlight.isEmpty else{return false}
++        guard let snap=read(),CFEqual(candidate.field,snap.field),let window=fieldWindow(snap.field) else{
++            if alreadyQueued{fail("initial_context_changed");return true}
++            return false
++        }
++        let limit=candidate.at+1
++        if !busy{busy=true;transactionField=snap.field;deadline=limit}
++        heldStart=HeldStart(snapshot:snap,window:window,until:limit);nextLayoutCheck=now()+0.016
++        trace("initial_layout_wait");schedule();return true
++    }
++    private func initialDeliveryReady()->Bool {
++        guard let h=heldStart else{return true}
++        let expired=now()>=h.until
++        guard !externalEditPending else{fail("initial_context_changed");return false}
++        guard expired || now()>=nextLayoutCheck else{schedule();return false}
++        nextLayoutCheck=now()+0.016
++        guard let phase=initialLayout?(), phase != .sourceChanged else{fail("initial_source_changed");return false}
++        // Some input methods can continue to produce correct text while the
++        // layout API keeps reporting ABC. That report alone must not park
++        // original input indefinitely or authorize rewriting a draft.
++        guard phase == .ready || (expired && phase == .conflicting) else{
++            if expired{fail("initial_layout_deadline")}else{schedule()};return false
++        }
++        // Nothing in this batch has reached the editor. Even identical letters
++        // in a draft cannot be a receipt for one of these owned events.
++        guard let snap=read(),CFEqual(snap.field,h.snapshot.field),
++              let win=fieldWindow(snap.field),CFEqual(win,h.window),
++              snap.selection==h.snapshot.selection,snap.text.utf16.elementsEqual(h.snapshot.text.utf16),
++              initialLayout?() == phase else{fail("initial_context_changed");return false}
++        if !snap.text.isEmpty {
++            nativeBatch=NativeBatch(field:snap.field,window:win,layout:phase)
++        }
++        heldStart=nil;deadline=now()+1;trace(phase == .ready ? "initial_layout_ready":"initial_original_resumed");return true
++    }
++    private func recordNativeBatchEdge(_ event:CGEvent) {
++        guard nativeBatch != nil,event.type != .keyUp else{return}
++        if event.type == .flagsChanged,event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{return}
++        guard isInitialLetter(event),nativeBatch!.keys.count<64,
++              let code=UInt16(exactly:event.getIntegerValueField(.keyboardEventKeycode)) else{nativeBatch=nil;return}
++        nativeBatch!.keys.append((code,event.flags.contains(.maskShift)));nativeBatch!.expected=nil
++    }
++    // Acknowledges transport only, after all owned edges returned through the
++    // tap. The original AX body may have disappeared when native input began.
++    // Discard all typed-history authority: a matching draft is never evidence
++    // that we may erase any of it on a later key.
++    private func finishNativeBatchIfMatched(_ s:Snapshot)->Bool {
++        guard let batch=nativeBatch,!batch.keys.isEmpty,target==nil,queued.isEmpty,
++              !awaitingReplay,!awaitingSelection,!externalEditPending,repairInFlight.isEmpty,onsetInFlight.isEmpty,
++              CFEqual(batch.field,s.field),s.selection==NSRange(location:s.text.utf16.count,length:0) else{return false}
++        if batch.expected==nil{nativeBatch!.expected=MismatchKeyboardLayout.render(keys:batch.keys,sourceID:KoreanKeyboardLayout.twoSetID)}
++        guard let predicted=nativeBatch?.expected,predicted.utf16.elementsEqual(s.text.utf16),
++              let win=fieldWindow(s.field),CFEqual(win,batch.window),
++              source()==KoreanKeyboardLayout.twoSetID,initialLayout?() == batch.layout else{return false}
++        resetObservation();field=s.field;ledger=MismatchReplayLedger(before:s.text,caret:s.selection.location)
++        trace("initial_native_batch_observed");return true
++    }
+@@ -497,0 +604 @@
++        if !busy,entry != nil { _=holdFirstIfNeeded(event,alreadyQueued:false) }
+@@ -498,0 +606,4 @@
++        if heldStart != nil,type == .flagsChanged,
++           !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty {
++            fail("initial_context_changed");return false
++        }
+@@ -535,0 +647,2 @@
++        if heldStart != nil{fail("initial_source_changed")}
++        entry=nil;nativeBatch=nil
+@@ -560 +673 @@
+-        DispatchQueue.main.asyncAfter(deadline:.now()+0.002){[weak self] in
++        DispatchQueue.main.asyncAfter(deadline:.now()+(heldStart==nil ? 0.002:0.016)){[weak self] in
+@@ -584,0 +698 @@
++        if let h=heldStart,now()>=h.until,!isReady(){fail("initial_layout_deadline");return}
+@@ -592,0 +707 @@
++        guard initialDeliveryReady() else{return}
+@@ -663,0 +779 @@
++            let confirmedUserRequest=targetTimestamp != 0
+@@ -683,0 +800,3 @@
++            if initialLayout != nil,target==KoreanKeyboardLayout.twoSetID,confirmedUserRequest {
++                entry=Entry(field:snap.field,at:now())
++            }
+@@ -692,2 +811,2 @@
+-        if expected == nil || matches(snap) {
+-            busy=false;self.transactionField=nil;finishDiagnosticRequest(1);trace("finished")
++        if expected == nil || matches(snap) || finishNativeBatchIfMatched(snap) {
++            nativeBatch=nil;busy=false;self.transactionField=nil;finishDiagnosticRequest(1);trace("finished")
+@@ -696,0 +816 @@
++        if let first=queued.first,entry != nil,holdFirstIfNeeded(first,alreadyQueued:true){return}
+@@ -705,0 +826 @@
++        recordNativeBatchEdge(event)
+@@ -708,0 +830 @@
++        heldStart=nil;entry=nil
+diff --git a/Sources/HanQ/main.swift b/Sources/HanQ/main.swift
+index 70bd6f1aa647d0940ce6bc399e8a2e0a1a231dc5..5fb4433bfb0642e87c9201057d5fa85c7db7f969 100644
+--- a/Sources/HanQ/main.swift
++++ b/Sources/HanQ/main.swift
+@@ -106,0 +107,5 @@
++        barrier.initialLayout = {
++            let first=InputSourceAccess.currentID(),layout=InputSourceAccess.currentLayoutID()
++            let override=InputSourceAccess.currentOverrideID(),last=InputSourceAccess.currentID()
++            return SourceSwitchBarrier.classifyInitialLayout(first:first,layout:layout,override:override,last:last)
++        }
+diff --git a/Tests/MismatchRecovery/DetectionDecisionTests.swift b/Tests/MismatchRecovery/DetectionDecisionTests.swift
+index e31811bf4a7d9e8e4b324752a91c32710b8ef381..ee40bb9673e17f3d1b87b4105b646a77d02b91bf 100644
+--- a/Tests/MismatchRecovery/DetectionDecisionTests.swift
++++ b/Tests/MismatchRecovery/DetectionDecisionTests.swift
+@@ -4,0 +5 @@
++    runDisappearingContextTests()
+diff --git a/Tests/MismatchRecovery/DisappearingContextTests.swift b/Tests/MismatchRecovery/DisappearingContextTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..e55bb76541e2a05dae712ef325044004c9758a66
+--- /dev/null
++++ b/Tests/MismatchRecovery/DisappearingContextTests.swift
+@@ -0,0 +1,28 @@
++import Foundation
++
++func runDisappearingContextTests(){
++    let before="앞🙂기존 본문",end=before.utf16.count
++    func candidate(_ codes:[UInt16])->MismatchRecoveryPlan{
++        var p=MismatchRecoveryPlan(before:before,caret:end)
++        for c in codes{probeTestCheck(p.append(code:c,shift:false))}
++        return p
++    }
++    for (keys,surface,next) in [([UInt16(15),40],"rk",UInt16(1)),([15,46],"rm",UInt16(0)),([15,46],"rㅡ",UInt16(0)),([1,40],"sk",UInt16(1))] {
++        let p=candidate(keys)
++        let retained=MismatchRecoveryPlan.next(previous:p,text:surface,selection:NSRange(location:surface.utf16.count,length:0),code:next,shift:false)!
++        probeTestCheck(retained.codes.count==keys.count+1 && retained.before==before && retained.caret==end,"lost prefix never becomes a draft baseline")
++        let extra=MismatchRecoveryPlan.character(next,false)!
++        for after in [surface+extra,surface+(MismatchKeyboardLayout.render(keys:[(next,false)],sourceID:retained.sourceID) ?? "")]{
++            let caret=NSRange(location:after.utf16.count,length:0)
++            probeTestCheck(!retained.matches(text:after,selection:caret) && retained.partialFailurePlan(text:after,selection:caret)==nil,"no suffix-only edit with ambiguous draft")
++        }
++        let full=before+retained.roman
++        probeTestCheck(retained.matches(text:full,selection:NSRange(location:full.utf16.count,length:0)),"when surrounding text reappears all keys are eligible")
++    }
++    let p=candidate([15,40])
++    let fresh=MismatchRecoveryPlan.next(previous:p,text:"older rk",selection:NSRange(location:8,length:0),code:0,shift:false)!
++    probeTestCheck(fresh.before=="older rk" && fresh.codes.count==1,"different surrounding body starts genuine new run")
++    let selected=MismatchRecoveryPlan.next(previous:p,text:"rk",selection:NSRange(location:0,length:2),code:0,shift:false)!
++    probeTestCheck(selected.before.isEmpty && selected.codes.count==1,"explicit selection remains the new insertion boundary")
++    print("PASS: complete wrong prefix retained without edit on lost surroundings; full recovery eligible on return")
++}
+diff --git a/Tests/SourceSwitchBarrier/InitialLayoutTests.swift b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9a68e5dc5105ca9ede8666199eab9ae613e3d17
+--- /dev/null
++++ b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+@@ -0,0 +1,111 @@
++import AppKit
++import Carbon
++
++func runInitialLayoutTests(){
++    typealias B=SourceSwitchBarrier
++    let ko=KoreanKeyboardLayout.twoSetID,abc="com.apple.keylayout.ABC",layout="com.apple.keylayout.2SetHangul"
++    check(B.classifyInitialLayout(first:ko,layout:abc,override:nil,last:ko) == .conflicting,"coherent ABC without override")
++    check(B.classifyInitialLayout(first:ko,layout:abc,override:layout,last:ko) == .unknown,"overridden ABC cannot trigger guard")
++    check(B.classifyInitialLayout(first:ko,layout:layout,override:layout,last:ko) == .ready,"actual Korean layout")
++    check(B.classifyInitialLayout(first:ko,layout:abc,override:nil,last:abc) == .unknown,"torn read")
++    check(B.classifyInitialLayout(first:abc,layout:abc,override:nil,last:abc) == .sourceChanged,"explicit switch away")
++    final class Rig {
++        let b=B()
++        let f=AXUIElementCreateApplication(91),w=AXUIElementCreateApplication(92),other=AXUIElementCreateApplication(93)
++        var focus:AXUIElement?,window:AXUIElement?,src="com.apple.keylayout.ABC"
++        var body:String,selection:NSRange,time=8.0,phase:B.InitialLayout = .conflicting
++        var sent:[Int]=[],saved:[Int]=[],writes=0,probes=0,nativeKeys:[(UInt16,Bool)]=[],stages:[String]=[]
++        var original:String,position:Int,nativeKoreanUnderABC=false
++        init(_ before:String,_ caret:Int){
++            original=before;position=caret;body=before;selection=NSRange(location:caret,length:0)
++            focus=f;window=w;b.now={self.time}
++            b.source={self.src};b.select={self.src=$0;return noErr}
++            b.read={guard let f=self.focus else{return nil};return .init(field:f,text:self.body,selection:self.selection)}
++            b.readFocus={self.focus};b.fieldWindow={_ in self.window}
++            b.initialLayout={self.probes+=1;return self.phase}
++            b.applySelection={_,_ in self.writes+=1;return false}
++            b.retained={self.saved += $0.map(Self.edge)}
++            b.trace={ self.stages.append($0) }
++            b.send={event in
++                self.sent.append(Self.edge(event));check(!self.b.receive(event.type,event),"owned replay passes once")
++                self.b.observe(event.type,event)
++                if event.type == .keyDown {
++                    let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
++                    self.nativeKeys.append((code,event.flags.contains(.maskShift)))
++                    let inserted=(self.phase == .ready || self.nativeKoreanUnderABC) ? MismatchKeyboardLayout.render(keys:self.nativeKeys,sourceID:KoreanKeyboardLayout.twoSetID)! : self.nativeKeys.compactMap{MismatchRecoveryPlan.character($0.0,$0.1)}.joined()
++                    self.body=(self.original as NSString).replacingCharacters(in:NSRange(location:self.position,length:0),with:inserted)
++                    self.selection=NSRange(location:self.position+inserted.utf16.count,length:0)
++                }
++            }
++        }
++        static func edge(_ e:CGEvent)->Int {Int(e.getIntegerValueField(.keyboardEventKeycode))+(e.type == .keyUp ? 100:0)}
++        func advance(_ n:Int=1){for _ in 0..<n {time+=0.02;b.step()}}
++        func request(_ timestamp:UInt64=14){check(b.request(KoreanKeyboardLayout.twoSetID,at:timestamp),"explicit boundary accepted")}
++        @discardableResult func sendKey(_ code:UInt16,_ down:Bool=true,_ flags:CGEventFlags=[])->Bool{let e=key(code,flags);e.type=down ? .keyDown:.keyUp;return b.receive(e.type,e)}
++    }
++    for pending in [true,false] {
++        for (letters,wanted) in [([UInt16(15),40],"가"),([UInt16(15),46,0],"금"),([UInt16(1),40],"나")] {
++            for draft in ["","rk","1234567890123456"] {
++                let r=Rig(draft,draft.utf16.count);r.request()
++                if !pending{r.advance(2);check(!r.b.busy,"no idle wait for layout")}
++                for code in letters {check(r.sendKey(code) && r.sendKey(code,false),"both physical edges owned")}
++                r.advance(12)
++                check(r.sent.isEmpty && r.body==draft && r.writes==0,"unsettled layout never releases leading keys or edits draft")
++                r.phase = .ready;r.advance(letters.count*2+5)
++                check(r.sent==letters.flatMap{[Int($0),Int($0)+100]} && r.body==draft+wanted && r.writes==0 && r.saved.isEmpty && !r.b.busy,"full first run once, original intact")
++            }
++        }
++    }
++    // The OS layout and the editor's AX representation are independent.
++    // Stale AX can start with either a label or real text that the editor
++    // replaces on its own first insertion. No HanQ selection is written.
++    for prior in ["Fixture title 16","Existing draft!!"] {
++        let r=Rig(prior,0);r.original="";r.position=0;r.request();r.advance(2)
++        for c:UInt16 in [15,46,0]{check(r.sendKey(c) && r.sendKey(c,false),"all pre-delivery edges captured")}
++        r.advance(12);check(r.body==prior && r.sent.isEmpty,"old representation intact until native layout catches up")
++        r.phase = .ready;r.advance(15)
++        check(r.body=="금" && r.sent==[15,115,46,146,0,100] && r.writes==0 && !r.b.busy,"native editor replaces initial body exactly once")
++    }
++    // A newly restored, identical-looking draft is not the buffered keystrokes.
++    do {
++        let r=Rig("Fixture title 16",0);r.request();r.advance(2)
++        for c:UInt16 in [15,40]{_=r.sendKey(c);_=r.sendKey(c,false)}
++        r.body="rk";r.selection=NSRange(location:2,length:0);r.phase = .ready;r.advance(8)
++        check(r.body=="rk" && r.sent.isEmpty && r.saved==[15,115,40,140] && r.writes==0,"old rk restored during hold is never rewritten")
++    }
++    do {
++        let r=Rig("draft",5);r.nativeKoreanUnderABC=true;r.request();r.advance(2)
++        for c:UInt16 in [15,40]{_=r.sendKey(c);_=r.sendKey(c,false)}
++        r.advance(60)
++        check(r.body=="draft가" && r.sent==[15,115,40,140] && r.saved.isEmpty && r.writes==0 && !r.b.busy &&
++              r.stages.contains("initial_original_resumed"),"persistent layout-only conflict never permanently parks healthy native input")
++    }
++    for cause in ["field","window","draft","caret","source","deadline","shortcut","missing"]{
++        let r=Rig("rk",2);r.request();r.advance(2)
++        for c:UInt16 in [15,40] {check(r.sendKey(c) && r.sendKey(c,false),"start unsafe case")}
++        switch cause {
++        case "field":r.focus=r.other;r.phase  = .ready
++        case "window":r.window=r.other;r.phase  = .ready
++        case "draft":r.body="restored";r.phase  = .ready
++        case "caret":r.selection=NSRange(location:0,length:0);r.phase  = .ready
++        case "source":r.phase  = .sourceChanged
++        case "deadline":r.phase = .unknown;r.time+=1.2
++        case "missing":r.focus=nil;r.phase  = .ready
++        default:let event=key(55,.maskCommand);event.type = .flagsChanged;check(!r.b.receive(.flagsChanged,event),"new shortcut left to original route")
++        }
++        r.advance(3)
++        check(r.sent.isEmpty && r.writes==0 && r.saved==[15,115,40,140] && !r.b.busy,"retain original edges once on "+cause)
++    }
++    for condition in ["healthy","unknown","expired","untimed","other-field","shortcut","autorepeat","no-request","no-window"] {
++        let r=Rig("draft",3)
++        if condition != "no-request"{r.request(condition=="untimed" ? 0:42);r.advance(2)}
++        if condition=="expired"{r.time+=2}
++        if condition=="other-field"{r.focus=r.other}
++        if condition=="no-window"{r.window=nil}
++        if condition=="healthy"{r.phase  = .ready}
++        if condition=="unknown"{r.phase  = .unknown}
++        let event=key(15,condition=="shortcut" ? .maskCommand:[])
++        if condition=="autorepeat"{event.setIntegerValueField(.keyboardEventAutorepeat,value:1)}
++        check(!r.b.receive(.keyDown,event) && r.sent.isEmpty && r.saved.isEmpty && !r.b.busy && r.writes==0,"original fast path "+condition)
++    }
++}
+diff --git a/Tests/SourceSwitchBarrier/main.swift b/Tests/SourceSwitchBarrier/main.swift
+index 09ccf93af9a7756021ea04b57d72cbd5060060cb..32bff5b0d45e368727469f570d13898a3516c5ca 100644
+--- a/Tests/SourceSwitchBarrier/main.swift
++++ b/Tests/SourceSwitchBarrier/main.swift
+@@ -9,0 +10 @@
++runInitialLayoutTests()
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index e068bd4c639334c1e9ef56eecca12d40acbba121..071f387fe14fedfdc97a832f12867fb7296e0c5c 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -65,0 +66,4 @@
++명시적으로 두벌식으로 전환한 직후 0.5초 안의 첫 문자에서 선택 소스는 두벌식이지만 자판은 ABC이고 오버라이드가 없으면, 아직 전달하지 않은 키를 기존 전환 대기열에 순서대로 둔다. 두벌식 자판이 확인되고 입력칸·창·본문·선택이 같을 때 원래 키를 한 번씩 전달한다. 확인 기한은 전환 확인부터 1초다. 기한이 지나도 같은 입력칸·창·본문·커서와 두벌식 선택을 재확인하고 ABC 보고만 지속되면 원래 키를 한 번씩 전달한다. 대상이나 소스가 달라졌거나 안전을 확인할 수 없으면 기존 보관 경로로 넘긴다. 정상 전환에 고정 지연이나 유휴 자판 조회를 추가하지 않는다.
++
++이전에 읽은 본문이 사라지고 대신 지금까지 누른 키와 같은 영문이나 혼합 출력만 보인다면, 그 값만으로 기존 초안을 덮어쓰지 않는다. 앞 키의 원래 위치를 보존하며 뒤쪽 일부만 고친 것을 전체 보정으로 처리하지 않는다. 원래 본문과 커서 주변이 다시 확인되면 전체 키를 기존 기준으로 검증한다.
++
+diff --git a/version.env b/version.env
+index e1f8618418a75f76b74784d7752e53759cc4d58b..66332050fb0e683ee9444f4ba35129ca649c1620 100644
+--- a/version.env
++++ b/version.env
+@@ -4 +4 @@
+-BUILD_NUMBER=365
++BUILD_NUMBER=366

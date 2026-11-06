@@ -1,0 +1,530 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 32d0cbd04b68b939f09d9644b9a104d393de74ae..19520cd3350f0f64a1507bdd4894cc5216e35c12 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3 +3,3 @@
+-## 0.3.2-beta.1 (빌드 363) — 미배포
++## 0.3.2-beta.1 (빌드 364) — 미배포
++
++- 전환 대기의 예상·조회 선택 범위 변화와 예측 기준·경과 진단 추가. 본문·정확한 위치 비수집 및 기존 안전 조건 유지.
+diff --git a/Sources/HanQ/DiagnosticReview.swift b/Sources/HanQ/DiagnosticReview.swift
+index 8be43e95be81be67e6d0520d827e709730ed942a..ba270baa46483351c3ae61d807fe0a9147621d38 100644
+--- a/Sources/HanQ/DiagnosticReview.swift
++++ b/Sources/HanQ/DiagnosticReview.swift
+@@ -337,0 +338,4 @@
++            if kind == 14,let raw=frame["boundaryEvidence"] as? [String:Any],let evidence=InputIncidentTrace.BoundaryEvidence.parse(raw) {
++                counts["전환 범위 비교: "+evidence.resolutionLabel,default:0]+=1
++                if evidence.suppressed>0 {counts["전환 비교 변화 기록 상한 도달",default:0]+=1}
++            }
+diff --git a/Sources/HanQ/InputDiagnostics.swift b/Sources/HanQ/InputDiagnostics.swift
+index e60ff30877367ef48b4d69a35a8b2c385fedf6a0..2083a1172d779d1bf40c44096bec8c3a7125c6b6 100644
+--- a/Sources/HanQ/InputDiagnostics.swift
++++ b/Sources/HanQ/InputDiagnostics.swift
+@@ -344 +344,30 @@
+-    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision}
++    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison}
++    struct BoundaryEvidence:Codable,Equatable {
++        // Fixed relations only: never positions, selection lengths, body, keys or hashes.
++        // phase: request/comparison/end; reason: none/success/deadline/context/other.
++        var transaction,phase,reason,text,start,end,expected,reported,change,resolution:Int
++        var seed,mutation,revision,observations,suppressed,coalesced,fieldRelation:Int
++        var baselineAgeMicros,mutationAgeMicros,requestAgeMicros,sampleAgeMicros:Int?
++        static let required=Set(["transaction","phase","reason","text","start","end","expected","reported","change","resolution","seed","mutation","revision","observations","suppressed","coalesced","fieldRelation"])
++        static let ages=Set(["baselineAgeMicros","mutationAgeMicros","requestAgeMicros","sampleAgeMicros"])
++        var valid:Bool {
++            (1...1_000_000_000).contains(transaction) && (1...3).contains(phase) && (0...4).contains(reason) &&
++            ((phase==3) == (reason>0)) && (0...5).contains(text) && (0...3).contains(start) && (0...3).contains(end) &&
++            (0...2).contains(expected) && (0...2).contains(reported) && (0...4).contains(change) && (0...5).contains(resolution) &&
++            (0...13).contains(seed) && (0...13).contains(mutation) && (0...2).contains(fieldRelation) &&
++            [revision,observations,suppressed,coalesced].allSatisfy{(0...1_000_000).contains($0)} &&
++            [baselineAgeMicros,mutationAgeMicros,requestAgeMicros,sampleAgeMicros].allSatisfy{$0.map{(0...60_000_000).contains($0)} ?? true} &&
++            (phase != 1 || (observations==0 && text==0 && resolution==0)) &&
++            (!(1...4).contains(resolution) || (fieldRelation==1 && (1...4).contains(text) && start==2 && end==2 && expected>0 && expected==reported))
++        }
++        var resolutionLabel:String {
++            ["판단 근거 미확인","현재 비교 일치","예측 유지 중 앱 보고가 일치값에 도달","앱 보고 유지 중 예측이 일치값으로 변경","양쪽 변경 뒤 일치","불일치 지속·원인 미확정"][resolution]
++        }
++        static func parse(_ object:[String:Any])->Self? {
++            guard Set(object.keys).subtracting(ages)==required,object.values.allSatisfy({value in
++                guard let number=value as? NSNumber else{return false}
++                return CFGetTypeID(number) != CFBooleanGetTypeID() && number.doubleValue==Double(number.intValue)
++            }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
++            return value
++        }
++    }
+@@ -555,0 +585 @@
++        var boundaryEvidence:BoundaryEvidence?=nil
+@@ -1399,0 +1430,9 @@
++    func boundaryComparison(_ evidence:BoundaryEvidence){
++        guard enabled,evidence.valid else{return};let time=clock()
++        // The existing bounded metadata worker; no new timer, AX/TIS query or capture.
++        _ = submit(.context,.sourceBoundary,observedAt:time){[self] timing in
++            append(.sourceBoundary,.boundaryComparison,observedAt:time,observationTiming:timing)
++            ring[(position-1+capacity)%capacity]?.boundaryEvidence=evidence
++            updatePreservedLastFrame()
++        }
++    }
+diff --git a/Sources/HanQ/SourceSwitchBarrier.swift b/Sources/HanQ/SourceSwitchBarrier.swift
+index baf2ea2141c535ba93aa79391bc15359b339eebc..d1871c0805aafed56714a460d67800609dccacd1 100644
+--- a/Sources/HanQ/SourceSwitchBarrier.swift
++++ b/Sources/HanQ/SourceSwitchBarrier.swift
+@@ -10,0 +11,5 @@
++    var diagnostic:(InputIncidentTrace.BoundaryEvidence)->Void = {_ in}
++    private var diagnosticGeneration:Int32=0
++    private var diagnosticHistory=BoundaryDiagnosticHistory()
++    private var diagnosticTransaction:BoundaryDiagnosticTransaction?
++    private var diagnosticSequence=0
+@@ -173 +178,3 @@
+-        ledger=resolvingDeletionBoundary(snap,candidate)
++        let resolved=resolvingDeletionBoundary(snap,candidate)
++        if diagnosticEnabled(),candidate.selection != resolved.selection || candidate.postDeletionPrefixCount != resolved.postDeletionPrefixCount {noteDiagnosticHistory(13)}
++        ledger=resolved
+@@ -176 +183,3 @@
+-        guard let ledger,let match=textMatch(snap,ledger) else{return}
++        guard let ledger else{return}
++        let result=textMatch(snap,ledger)
++        guard let match=result else{noteDiagnosticComparison(snap,match:nil);return}
+@@ -180,0 +190 @@
++            noteDiagnosticHistory(9)
+@@ -181,0 +192 @@
++        noteDiagnosticComparison(snap,match:match)
+@@ -212,0 +224 @@
++        noteDiagnosticHistory(9,baseline:true)
+@@ -228 +240 @@
+-        ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil
++        ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil;noteDiagnosticHistory(9,baseline:true)
+@@ -231 +243 @@
+-    func resetObservation(){deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
++    func resetObservation(){let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
+@@ -244 +256 @@
+-            field=snap.field;ledger=candidate;historyStarted=saved.started;return true
++            field=snap.field;ledger=candidate;historyStarted=saved.started;noteDiagnosticHistory(8,baseline:true);return true
+@@ -304,0 +317 @@
++        noteDiagnosticHistory(4,baseline:true)
+@@ -341,0 +355 @@
++        noteDiagnosticHistory(5,baseline:true)
+@@ -364,0 +379 @@
++        noteDiagnosticHistory(6,baseline:true)
+@@ -416 +431 @@
+-            if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)}
++            if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);noteDiagnosticHistory(3,baseline:true)}
+@@ -417,0 +433 @@
++            noteDiagnosticHistory(3)
+@@ -440,0 +457 @@
++                noteDiagnosticHistory(1,baseline:true)
+@@ -443 +460 @@
+-        if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil}
++        if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil;noteDiagnosticHistory(11)}
+@@ -452,0 +470 @@
++        noteDiagnosticHistory(10)
+@@ -523 +541 @@
+-            trace("waiting_for_editor");schedule();return true
++            beginDiagnosticRequest(at:deadline-1);trace("waiting_for_editor");schedule();return true
+@@ -525 +543 @@
+-        if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection}
++        if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
+@@ -528 +546 @@
+-        busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1.0;waitReason=nil;lastTextMatch=nil;trace("waiting_for_editor");schedule();return true
++        busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1.0;waitReason=nil;lastTextMatch=nil;beginDiagnosticRequest(at:deadline-1);trace("waiting_for_editor");schedule();return true
+@@ -607,0 +626 @@
++            noteDiagnosticHistory(12,baseline:true)
+@@ -647 +666 @@
+-            let previous=ledger
++            let previous=ledger,previousDiagnosticHistory=diagnosticHistory
+@@ -658,0 +678 @@
++                diagnosticHistory=previousDiagnosticHistory;noteDiagnosticHistory(7)
+@@ -661,0 +682 @@
++                noteDiagnosticHistory(7,baseline:true)
+@@ -672 +693 @@
+-            busy=false;self.transactionField=nil;trace("finished")
++            busy=false;self.transactionField=nil;finishDiagnosticRequest(1);trace("finished")
+@@ -687,0 +709 @@
++        finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
+@@ -699,0 +722,104 @@
++
++    private func diagnosticEnabled()->Bool {
++        let generation=incidentTrace.collectionGeneration
++        if generation != diagnosticGeneration {
++            diagnosticGeneration=generation;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticTransaction=nil
++        }
++        return generation>0
++    }
++    private func noteDiagnosticHistory(_ cause:Int,baseline:Bool=false) {
++        guard diagnosticEnabled() else{return}
++        diagnosticHistory.note(cause,baseline:baseline,at:now())
++    }
++    private func beginDiagnosticRequest(at time:Double) {
++        guard diagnosticEnabled() else{return}
++        finishDiagnosticRequest(4)
++        diagnosticSequence=diagnosticSequence==1_000_000_000 ? 1:diagnosticSequence+1
++        diagnosticTransaction=BoundaryDiagnosticTransaction(id:diagnosticSequence,started:time)
++        diagnostic(diagnosticTransaction!.evidence(phase:1,reason:0,history:diagnosticHistory,at:time))
++    }
++    private func noteDiagnosticComparison(_ snap:Snapshot,match:TextMatch?) {
++        guard diagnosticEnabled(),busy,diagnosticTransaction != nil else{return}
++        let text:Int
++        switch match {case .exact:text=1;case .style:text=2;case .terminalLF:text=3;case .terminalLFStyle:text=4;case nil:text=5}
++        // step() already verified the transaction field. No extra field/source query.
++        if let value=diagnosticTransaction?.observe(prediction:selectedRange ?? ledger?.selection,reported:snap.selection,text:text,history:diagnosticHistory,at:now()) {diagnostic(value)}
++    }
++    private func finishDiagnosticRequest(_ reason:Int) {
++        guard diagnosticEnabled(),let transaction=diagnosticTransaction else{return}
++        diagnostic(transaction.evidence(phase:3,reason:reason,history:diagnosticHistory,at:now()))
++        diagnosticTransaction=nil
++    }
++}
++
++// Only ranges needed for relation changes remain in this bounded, transient state.
++// Encoded evidence contains fixed relations and capped ages, never the ranges.
++struct BoundaryDiagnosticHistory {
++    var seed=0,mutation=0,revision=0
++    var seededAt:Double?,mutatedAt:Double?
++    mutating func note(_ cause:Int,baseline:Bool,at time:Double) {
++        revision=revision==1_000_000 ? 0:revision+1;mutation=cause;mutatedAt=time
++        if baseline{seed=cause;seededAt=time}
++    }
++}
++struct BoundaryDiagnosticTransaction {
++    let id:Int,started:Double
++    private var prediction:NSRange?,reported:NSRange?,previousRevision:Int?
++    private var mismatchPrediction:NSRange?,mismatchReported:NSRange?,mismatchRevision:Int?
++    private var predictionChanged=false,reportChanged=false
++    private var resolvedAfterMismatch:Int?
++    private var text=0,change=0,resolution=0,observations=0,suppressed=0,coalesced=0,emitted=0
++    private var sampledAt:Double?,signature:InputIncidentTrace.BoundaryEvidence?
++    init(id:Int,started:Double){self.id=id;self.started=started}
++    private static func age(_ from:Double?,_ to:Double)->Int? {
++        guard let from,from.isFinite,to.isFinite,to>=from else{return nil}
++        return Int(min(60,to-from)*1_000_000)
++    }
++    private static func validRange(_ range:NSRange?)->NSRange? {
++        guard let range,range.location>=0,range.length>=0,range.location != NSNotFound,
++              !range.location.addingReportingOverflow(range.length).overflow else{return nil}
++        return range
++    }
++    private static func relation(_ a:Int?,_ b:Int?)->Int {
++        guard let a,let b else{return 0};return a<b ? 1:(a==b ? 2:3)
++    }
++    func evidence(phase:Int,reason:Int,history:BoundaryDiagnosticHistory,at time:Double)->InputIncidentTrace.BoundaryEvidence {
++        let a=Self.validRange(prediction),b=Self.validRange(reported)
++        return .init(transaction:id,phase:phase,reason:reason,text:text,
++            start:Self.relation(a?.location,b?.location),end:Self.relation(a.map{NSMaxRange($0)},b.map{NSMaxRange($0)}),
++            expected:a.map{$0.length==0 ? 1:2} ?? 0,reported:b.map{$0.length==0 ? 1:2} ?? 0,
++            change:change,resolution:resolution,seed:history.seed,mutation:history.mutation,revision:history.revision,
++            observations:observations,suppressed:suppressed,coalesced:coalesced,fieldRelation:observations>0 ? 1:0,
++            baselineAgeMicros:Self.age(history.seededAt,time),mutationAgeMicros:Self.age(history.mutatedAt,time),
++            requestAgeMicros:Self.age(started,time),sampleAgeMicros:Self.age(sampledAt,time))
++    }
++    mutating func observe(prediction next:NSRange?,reported actual:NSRange,text:Int,history:BoundaryDiagnosticHistory,at time:Double)->InputIncidentTrace.BoundaryEvidence? {
++        let next=Self.validRange(next),actual=Self.validRange(actual)
++        let p=prediction != next || previousRevision.map{$0 != history.revision} == true,r=reported != actual
++        change=observations==0 ? 0:(p ? (r ? 4:3):(r ? 2:1))
++        prediction=next;reported=actual;previousRevision=history.revision;self.text=text;sampledAt=time
++        observations=min(1_000_000,observations+1)
++        let matched=next != nil && next==actual && (1...4).contains(text)
++        if let revision=mismatchRevision,resolvedAfterMismatch==nil {
++            predictionChanged = predictionChanged || mismatchPrediction != next || revision != history.revision
++            reportChanged = reportChanged || mismatchReported != actual
++        }
++        if matched {
++            if mismatchRevision != nil,resolvedAfterMismatch==nil {resolvedAfterMismatch=predictionChanged ? (reportChanged ? 4:3):(reportChanged ? 2:1)}
++            resolution=resolvedAfterMismatch ?? 1
++        } else {
++            if next != nil,actual != nil,(mismatchRevision==nil || resolvedAfterMismatch != nil) {
++                mismatchPrediction=next;mismatchReported=actual;mismatchRevision=history.revision
++                predictionChanged=false;reportChanged=false;resolvedAfterMismatch=nil
++            }
++            resolution=next != nil && actual != nil ? 5:0
++        }
++        let value=evidence(phase:2,reason:0,history:history,at:time)
++        var key=value
++        key.observations=0;key.suppressed=0;key.coalesced=0
++        key.baselineAgeMicros=nil;key.mutationAgeMicros=nil;key.requestAgeMicros=nil;key.sampleAgeMicros=nil
++        guard key != signature else{coalesced=min(1_000_000,coalesced+1);return nil}
++        signature=key
++        guard emitted<32 else{suppressed=min(1_000_000,suppressed+1);return nil}
++        emitted+=1;return value
++    }
+diff --git a/Sources/HanQ/main.swift b/Sources/HanQ/main.swift
+index 615b2a62297c86343a56bbd1485b6707cf5d50e9..70bd6f1aa647d0940ce6bc399e8a2e0a1a231dc5 100644
+--- a/Sources/HanQ/main.swift
++++ b/Sources/HanQ/main.swift
+@@ -148,0 +149 @@
++        barrier.diagnostic = { InputIncidentTrace.shared.boundaryComparison($0) }
+diff --git a/Tests/DiagnosticReview/main.swift b/Tests/DiagnosticReview/main.swift
+index 9cb0ca0b0a2c3c3f4bf00a7fe4b22b050a24df69..aa16da8c9ae509487b5632d1f654391bcd1f49f5 100644
+--- a/Tests/DiagnosticReview/main.swift
++++ b/Tests/DiagnosticReview/main.swift
+@@ -186,0 +187,10 @@
++var comparison:[String:Any]=["transaction":1,"phase":2,"reason":0,"text":1,"start":2,"end":2,"expected":1,"reported":1,"change":2,"resolution":2,"seed":1,"mutation":10,"revision":2,"observations":2,"suppressed":0,"coalesced":0,"fieldRelation":1]
++for (code,label) in [(2,"예측 유지 중 앱 보고가 일치값에 도달"),(3,"앱 보고 유지 중 예측이 일치값으로 변경"),(4,"양쪽 변경 뒤 일치"),(5,"불일치 지속·원인 미확정")] {
++    comparison["resolution"]=code
++    if code==5 {comparison["start"]=3;comparison["end"]=3}
++    let preview=try projected([["kind":14,"boundaryEvidence":comparison]])
++    check(preview.readableText.contains(label),"comparison direction is readable without claiming an internal IME cause")
++}
++comparison["body"]="PRIVATE_COMPARISON_BODY"
++let invalidComparison=try projected([["kind":14,"boundaryEvidence":comparison]])
++check(!invalidComparison.readableText.contains("PRIVATE_COMPARISON_BODY") && !invalidComparison.readableText.contains("전환 범위 비교:"),"malformed comparison cannot enter preview")
+diff --git a/Tests/Diagnostics/BoundaryComparison/main.swift b/Tests/Diagnostics/BoundaryComparison/main.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..ced58919be3b68cff4fec6c41d87161c0ae18ce3
+--- /dev/null
++++ b/Tests/Diagnostics/BoundaryComparison/main.swift
+@@ -0,0 +1,43 @@
++import Foundation
++import Darwin
++
++var checks=0
++func check(_ value:@autoclosure ()->Bool,_ title:String){checks+=1;if !value(){fputs("FAIL: \(title)\n",stderr);exit(1)}}
++var captures:[InputIncidentTrace.Capture]=[]
++let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
++var value=InputIncidentTrace.BoundaryEvidence(transaction:1,phase:2,reason:0,text:1,start:3,end:3,expected:1,reported:1,change:0,resolution:5,
++    seed:1,mutation:10,revision:2,observations:1,suppressed:0,coalesced:0,fieldRelation:1,
++    baselineAgeMicros:60000000,mutationAgeMicros:3,requestAgeMicros:1000,sampleAgeMicros:0)
++trace.boundaryComparison(value);trace.mark();trace.flush()
++value.phase=3;value.reason=1;value.start=2;value.end=2;value.change=2;value.resolution=2;value.observations=2
++trace.boundaryComparison(value);trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
++check(captures.count==2,"one manual pre/post window")
++for capture in captures {
++    let data=try! JSONEncoder().encode(capture)
++    check((try? RecorderTrace.decode(data)) != nil,"actual comparison producer accepted by strict recorder")
++    let frames=capture.frames.filter{$0.boundaryEvidence != nil}
++    check(frames.count==1 && frames[0].kind.rawValue==14 && frames[0].lane.rawValue==8,"comparison has dedicated frame, never a false source commit or wait")
++    check(try! JSONEncoder().encode(frames[0]).count<1024,"fixed comparison record stays below 1KiB in producer fixture")
++    if capture.phase==1 {check(frames[0].boundaryEvidence?.phase==3 && frames[0].boundaryEvidence?.resolution==2,"post-window preserves evidence attached after append")}
++    if CommandLine.arguments.count>1 {try! data.write(to:URL(fileURLWithPath:CommandLine.arguments[1]+"-\(capture.phase).json"))}
++}
++let data=try! JSONEncoder().encode(captures[0])
++var object=try! JSONSerialization.jsonObject(with:data) as! [String:Any]
++let original=object["frames"] as! [[String:Any]],index=original.firstIndex{$0["kind"] as? Int==14}!
++let evidence=original[index]["boundaryEvidence"] as! [String:Any]
++check(InputIncidentTrace.BoundaryEvidence.parse(evidence) != nil,"review parser accepts actual producer")
++for patch:[String:Any] in [["transaction":0],["phase":4],["phase":true],["reason":1],["text":6],["start":4],["end":false],["expected":3],["change":5],["resolution":6],["seed":14],["mutation":14],["revision":-1],["revision":1.5],["observations":1000001],["suppressed":-1],["fieldRelation":3],["baselineAgeMicros":60000001],["sampleAgeMicros":NSNull()],["actualLocation":77],["body":"PRIVATE"],["baselineAgeMicros":true]] {
++    var bad=evidence;bad.merge(patch){_,new in new}
++    check(InputIncidentTrace.BoundaryEvidence.parse(bad)==nil,"review rejects invalid/private comparison payload")
++    var rows=original;rows[index]["boundaryEvidence"]=bad;object["frames"]=rows
++    check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"strict recorder rejects invalid/private comparison payload")
++}
++for patch:[String:Any] in [["kind":7],["lane":2],["count":1],["edge":1],["event":1],["onsetEvidence":["keys":1]],["body":"PRIVATE"]] {
++    var rows=original;rows[index].merge(patch){_,new in new};object["frames"]=rows
++    check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"comparison restricted to its dedicated metadata frame")
++}
++var old=original.filter{$0["kind"] as? Int != 14};object["frames"]=old
++check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object))) != nil,"legacy record without comparisons remains accepted")
++let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{_ in fatalError("OFF must not write")})
++off.boundaryComparison(value);off.mark();off.flush()
++print("PASS \(checks) boundary comparison wire checks")
+diff --git a/Tests/Diagnostics/test_incident_summary.py b/Tests/Diagnostics/test_incident_summary.py
+index f3fedd79ab4e1f2c645a7d8dce8717506a540c1b..17b7b1d7e142501e3868a2262156a5e108d89894 100644
+--- a/Tests/Diagnostics/test_incident_summary.py
++++ b/Tests/Diagnostics/test_incident_summary.py
+@@ -11,0 +12,14 @@
++    def test_boundary_comparison_is_typed_bounded_and_not_causal_blame(self):
++        timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
++        evidence=dict(transaction=1,phase=2,reason=0,text=1,start=2,end=2,expected=1,reported=1,change=2,resolution=2,seed=1,mutation=10,revision=2,observations=2,suppressed=0,coalesced=3,fieldRelation=1,baselineAgeMicros=60000000,sampleAgeMicros=0)
++        row=dict(sequence=1,milliseconds=80,lane=8,kind=14,event=0,edge=0,category=0,inputOrigin=0,consumed=False,durationMicros=0,count=0,selected=False,field=0,observationTiming=timing,boundaryEvidence=evidence)
++        result=summary.summarize(dict(schema=1,trigger=1,frames=[row]))['boundary_comparisons'][0]
++        self.assertEqual(result['resolution_name'],'reported_reached_stable_prediction')
++        self.assertEqual(result['mutation_name'],'observed_key')
++        self.assertIn('not_editor_internal_IME_or_causal_fault_proof',result['interpretation'])
++        for patch in [dict(transaction=0),dict(phase=4),dict(reason=2),dict(text=6),dict(start=True),dict(end=4),dict(expected=3),dict(change=5),dict(resolution=6),dict(seed=14),dict(mutation=14),dict(revision=-1),dict(revision=1.5),dict(observations=1000001),dict(suppressed=-1),dict(fieldRelation=0),dict(baselineAgeMicros=60000001),dict(sampleAgeMicros=None),dict(sampleAgeMicros=True),dict(actualLocation=77),dict(body='PRIVATE')]:
++            with self.assertRaises(ValueError):summary.boundary_evidence(dict(evidence,**patch))
++        for patch in [dict(kind=7),dict(lane=2),dict(count=1),dict(event=1),dict(body='PRIVATE'),dict(onsetEvidence=dict(keys=1)),dict(observationTiming=None)]:
++            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
++        self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[]))['boundary_comparisons'],[])
++
+diff --git a/Tests/SourceSwitchBarrier/BoundaryDiagnostics.swift b/Tests/SourceSwitchBarrier/BoundaryDiagnostics.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..58408ce0d5a0cfd0abb1f2713675c0125d13103b
+--- /dev/null
++++ b/Tests/SourceSwitchBarrier/BoundaryDiagnostics.swift
+@@ -0,0 +1,90 @@
++import AppKit
++import Carbon
++
++func runBoundaryDiagnosticTests() {
++    let at0=NSRange(location:0,length:0),at1=NSRange(location:1,length:0),at2=NSRange(location:2,length:0)
++    var history=BoundaryDiagnosticHistory();history.note(1,baseline:true,at:0);history.note(10,baseline:false,at:0.01)
++    var report=BoundaryDiagnosticTransaction(id:1,started:0.1)
++    check(report.observe(prediction:at1,reported:at0,text:1,history:history,at:0.2)?.resolution==5,"first caret mismatch remains unresolved")
++    let caught=report.observe(prediction:at1,reported:at1,text:1,history:history,at:0.25)!
++    check(caught.resolution==2 && caught.change==2,"report changes to stable prediction")
++    check(caught.seed==1 && caught.mutation==10 && caught.baselineAgeMicros==250000,"baseline and most recent prediction cause have distinct ages")
++    history.note(7,baseline:false,at:0.3)
++    _=report.observe(prediction:at1,reported:at1,text:1,history:history,at:0.31)
++    check(report.evidence(phase:3,reason:1,history:history,at:0.32).resolution==2,"post-switch history cannot rewrite earlier resolution")
++    var prediction=BoundaryDiagnosticTransaction(id:2,started:0)
++    _=prediction.observe(prediction:at1,reported:at0,text:1,history:history,at:0)
++    history.note(13,baseline:false,at:0.1)
++    check(prediction.observe(prediction:at0,reported:at0,text:1,history:history,at:0.1)?.resolution==3,"prediction changes to unchanged report")
++    var both=BoundaryDiagnosticTransaction(id:3,started:0)
++    _=both.observe(prediction:at1,reported:at0,text:1,history:history,at:0)
++    check(both.observe(prediction:at2,reported:at2,text:1,history:history,at:0.2)?.resolution==4,"both sides changing is not report-only evidence")
++    var unchanged=BoundaryDiagnosticTransaction(id:4,started:0)
++    _=unchanged.observe(prediction:at1,reported:at0,text:1,history:history,at:0)
++    for _ in 0..<200 {_=unchanged.observe(prediction:at1,reported:at0,text:1,history:history,at:0.1)}
++    let timeout=unchanged.evidence(phase:3,reason:2,history:history,at:1.004)
++    check(timeout.resolution==5 && timeout.coalesced>190 && timeout.sampleAgeMicros==904000,"persistent mismatch preserves last-read freshness and coalesces repeated samples")
++    check(timeout.requestAgeMicros==1004000 && timeout.observations==201 && timeout.valid,"terminal diagnostics reflect real observations, not a new AX read")
++    var bounded=BoundaryDiagnosticTransaction(id:5,started:0);var emitted=0
++    for i in 0..<200 {if bounded.observe(prediction:at1,reported:at0,text:i%2==0 ? 1:5,history:history,at:Double(i)/1000) != nil{emitted+=1}}
++    check(emitted==32 && bounded.evidence(phase:3,reason:2,history:history,at:1).suppressed>0,"comparison transitions capped at 32 plus request/end")
++    var unknown=BoundaryDiagnosticTransaction(id:6,started:0)
++    check(unknown.observe(prediction:nil,reported:at0,text:0,history:history,at:0)?.resolution==0,"missing prediction stays unknown")
++    check(unknown.observe(prediction:NSRange(location:Int.max,length:1),reported:at0,text:1,history:history,at:0.1)?.expected==0,"overflowing range never produces a relation")
++    _=unknown.observe(prediction:at1,reported:NSRange(location:NSNotFound,length:0),text:1,history:history,at:0.2)
++    check(unknown.evidence(phase:3,reason:4,history:history,at:0.3).reported==0,"unavailable report is not a collapsed caret")
++    let capped=report.evidence(phase:3,reason:1,history:history,at:100)
++    check(capped.baselineAgeMicros==60000000 && capped.requestAgeMicros==60000000,"ages cap at 60 seconds")
++    check(report.evidence(phase:3,reason:1,history:history,at:-1).requestAgeMicros==nil,"backward clock is unmeasured")
++    var wrapped=history;wrapped.revision=1_000_000;wrapped.note(10,baseline:false,at:0.4)
++    check(wrapped.revision==0,"bounded revision wraps instead of silently losing later mutations")
++
++    // Same injected product operations with diagnostics OFF/ON; never post keys.
++    var outcomes:[[Int]]=[]
++    for enabled in [false,true] {
++        let b=SourceSwitchBarrier();var body="",range=at0,selected=ko,time=0.0,reads=0,queries=0,switches=0,posts=0,writes=0,retained=0
++        var evidence:[InputIncidentTrace.BoundaryEvidence]=[]
++        b.incidentTrace=InputIncidentTrace(destination:nil,initiallyEnabled:enabled,writer:{_ in})
++        b.diagnostic={evidence.append($0)};b.now={time}
++        b.read={reads+=1;return .init(field:field,text:body,selection:range)};b.readFocus={field}
++        b.source={queries+=1;return selected};b.select={selected=$0;switches+=1;return noErr}
++        b.send={_ in posts+=1};b.applySelection={_,_ in writes+=1;return false};b.retained={retained += $0.count}
++        b.observe(.keyDown,key(0));body="ㅁ"
++        check(b.request(en),"diagnosed request accepted")
++        b.step()
++        for code in [CGKeyCode(54),56,1,1,56] {
++            let value=key(code);value.type = code==1 ? .keyDown:.flagsChanged
++            check(b.receive(value.type,value),"diagnosed queue owns undelivered event")
++        }
++        time=1.004;b.step()
++        outcomes.append([reads,queries,switches,posts,writes,retained,b.busy ? 1:0])
++        check(retained==5 && switches==0 && posts==0 && writes==0,"diagnostics cannot weaken range guard or replay retained events")
++        if enabled {
++            check(evidence.first?.phase==1 && evidence.last?.phase==3 && evidence.last?.reason==2,"request and terminal compare evidence stay paired")
++            check(evidence.last?.seed==1 && evidence.last?.mutation==10 && evidence.last?.resolution==5,"original prediction provenance survives deadline")
++            check(evidence.allSatisfy{$0.valid},"every emitted evidence record conforms to wire contract")
++            let object=try! JSONSerialization.jsonObject(with:JSONEncoder().encode(evidence)) as! [[String:Any]]
++            check(object.allSatisfy{Set($0.keys).subtracting(InputIncidentTrace.BoundaryEvidence.ages)==InputIncidentTrace.BoundaryEvidence.required},"no body, keys, actual ranges, hashes or app identity are serialized")
++        } else {check(evidence.isEmpty,"diagnostics OFF emits no comparison evidence")}
++        b.fail("test_cleanup")
++        let idleReads=reads,idleQueries=queries,idleEvidence=evidence.count
++        for _ in 0..<1000 {b.step()}
++        check(reads==idleReads && queries==idleQueries && evidence.count==idleEvidence,"idle step adds no AX/source query, comparison record or file request")
++    }
++    check(outcomes[0]==outcomes[1],"ON/OFF has identical existing AX/source call counts, edits, delivery and retained result")
++    do {
++        let trace=InputIncidentTrace(destination:nil,writer:{_ in}),b=SourceSwitchBarrier()
++        var text="",selection=at0,source=ko,records:[InputIncidentTrace.BoundaryEvidence]=[]
++        b.incidentTrace=trace;b.diagnostic={records.append($0)};b.now={0}
++        b.read={.init(field:field,text:text,selection:selection)};b.readFocus={field};b.source={source};b.select={source=$0;return noErr};b.send={_ in}
++        b.observe(.keyDown,key(0));text="ㅁ";check(b.request(en),"generation trial begins")
++        b.step();let before=records.count
++        trace.setCollectionEnabled(false);trace.flush();b.step()
++        check(records.count==before,"OFF stops an in-flight comparison immediately")
++        trace.setCollectionEnabled(true);trace.flush();b.step()
++        check(records.count==before,"re-enabled collection cannot invent the earlier request baseline")
++        b.fail("test_cleanup");check(b.request(en),"new request after generation change")
++        check(records.last?.phase==1 && records.last?.seed==2,"new generation records its own request read instead of stale key provenance")
++        b.fail("test_cleanup")
++    }
++}
+diff --git a/Tests/SourceSwitchBarrier/main.swift b/Tests/SourceSwitchBarrier/main.swift
+index 9df6f15652ee16037ba0ba86b442db608d494209..09ccf93af9a7756021ea04b57d72cbd5060060cb 100644
+--- a/Tests/SourceSwitchBarrier/main.swift
++++ b/Tests/SourceSwitchBarrier/main.swift
+@@ -10,0 +11 @@
++runBoundaryDiagnosticTests()
+diff --git a/Tools/InputTestRecorder/RecorderCore.swift b/Tools/InputTestRecorder/RecorderCore.swift
+index 69793844c99f5df7bd86819f5eef8705beaf2784..0e781b87fe552080881df31ad697933fa0e7079a 100644
+--- a/Tools/InputTestRecorder/RecorderCore.swift
++++ b/Tools/InputTestRecorder/RecorderCore.swift
+@@ -157,0 +158,19 @@
++enum RecorderBoundaryEvidence {
++    static let required=Set(["transaction","phase","reason","text","start","end","expected","reported","change","resolution","seed","mutation","revision","observations","suppressed","coalesced","fieldRelation"])
++    static let ages=Set(["baselineAgeMicros","mutationAgeMicros","requestAgeMicros","sampleAgeMicros"])
++    static func valid(_ value:[String:Int])->Bool {
++        guard Set(value.keys).subtracting(ages)==required else{return false}
++        let bounds:[String:ClosedRange<Int>]=["transaction":1...1_000_000_000,"phase":1...3,"reason":0...4,"text":0...5,"start":0...3,"end":0...3,"expected":0...2,"reported":0...2,"change":0...4,"resolution":0...5,"seed":0...13,"mutation":0...13,"revision":0...1_000_000,"observations":0...1_000_000,"suppressed":0...1_000_000,"coalesced":0...1_000_000,"fieldRelation":0...2]
++        guard bounds.allSatisfy({$0.value.contains(value[$0.key]!)}),ages.allSatisfy({value[$0].map{(0...60_000_000).contains($0)} ?? true}),
++              (value["phase"]==3)==(value["reason"]!>0),
++              value["phase"] != 1 || (value["observations"]==0 && value["text"]==0 && value["resolution"]==0) else{return false}
++        return !(1...4).contains(value["resolution"]!) || (value["fieldRelation"]==1 && (1...4).contains(value["text"]!) && value["start"]==2 && value["end"]==2 && value["expected"]!>0 && value["expected"]==value["reported"])
++    }
++    static func accepts(_ raw:Any)->Bool {
++        guard let raw=raw as? [String:Any],raw.values.allSatisfy({value in
++            guard let n=value as? NSNumber else{return false}
++            return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
++        }),let data=try? JSONSerialization.data(withJSONObject:raw),let value=try? JSONDecoder().decode([String:Int].self,from:data) else{return false}
++        return valid(value)
++    }
++}
+@@ -173,0 +193 @@
++    var boundaryEvidence:[String:Int]?=nil
+@@ -318 +338,5 @@
+-                  guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...13).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
++                  guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...14).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
++                  if row.kind==14 {
++                      return row.boundaryEvidence.map{RecorderBoundaryEvidence.valid($0)}==true && row.lane==8 && row.event==0 && row.edge==0 && row.category==0 && row.inputOrigin==0 && !row.consumed && row.durationMicros==0 && row.count==0 && !row.selected && row.field==0 && row.observationTiming?.valid==true && row.decisionTiming==nil && row.sourceEvidence==nil && row.shapeEvidence==nil && row.controlEvidence==nil && row.eventEvidence==nil && row.workEvidence==nil && row.readOutcome==nil && row.focusEvidence==nil && row.onsetEvidence==nil
++                  }
++                  guard row.boundaryEvidence==nil else{return false}
+@@ -408 +432,2 @@
+-            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence"])==keys else{return false}
++            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence","boundaryEvidence"])==keys else{return false}
++            if row.keys.contains("boundaryEvidence"),!RecorderBoundaryEvidence.accepts(row["boundaryEvidence"]!){return false}
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index 8a54cdf55cae12d01b98cce7fd6ed634824c8c01..05e538cdee231a88a47c552574955f9e9ebe32c6 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -379,0 +380,2 @@
++전환 대기의 선택 범위 진단은 기존 조회와 예측값의 시작/끝 앞뒤 관계·선택 유무·본문 비교 종류, 예측 기준/변경 사유와 최대60초 경과를 고정 숫자로 남긴다. 정확한 위치·길이·본문·키·내용 해시는 저장하지 않는다. 예측 유지 중 보고값 도달·보고 유지 중 예측 변경·양쪽 변경·불일치 지속을 구분하며 대상 앱 내부 상태나 최초 원인으로 단정하지 않는다. 전환별 변화32개와 요청/종료 상태를 제한적으로 기록하고 반복 표본은 병합한다. 기존 AX/TIS 조회·입력 전송·전환·선택 쓰기·기한·보관 조건을 변경하지 않으며 별도 타이머나 주기적 파일 쓰기를 추가하지 않는다. 기존 기한에서 마지막 조회의 경과와 기록 생략을 함께 남긴다. 구형 자료의 계측 부재는 미측정이다.
++
+diff --git a/scripts/summarize-input-incident.py b/scripts/summarize-input-incident.py
+index 7a6028c20e9c0033fcd45249830d7c81f14d7cf8..467380f2054b55bb9e408144527f9127e68a3dd8 100644
+--- a/scripts/summarize-input-incident.py
++++ b/scripts/summarize-input-incident.py
+@@ -259,0 +260,16 @@
++BOUNDARY_REQUIRED={'transaction','phase','reason','text','start','end','expected','reported','change','resolution','seed','mutation','revision','observations','suppressed','coalesced','fieldRelation'}
++BOUNDARY_AGES={'baselineAgeMicros','mutationAgeMicros','requestAgeMicros','sampleAgeMicros'}
++BOUNDARY_RESOLUTIONS=['unmeasured','matched','reported_reached_stable_prediction','prediction_reached_stable_report','both_changed_before_match','persistent_mismatch_unresolved']
++BOUNDARY_CAUSES=['unmeasured','pre_key_read','request_read','native_select_all','onset_replay','verified_manual_edit','verified_replay','source_commit','verified_deletion_history','initial_body_removed','observed_key','selected_replacement','repair_acknowledged','deletion_reconciled']
++def boundary_evidence(value):
++    bounds={'transaction':(1,1_000_000_000),'phase':(1,3),'reason':(0,4),'text':(0,5),'start':(0,3),'end':(0,3),'expected':(0,2),'reported':(0,2),'change':(0,4),'resolution':(0,5),'seed':(0,13),'mutation':(0,13),'revision':(0,1_000_000),'observations':(0,1_000_000),'suppressed':(0,1_000_000),'coalesced':(0,1_000_000),'fieldRelation':(0,2)}
++    if not isinstance(value,dict) or set(value)-BOUNDARY_AGES!=BOUNDARY_REQUIRED or any(type(v) is not int for v in value.values()):raise ValueError('invalid boundary comparison fields')
++    if any(not low<=value[k]<=high for k,(low,high) in bounds.items()) or any(not 0<=value[k]<=60_000_000 for k in BOUNDARY_AGES&set(value)):raise ValueError('invalid boundary comparison values')
++    if (value['phase']==3)!=(value['reason']>0) or (value['phase']==1 and (value['observations']!=0 or value['text']!=0 or value['resolution']!=0)):raise ValueError('inconsistent boundary comparison phase')
++    if 1<=value['resolution']<=4 and not(value['fieldRelation']==1 and 1<=value['text']<=4 and value['start']==value['end']==2 and value['expected']>0 and value['expected']==value['reported']):raise ValueError('inconsistent boundary comparison match')
++    return dict(value,phase_name=['unknown','request','comparison','end'][value['phase']],end_reason=['none','success','deadline','context_changed','other_abort'][value['reason']],
++                text_match=['unmeasured','existing_equality','insertion_style','terminal_lf','terminal_lf_style','mismatch'][value['text']],
++                start_relation=['unknown','prediction_before_report','equal','prediction_after_report'][value['start']],end_relation=['unknown','prediction_before_report','equal','prediction_after_report'][value['end']],
++                change_name=['first','unchanged','report_only','prediction_only','both'][value['change']],resolution_name=BOUNDARY_RESOLUTIONS[value['resolution']],
++                seed_name=BOUNDARY_CAUSES[value['seed']],mutation_name=BOUNDARY_CAUSES[value['mutation']],interpretation='observed_relation_changes_only_not_editor_internal_IME_or_causal_fault_proof')
++
+@@ -396,0 +413 @@
++    boundary_rows=[]
+@@ -398,0 +416,4 @@
++        if frame['kind']==14 or 'boundaryEvidence' in frame:
++            required={'sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','consumed','durationMicros','count','selected','field','observationTiming','boundaryEvidence'}
++            if set(frame)!=required or any(type(frame.get(k)) is not int for k in ['sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','durationMicros','count','field']) or frame['sequence']<=0 or frame['milliseconds']<0 or frame['kind']!=14 or frame['lane']!=8 or any(frame[k]!=0 for k in ['event','edge','category','inputOrigin','durationMicros','count','field']) or frame['consumed'] is not False or frame['selected'] is not False or not valid_timing(frame['observationTiming']):raise ValueError('invalid boundary comparison frame')
++            boundary_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],**boundary_evidence(frame['boundaryEvidence'])))
+@@ -518 +539 @@
+-            'onset_decisions':onset_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
++            'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
+diff --git a/scripts/test-diagnostics.sh b/scripts/test-diagnostics.sh
+index 0feabf6d2d57335086c1b9c922a8b36990f0795f..1eb4cae7c6e34dacc8a1aba8348a65e9f73e5fb7 100644
+--- a/scripts/test-diagnostics.sh
++++ b/scripts/test-diagnostics.sh
+@@ -74,0 +75,5 @@
++
++swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/BoundaryComparison/main.swift -o "$stage/boundary-comparison-tests"
++hanq_test_run "$stage/boundary-comparison-tests" "$stage/boundary-comparison"
++python3 -B scripts/summarize-input-incident.py "$stage/boundary-comparison-0.json" > "$stage/boundary-comparison-summary.json"
++python3 -B scripts/summarize-input-incident.py "$stage/boundary-comparison-1.json" > "$stage/boundary-comparison-post-summary.json"
+diff --git a/version.env b/version.env
+index 2ed50532df312f2421498392f69d6841209a290b..e7bbb92179faf9b788738c0bdfd62b4deb9c3371 100644
+--- a/version.env
++++ b/version.env
+@@ -4 +4 @@
+-BUILD_NUMBER=363
++BUILD_NUMBER=364

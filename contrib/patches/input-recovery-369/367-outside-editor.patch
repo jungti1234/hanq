@@ -1,0 +1,427 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d5cbfe15588bca026f1b8e5a66e1136e5d298103..5b268ef50c2341edb0acca225d62cdadcc055dd5 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3 +3,3 @@
+-## 0.3.2-beta.1 (빌드 366) — 미배포
++## 0.3.2-beta.1 (빌드 367) — 미배포
++
++- 입력칸 밖에서 두벌식으로 전환한 뒤 통과한 첫 영문·자모를 원래 입력란의 본문과 커서가 확인될 때 함께 보정. 첫 두 글자 키의 자판 상태 진단 추가.
+diff --git a/README.md b/README.md
+index c8e437be39a396fa4b3776e77c1051cc540e2f3a..b5808ebf1551acd8f6ba3f2747d9ce2fea4fa7b9 100644
+--- a/README.md
++++ b/README.md
+@@ -111,0 +112,2 @@
++입력칸 밖에서 두벌식으로 바꾼 뒤 바로 타이핑해 첫 글자가 영문으로 들어오면, 한Q는 키를 누르기 전의 입력칸과 새로 입력한 범위를 확인할 수 있을 때 앞 글자까지 함께 보정합니다. 기존 초안과 구분하기 어려운 입력창에서는 먼저 입력칸을 클릭한 뒤 전환하면 이 경로를 피할 수 있습니다.
++
+diff --git a/Sources/HanQ/DiagnosticReview.swift b/Sources/HanQ/DiagnosticReview.swift
+index ba270baa46483351c3ae61d807fe0a9147621d38..988900ea161823c7d2962ae47d514c8c66868497 100644
+--- a/Sources/HanQ/DiagnosticReview.swift
++++ b/Sources/HanQ/DiagnosticReview.swift
+@@ -288 +288,5 @@
+-                          29: "수동 변환 시작", 30: "수동 변환 결과 확인", 31: "수동 변환 결과 미확인"]
++                          29: "수동 변환 시작", 30: "수동 변환 결과 확인", 31: "수동 변환 결과 미확인",
++                          32: "첫 키 자판 대기", 33: "첫 키 두벌식 자판 확인", 34: "첫 키 자판 대기 만료",
++                          35: "첫 키 입력 대상 변경", 36: "첫 키 소스 변경", 37: "첫 키 묶음 반영 확인", 38: "원래 키 전달 재개",
++                          39: "입력칸 밖 전환 후 두벌식 선택·ABC 자판·오버라이드 없음", 40: "입력칸 밖 전환 후 두벌식 자판 확인",
++                          41: "입력칸 밖 전환 후 자판 판정 불가", 42: "입력칸 밖 전환 후 소스 변경"]
+diff --git a/Sources/HanQ/InputDiagnostics.swift b/Sources/HanQ/InputDiagnostics.swift
+index f919ae01047a6a43b6600705ac203650764ea248..36ceaa93b79f9051503e117fd373598ff14420f9 100644
+--- a/Sources/HanQ/InputDiagnostics.swift
++++ b/Sources/HanQ/InputDiagnostics.swift
+@@ -461,0 +462 @@
++        case unfocusedLayoutConflict,unfocusedLayoutReady,unfocusedLayoutUnknown,unfocusedSourceChanged
+@@ -1461 +1462,4 @@
+-        _ = submit(.boundary,.sourceBoundary,stage.rawValue,observedAt:time){[self] timing in
++        // Accounting has 32 detail slots per lane. Keep each full stage on
++        // the frame and use the reserved aggregate slot for appended stages.
++        let detail=stage.rawValue<32 ? stage.rawValue:0
++        _ = submit(.boundary,.sourceBoundary,detail,observedAt:time){[self] timing in
+diff --git a/Sources/HanQ/OnsetCompositionCommit.swift b/Sources/HanQ/OnsetCompositionCommit.swift
+index 93e530b10c231db2a5ca3ce14f87dd44855f0de9..bd356c5065e4a17a3d1262c2cbd8fb22d112ca0f 100644
+--- a/Sources/HanQ/OnsetCompositionCommit.swift
++++ b/Sources/HanQ/OnsetCompositionCommit.swift
+@@ -58 +58 @@
+-            guard CFEqual(current.element,before.element),current.text==before.text else {
++            guard CFEqual(current.element,before.element),candidate.bodyMatches(current.text,before.text) else {
+diff --git a/Sources/HanQ/OnsetInputGate.swift b/Sources/HanQ/OnsetInputGate.swift
+index 06426c147d945a011104b15de13c008c962f02f8..9605f0c642b1623586823c3961fe21e05053fb71 100644
+--- a/Sources/HanQ/OnsetInputGate.swift
++++ b/Sources/HanQ/OnsetInputGate.swift
+@@ -10 +10,4 @@
+-    struct Reservation { let code:UInt16;let shift:Bool;let time:Double;let sourceID:String }
++    struct Reservation {
++        let code:UInt16;let shift:Bool;let time:Double;let sourceID:String
++        var eventTimestamp:CGEventTimestamp=0
++    }
+@@ -295 +298 @@
+-            passedInput=PassedInput(first:Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:passedBaselineSource),keys:[(code,event.flags.contains(.maskShift))],pressed:[code])
++            passedInput=PassedInput(first:Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:passedBaselineSource,eventTimestamp:event.timestamp),keys:[(code,event.flags.contains(.maskShift))],pressed:[code])
+@@ -301 +304 @@
+-            early=Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:hintSourceID)
++            early=Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:hintSourceID,eventTimestamp:event.timestamp)
+diff --git a/Sources/HanQ/OnsetLateSequenceDetector.swift b/Sources/HanQ/OnsetLateSequenceDetector.swift
+index 97d2b3b49a9573384c55e760fc4f886148798f0e..09f5ed1122d5def8a6a8f90a3d630105235686f9 100644
+--- a/Sources/HanQ/OnsetLateSequenceDetector.swift
++++ b/Sources/HanQ/OnsetLateSequenceDetector.swift
+@@ -9,0 +10 @@
++                        romanBaseline:(text:String,caret:Int)?=nil,
+@@ -48,0 +50,28 @@
++        // This option requires a pre-key editor baseline. A disappearing
++        // display and a matching word alone cannot prove who inserted it.
++        if let anchor=romanBaseline,sourceID==KoreanKeyboardLayout.twoSetID,
++           !keys.contains(where:{$0.0==49}),anchor.caret>=0,anchor.caret<=anchor.text.utf16.count,
++           selection.location>anchor.caret,selection.location<=text.utf16.count {
++            let body=text as NSString
++            let range=NSRange(location:anchor.caret,length:selection.location-anchor.caret)
++            let inserted=body.substring(with:range)
++            if inserted.utf8.first.map({(65...90).contains($0) || (97...122).contains($0)})==true,
++               body.replacingCharacters(in:range,with:"").utf16.elementsEqual(anchor.text.utf16) {
++                var roman=""
++                var pending=false
++                for (index,key) in keys.enumerated() {
++                    guard let letter=PhysicalLetterKeys.letters[key.0] else{break}
++                    roman += key.1 ? letter.uppercased():letter
++                    guard inserted.hasPrefix(roman) else{break}
++                    for end in (index+1)...keys.count {
++                        let candidate=roman+render(chars[(index+1)..<end])
++                        guard inserted.utf16.elementsEqual(candidate.utf16) else{continue}
++                        if end==keys.count {
++                            return .candidate(OnsetRecoveryPlan(before:anchor.text,caret:anchor.caret,roman:inserted,codes:keys,observedReplayText:joined,literalBody:true))
++                        }
++                        pending=true
++                    }
++                }
++                if pending{return .waiting}
++            }
++        }
+diff --git a/Sources/HanQ/OnsetRecoveryController.swift b/Sources/HanQ/OnsetRecoveryController.swift
+index 9e7c9fea0fc2003963f2c02182e94e31fdbc03d1..1c0851cf833a33ef768f718c5b0565cdab0da9a5 100644
+--- a/Sources/HanQ/OnsetRecoveryController.swift
++++ b/Sources/HanQ/OnsetRecoveryController.swift
+@@ -7,0 +8 @@
++    var permitsUnfocusedReplay:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->Bool = {_,_ in false}
+@@ -31,0 +33 @@
++        next.permitsUnfocusedReplay = { [weak self] in self?.permitsUnfocusedReplay($0,$1) ?? false }
+diff --git a/Sources/HanQ/OnsetRecoveryEngine.swift b/Sources/HanQ/OnsetRecoveryEngine.swift
+index b76b96ce5b3e86f582ee662183720e7b53408dbc..db9ef987bda5e3f8b9a8c33f88c0c4af4711c09e 100644
+--- a/Sources/HanQ/OnsetRecoveryEngine.swift
++++ b/Sources/HanQ/OnsetRecoveryEngine.swift
+@@ -18,0 +19 @@
++    var permitsUnfocusedReplay:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->Bool = {_,_ in false}
+@@ -228 +229,2 @@
+-        if let observed=observedEmptyEntry(snap,before:p.first.time) ?? observedDraftEntry(snap,before:p.first.time) {
++        let observed=observedEmptyEntry(snap,before:p.first.time) ?? observedDraftEntry(snap,before:p.first.time)
++        if let observed {
+@@ -236,0 +239,12 @@
++        // A display that disappeared on focus can witness the old jamo-only
++        // path. Roman text needs an actual pre-key baseline plus the exact
++        // first original event from the explicit unfocused switch.
++        let fromOutside = !publicationMatches && p.first.sourceID==onsetKoreanID
++            && permitsUnfocusedReplay(p.first.eventTimestamp,false)
++        // The scan can also witness an insertion in the middle of a real
++        // draft. An empty field needs the independent empty-editor checks.
++        let draft = fromOutside && observed==nil ? outsideObservation.baseline(for:snap.element,before:p.first.time):nil
++        let romanBaseline = fromOutside ? (observed ?? draft.flatMap{
++            !$0.text.isEmpty && $0.selection.length==0 && $0.selection.location>=0
++                && $0.selection.location<=$0.text.utf16.count ? $0:nil
++        }):nil
+@@ -246 +260 @@
+-        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
++        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,romanBaseline:romanBaseline.map{($0.text,$0.selection.location)},onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
+@@ -254,0 +269,6 @@
++            if candidate.literalBody {
++                // For an entirely Roman result the editor has shown no Korean
++                // output yet. Wait without owning keys until the layout agrees.
++                let allRoman=candidate.roman.utf8.allSatisfy{$0<128}
++                guard permitsUnfocusedReplay(p.first.eventTimestamp,allRoman) else{return true}
++            }
+@@ -876,2 +896,2 @@
+-              actual.substring(to:end)==original.substring(to:end),
+-              actual.substring(from:end+added)==original.substring(from:end) else{return false}
++              candidate.bodyMatches(actual.substring(to:end),original.substring(to:end)),
++              candidate.bodyMatches(actual.substring(from:end+added),original.substring(from:end)) else{return false}
+@@ -899 +919 @@
+-        if selected.text != before.text {
++        if !candidate.bodyMatches(selected.text,before.text) {
+@@ -984 +1004 @@
+-        if acceptable.contains(snap.text) && replacementReady {
++        if acceptable.contains(where:{candidate.bodyMatches(snap.text,$0)}) && replacementReady {
+@@ -1072 +1092 @@
+-        guard let candidate=currentPlan,let field=planElement,let snap=snapshot(),CFEqual(snap.element,field),snap.text==candidate.expected,!replayStarted else{park("rollback_context_not_intact");return}
++        guard let candidate=currentPlan,let field=planElement,let snap=snapshot(),CFEqual(snap.element,field),let expected=candidate.expected,candidate.bodyMatches(snap.text,expected),!replayStarted else{park("rollback_context_not_intact");return}
+diff --git a/Sources/HanQ/OnsetRecoveryPlan.swift b/Sources/HanQ/OnsetRecoveryPlan.swift
+index 01caf94d4b061473772cca4d16588c05fade2a8d..ca7c3e56e5710364b3af01aac562dc36e0c5134c 100644
+--- a/Sources/HanQ/OnsetRecoveryPlan.swift
++++ b/Sources/HanQ/OnsetRecoveryPlan.swift
+@@ -12,0 +13,4 @@
++    var literalBody=false
++    func bodyMatches(_ value:String,_ expected:String)->Bool {
++        literalBody ? value.utf16.elementsEqual(expected.utf16):value==expected
++    }
+@@ -22 +26,2 @@
+-        (codes.count>=2 || (allowSingle && codes.count==1)) && text==expected && selection==NSRange(location:caret+roman.utf16.count,length:0)
++        guard let expected else{return false}
++        return (codes.count>=2 || (allowSingle && codes.count==1)) && bodyMatches(text,expected) && selection==NSRange(location:caret+roman.utf16.count,length:0)
+diff --git a/Sources/HanQ/SourceSwitchBarrier.swift b/Sources/HanQ/SourceSwitchBarrier.swift
+index 1abd017c20bb4b53093ff2ef16d1346fd79fd3a1..d19d73254dd24ea0956999ceb238a6d10f7947d8 100644
+--- a/Sources/HanQ/SourceSwitchBarrier.swift
++++ b/Sources/HanQ/SourceSwitchBarrier.swift
+@@ -32,0 +33,64 @@
++    private struct UnfocusedSwitch {
++        let began:Double, pid:pid_t
++        let window:AXUIElement?
++        var first:CGEventTimestamp=0
++        var sampled=0
++    }
++    private var unfocusedSwitch:UnfocusedSwitch?
++    var frontPID:()->pid_t? = {NSWorkspace.shared.frontmostApplication?.processIdentifier}
++    var frontWindow:(pid_t)->AXUIElement? = { pid in
++        let app=AXUIElementCreateApplication(pid)
++        AXUIElementSetMessagingTimeout(app,0.003)
++        var raw:CFTypeRef?
++        guard AXUIElementCopyAttributeValue(app,kAXFocusedWindowAttribute as CFString,&raw) == .success,
++              let raw,CFGetTypeID(raw)==AXUIElementGetTypeID() else{return nil}
++        return (raw as! AXUIElement)
++    }
++
++    func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp) {
++        guard id==KoreanKeyboardLayout.twoSetID,timestamp != 0,let pid=frontPID() else{return}
++        unfocusedSwitch=UnfocusedSwitch(began:now(),pid:pid,window:frontWindow(pid))
++    }
++    func cancelUnfocusedSwitch(){unfocusedSwitch=nil}
++    func isFirstUnfocusedSwitchKey(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->Bool {
++        guard let attempt=unfocusedSwitch,timestamp != 0,attempt.first==timestamp,
++              now()-attempt.began<=2.5 else{return false}
++        guard frontPID()==attempt.pid,let original=attempt.window,let current=frontWindow(attempt.pid),
++              CFEqual(original,current) else{return false}
++        return !needsReadyLayout || initialLayout?() == .ready
++    }
++    // Only remember the identity of a key that is passing normally. Changing
++    // focus on that first key is application behavior; never hold it here.
++    private func observeUnfocusedInput(_ type:CGEventType,_ event:CGEvent) {
++        guard var attempt=unfocusedSwitch else{return}
++        let elapsed=now()-attempt.began
++        guard elapsed>=0,elapsed<=2.5 else{unfocusedSwitch=nil;return}
++        if type == .keyUp{return}
++        if type == .flagsChanged {
++            let code=event.getIntegerValueField(.keyboardEventKeycode)
++            if [54,56,60].contains(code),event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{return}
++        }
++        guard isInitialLetter(event) else{unfocusedSwitch=nil;return}
++        if attempt.sampled==0 {
++            guard elapsed<=MismatchSourceEvidence.confirmationSeconds,event.timestamp != 0,
++                  frontPID()==attempt.pid else{unfocusedSwitch=nil;return}
++            // A window change can keep the same process and the same layout.
++            if let original=attempt.window,let current=frontWindow(attempt.pid),CFEqual(original,current) {
++                attempt.first=event.timestamp
++            }
++        }
++        if attempt.sampled<2,elapsed<=MismatchSourceEvidence.confirmationSeconds {
++            attempt.sampled+=1
++            unfocusedSwitch=attempt
++            guard incidentTrace.enabled,let initialLayout else{return}
++            let stage:InputIncidentTrace.BoundaryStage
++            switch initialLayout() {
++            case .conflicting:stage = .unfocusedLayoutConflict
++            case .ready:stage = .unfocusedLayoutReady
++            case .unknown:stage = .unfocusedLayoutUnknown
++            case .sourceChanged:stage = .unfocusedSourceChanged
++            }
++            incidentTrace.sourceBoundary(stage,queued:0,awaitingOnset:0)
++        }
++        unfocusedSwitch=attempt
++    }
+@@ -603,0 +668 @@
++        if unfocusedSwitch != nil{observeUnfocusedInput(type,event)}
+@@ -646,0 +712 @@
++        cancelUnfocusedSwitch()
+diff --git a/Sources/HanQ/main.swift b/Sources/HanQ/main.swift
+index 5fb4433bfb0642e87c9201057d5fa85c7db7f969..9f69f9cabcd893a59a9d790ad40fb14b1b5352b2 100644
+--- a/Sources/HanQ/main.swift
++++ b/Sources/HanQ/main.swift
+@@ -11,0 +12 @@
++        controller.permitsUnfocusedReplay = { [weak self] in self?.sourceSwitchBarrier.isFirstUnfocusedSwitchKey($0,needsReadyLayout:$1) ?? false }
+@@ -328,0 +330 @@
++            if id != KoreanKeyboardLayout.twoSetID {self.sourceSwitchBarrier.cancelUnfocusedSwitch()}
+@@ -514,0 +517 @@
++            sourceSwitchBarrier.didSwitchWithoutField(target,at:timestamp)
+diff --git a/Tests/Diagnostics/Observations/main.swift b/Tests/Diagnostics/Observations/main.swift
+index a6c4581d314373e45dcd9fd7b86057ea0fcd19a1..0faece843e804ecaec2306f0b82af4533b887dd2 100644
+--- a/Tests/Diagnostics/Observations/main.swift
++++ b/Tests/Diagnostics/Observations/main.swift
+@@ -21,0 +22,2 @@
++trace.sourceBoundary(.initialLayoutWait,queued:1,awaitingOnset:0)
++trace.sourceBoundary(.unfocusedLayoutConflict,queued:0,awaitingOnset:0)
+@@ -39,0 +42,2 @@
++check(frames.contains{$0.kind == .sourceBoundary && $0.category==39 && $0.count==0},"outside layout is reported without queue ownership")
++check(last.observationDelivery.processed[code(7,8)]==2,"appended stages share the boundary aggregate and never overflow into another lane")
+diff --git a/Tests/OnsetRecovery/StructurePublication/main.swift b/Tests/OnsetRecovery/StructurePublication/main.swift
+index 9ec71790b81eb868a2ed0f638cd6a56d6a809306..8b600b553e953841adf947ab83fbd586924bce58 100644
+--- a/Tests/OnsetRecovery/StructurePublication/main.swift
++++ b/Tests/OnsetRecovery/StructurePublication/main.swift
+@@ -6,0 +7 @@
++    event.timestamp=DispatchTime.now().uptimeNanoseconds
+@@ -21 +22,2 @@
+-    init(sourceID:String=KoreanKeyboardLayout.twoSetID,label:String="arbitrary presentation",role:String=kAXTextAreaRole){
++    var prefix="", suffix=""
++    init(sourceID:String=KoreanKeyboardLayout.twoSetID,label:String="arbitrary presentation",role:String=kAXTextAreaRole,priorCaret:Int=0){
+@@ -35 +37 @@
+-            if event.type == .keyUp{self.selection=NSRange(location:self.text.utf16.count-1,length:0)}
++            if event.type == .keyUp{self.selection=NSRange(location:self.selection.location-1,length:0)}
+@@ -54 +56,2 @@
+-                self.selection=NSRange(location:self.text.utf16.count,length:0)
++                self.selection=NSRange(location:self.prefix.utf16.count+self.text.utf16.count,length:0)
++                self.text=self.prefix+self.text+self.suffix
+@@ -67 +70 @@
+-            if name==kAXSelectedTextRangeAttribute{var range=CFRange(location:0,length:0);return AXValueCreate(.cfRange,&range)!}
++            if name==kAXSelectedTextRangeAttribute{var range=CFRange(location:priorCaret,length:0);return AXValueCreate(.cfRange,&range)!}
+@@ -74,2 +77,7 @@
+-        check(h.candidate==nil,"nonempty presentation is not an empty/focus proof")
+-        check(h.representedEntry(for:field,before:ProcessInfo.processInfo.systemUptime) != nil,"read-only prior representation captured")
++        if !label.isEmpty && priorCaret==0 {
++            check(h.candidate==nil,"nonempty presentation is not an empty/focus proof")
++            check(h.representedEntry(for:field,before:ProcessInfo.processInfo.systemUptime) != nil,"read-only prior representation captured")
++        }
++        e.outsideObservation.read=h.read
++        h.observeSnapshot={ [weak self] snap in self?.e.outsideObservation.remember(snap,window:root) }
++        if priorCaret>0{e.outsideObservation.remember(.init(element:field,text:label,selection:NSRange(location:priorCaret,length:0)),window:root)}
+@@ -217,0 +226,32 @@
++// Two original downs can reach a group before focus moves to the editor.
++// The prior field contents and both ends of the inserted span must survive.
++for (keys,visible,word) in [([UInt16(15),40],"rk","가"),([15,40],"rㅏ","가"),
++                          ([15,46,0],"rma","금"),([15,46,0],"rmㅁ","금"),
++                          ([15,46,0],"rㅡㅁ","금"),([14,40],"eㅏ","다")] {
++    for (left,right) in [("",""),("기존🙂 ",""),("앞🙂"," 뒤"),("r","")] {
++        let c=Case(label:left+right,priorCaret:left.utf16.count)
++        c.prefix=left;c.suffix=right
++        c.e.permitsUnfocusedReplay={ stamp,_ in stamp != 0 }
++        for code in keys {c.original(code,true);c.original(code,false)}
++        c.visible=true;c.text=left+visible+right;c.selection=NSRange(location:left.utf16.count+visible.utf16.count,length:0)
++        c.e.sample();c.spin()
++        check(c.text==left+word+right && c.selection.location==left.utf16.count+word.utf16.count,"outside focus corrects the full insertion and preserves draft [\(visible), \(left), \(right)]")
++        check(c.posts.map{$0.0}==keys.flatMap{[$0,$0]} && c.commands==2 && c.writes==0,"every original position replays once")
++        check(c.e.retainedInput.isEmpty && !c.e.recovering,"outside replay completes")
++        c.close()
++    }
++}
++for mode in ["missing_switch","restored_draft","unverified_line","changed_surroundings","different_field","moved_window","wrong_caret","already_korean","single_key","still_ABC"] {
++    let prior=mode=="restored_draft" ? "previous display":(mode=="unverified_line" ? "\n":"앞")
++    let anchored = !["restored_draft","unverified_line"].contains(mode)
++    let c=Case(label:prior,priorCaret:anchored ? prior.utf16.count:0)
++    c.e.permitsUnfocusedReplay={ _,ready in mode != "missing_switch" && !(mode=="still_ABC" && ready) }
++    c.original(15,true);c.original(15,false)
++    if mode != "single_key"{c.original(40,true);c.original(40,false)}
++    c.changedField=mode=="different_field";c.changedWindow=mode=="moved_window"
++    let body=(anchored ? (mode=="changed_surroundings" ? "뒤":prior):"")+(mode=="already_korean" ? "가":(mode=="single_key" ? "r":(mode=="still_ABC" ? "rk":"rㅏ")))
++    c.visible=true;c.text=body;c.selection=NSRange(location:mode=="wrong_caret" ? 0:body.utf16.count,length:0)
++    c.e.sample();c.spin()
++    check(c.commands==0 && c.posts.isEmpty && c.selections==0 && c.text==body && c.e.retainedInput.isEmpty,"outside ambiguous context passes originals without editing: \(mode)")
++    c.close()
++}
+diff --git a/Tests/SourceSwitchBarrier/InitialLayoutTests.swift b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+index e9a68e5dc5105ca9ede8666199eab9ae613e3d17..edc72bc9e4b42fd89c4f3f494c887732a3762770 100644
+--- a/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
++++ b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+@@ -11,0 +12,27 @@
++    // A direct switch with no editor never captures originals. The two taps
++    // must agree on the first event before any later editor may use its history.
++    do {
++        let b=B();var t=0.0,pid:pid_t=91
++        var window=AXUIElementCreateApplication(4101)
++        let originalWindow=window
++        b.now={t};b.frontPID={pid};b.frontWindow={_ in window};b.read={nil}
++        let first=key(15),second=key(40);first.timestamp=1000;second.timestamp=2000
++        check(!b.request(ko,at:900),"outside switch uses direct selection")
++        b.didSwitchWithoutField(ko,at:900);t=0.123
++        check(!b.receive(.keyDown,first) && b.isFirstUnfocusedSwitchKey(1000),"first outside key stays native and has a matching identity")
++        b.initialLayout={.conflicting}
++        check(!b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"entirely ASCII output waits without owning input")
++        b.initialLayout={.ready}
++        check(b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"two-set layout allows the verified native replay")
++        t=0.211
++        check(!b.receive(.keyDown,second) && !b.isFirstUnfocusedSwitchKey(2000),"later keys cannot claim the first identity")
++        pid=92;check(!b.isFirstUnfocusedSwitchKey(1000),"a different application cannot use the history");pid=91
++        window=AXUIElementCreateApplication(4102);check(!b.isFirstUnfocusedSwitchKey(1000),"different window in the same application");window=originalWindow
++        let click=CGEvent(mouseEventSource:nil,mouseType:.leftMouseDown,mouseCursorPosition:.zero,mouseButton:.left)!
++        check(!b.receive(.leftMouseDown,click) && !b.isFirstUnfocusedSwitchKey(1000),"pointer invalidation")
++        b.didSwitchWithoutField(ko,at:901);t+=0.51
++        check(!b.receive(.keyDown,first) && !b.isFirstUnfocusedSwitchKey(1000),"first key outside the switch deadline")
++        b.didSwitchWithoutField(ko,at:902)
++        _=b.receive(.keyDown,first);_=b.request(abc,at:3000)
++        check(!b.isFirstUnfocusedSwitchKey(1000) && !b.busy,"another source switch invalidates the observation")
++    }
+diff --git a/Tools/InputTestRecorder/RecorderCore.swift b/Tools/InputTestRecorder/RecorderCore.swift
+index 0e781b87fe552080881df31ad697933fa0e7079a..9d54ef21c274e41c9fa562d165378a2bfaf9208f 100644
+--- a/Tools/InputTestRecorder/RecorderCore.swift
++++ b/Tools/InputTestRecorder/RecorderCore.swift
+@@ -207 +207 @@
+-    static func validCode(_ key:String)->Bool {
++    static func validCode(_ key:String,legacyBoundary:Bool=false)->Bool {
+@@ -214 +214,2 @@
+-        case 7:return (1...31).contains(detail)
++        case 7:return (1...31).contains(detail) || (detail==0 && code/32%8==7)
++        case 8:return detail==0 || (legacyBoundary && code/32%8==0 && detail<=6)
+@@ -219 +220 @@
+-    var valid:Bool {
++    func valid(legacyBoundary:Bool)->Bool {
+@@ -221 +222 @@
+-        [processed,overflow,omitted,coalesced].allSatisfy{$0.count<=2560 && $0.allSatisfy{Self.validCode($0.key) && $0.value>0}} &&
++        [processed,overflow,omitted,coalesced].allSatisfy{$0.count<=2560 && $0.allSatisfy{Self.validCode($0.key,legacyBoundary:legacyBoundary) && $0.value>0}} &&
+@@ -225 +226 @@
+-                Self.validCode(key) && value.valid && processed[key]==value.processed &&
++                Self.validCode(key,legacyBoundary:legacyBoundary) && value.valid && processed[key]==value.processed &&
+@@ -337 +338 @@
+-    private static func validFrame(_ row:RecorderFrame)->Bool {
++    private static func validFrame(_ row:RecorderFrame,legacyBoundary:Bool)->Bool {
+@@ -382 +383 @@
+-                      guard row.observationTiming != nil,(1...10).contains(row.category),(0...31).contains(row.edge) else{return false}
++                      guard row.observationTiming != nil,(1...10).contains(row.category),((0...31).contains(row.edge) || (legacyBoundary && row.category==7 && row.lane==8 && (32...38).contains(row.edge))) else{return false}
+@@ -386 +387 @@
+-                      return RecorderObservationDelivery.validCode(String(code))
++                      return RecorderObservationDelivery.validCode(String(code),legacyBoundary:legacyBoundary)
+@@ -493 +494 @@
+-              value.frames.allSatisfy(Self.validFrame) else { throw RecorderError.invalidTrace }
++              value.frames.allSatisfy({Self.validFrame($0,legacyBoundary:value.build=="366")}) else { throw RecorderError.invalidTrace }
+@@ -507 +508 @@
+-        if let delivery=value.observationDelivery {guard delivery.valid else{throw RecorderError.invalidTrace}}
++        if let delivery=value.observationDelivery {guard delivery.valid(legacyBoundary:value.build=="366") else{throw RecorderError.invalidTrace}}
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index 071f387fe14fedfdc97a832f12867fb7296e0c5c..b9fc79fe1c382681329dc6e2c1271d139f4b097e 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -67,0 +68,2 @@
++입력칸 밖에서 두벌식 전환이 확인된 경우 첫 키는 그대로 전달한다. 0.5초 안에 온 첫 글자 키가 같은 앱에서 관측되고, 포커스를 얻은 입력란의 입력 전 본문과 커서가 확인된 경우에만 보정한다. 두 키 이상의 실제 키 순서가 만든 영문 또는 영문과 한글의 혼합 범위와 그 양쪽의 기존 본문을 정확히 대조한다. 출력이 전부 영문이면 두벌식 자판까지 확인한다. 키를 모두 놓은 뒤 그 범위만 선택해 원래 키를 한 번씩 다시 전달한다. 안내 표시나 줄바꿈이 사라진 뒤 두 키와 같은 글자가 보이는 것만으로는 기존 초안과 구분할 수 없어 자동으로 수정하지 않는다. 선택적 진단은 이 전환의 첫 두 글자 키에서만 선택 소스·자판·오버라이드의 일치 여부를 기록한다.
++
+diff --git a/scripts/summarize-input-incident.py b/scripts/summarize-input-incident.py
+index 467380f2054b55bb9e408144527f9127e68a3dd8..d5c8fec6ac45041b7615bfc4c7aacbf16d3d6361 100644
+--- a/scripts/summarize-input-incident.py
++++ b/scripts/summarize-input-incident.py
+@@ -296,0 +297,2 @@
++    unfocused_layout_samples=[]
++    outside_layouts={39:'two_set_selected_ABC_layout_no_override',40:'two_set_layout_ready',41:'layout_unknown_or_inconsistent',42:'selected_source_changed'}
+@@ -368,2 +370,5 @@
+-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0,31]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
+-                if not valid or (group=='coalesced' and not (operation==3 or (operation==5 and ((lane==3 and detail>0) or (lane==2 and 17<=detail<=20))))):raise ValueError('invalid observation detail')
++                # Build 366 encoded appended boundary codes into the next lane.
++                # The marker producer uses the main lane, so these HID slots are identifiable.
++                legacy_boundary=(str(data.get('build'))=='366' and operation==7 and lane==0 and 0<=detail<=6)
++                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0,31]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else (range(32) if lane==7 else range(1,32)) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
++                if (not valid and not legacy_boundary) or (group=='coalesced' and not (operation==3 or (operation==5 and ((lane==3 and detail>0) or (lane==2 and 17<=detail<=20))))):raise ValueError('invalid observation detail')
+@@ -370,0 +376 @@
++                if legacy_boundary:row.update(operation="source_boundary",lane="source_boundary",detail=32+detail)
+@@ -478 +484 @@
+-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
++            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
+@@ -498,0 +505,2 @@
++            if frame['category'] in outside_layouts:
++                unfocused_layout_samples.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],layout=outside_layouts[frame['category']]))
+@@ -539,0 +548 @@
++            'unfocused_switch_layout_samples':unfocused_layout_samples,
+diff --git a/version.env b/version.env
+index 66332050fb0e683ee9444f4ba35129ca649c1620..33a2ddcdf2d415f54f4161978716801e49cb957d 100644
+--- a/version.env
++++ b/version.env
+@@ -4 +4 @@
+-BUILD_NUMBER=366
++BUILD_NUMBER=367

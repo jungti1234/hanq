@@ -1,0 +1,262 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c9447ff9b560e35738c2768eccb691bb136822ba..74d8a5feeca12556dde164756703a0170cbd7ff3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3 +3,3 @@
+-## 0.3.2-beta.1 (빌드 368) — 미배포
++## 0.3.2-beta.1 (빌드 369) — 미배포
++
++- 입력칸 밖에서 두벌식 전환 직후 창을 읽지 못한 경우, 전환 직전 포커스에서 확인한 창을 첫 키·보정 시점과 대조. 창이 다르거나 확인되지 않으면 보정 중단.
+diff --git a/Sources/HanQ/DiagnosticReview.swift b/Sources/HanQ/DiagnosticReview.swift
+index c9cd3c0612d8660d99ce880fd7549fc786cb3d5e..47bbbedd86526fe112c0784d95a3068fc5cf8f6f 100644
+--- a/Sources/HanQ/DiagnosticReview.swift
++++ b/Sources/HanQ/DiagnosticReview.swift
+@@ -305 +305 @@
+-            ("switchKey",["미측정","전환 직후 첫 키 확인","유효한 전환 기록 없음","첫 키 시각 없음","첫 키 미관측","다른 첫 키","전환 기한 초과","전면 앱 변경","전환 때 창 미확인","현재 창 미확인","전환 창 변경","재전송 전 자판 미준비","첫 키 때 창 미확인","첫 키 때 창 변경"]),
++            ("switchKey",["미측정","전환 직후 첫 키 확인","유효한 전환 기록 없음","첫 키 시각 없음","첫 키 미관측","다른 첫 키","전환 기한 초과","전면 앱 변경","전환 때 창 미확인","현재 창 미확인","전환 창 변경","재전송 전 자판 미준비","첫 키 때 창 미확인","첫 키 때 창 변경","전환 직전 창과 첫 키 확인"]),
+diff --git a/Sources/HanQ/InputDiagnostics.swift b/Sources/HanQ/InputDiagnostics.swift
+index 8b6d0daa0a5fcf6191bbc44b0ebae4c963f7a361..8cafcc2610103ae4fd27af61425b5c602f2f43a8 100644
+--- a/Sources/HanQ/InputDiagnostics.swift
++++ b/Sources/HanQ/InputDiagnostics.swift
+@@ -409 +409,3 @@
+-    enum SwitchKeyCheck:Int {case unmeasured, matched, noSwitch, timestampMissing, firstNotSeen, firstDiffers, expired, appChanged, originalWindowMissing, currentWindowMissing, windowChanged, layoutNotReady, firstWindowMissing, firstWindowChanged}
++    enum SwitchKeyCheck:Int {case unmeasured, matched, noSwitch, timestampMissing, firstNotSeen, firstDiffers, expired, appChanged, originalWindowMissing, currentWindowMissing, windowChanged, layoutNotReady, firstWindowMissing, firstWindowChanged, matchedPreSwitchWindow
++        var allowsReplay:Bool {self == .matched || self == .matchedPreSwitchWindow}
++    }
+@@ -422 +424 @@
+-            return 65536+(((base*14+key)*14+read)*9+stored)*7+span
++            return 65536+(((base*15+key)*14+read)*9+stored)*7+span
+diff --git a/Sources/HanQ/InputFocusAccess.swift b/Sources/HanQ/InputFocusAccess.swift
+index 2e0c2639b88433f20edd3f932cf03ada1b3ce44c..cf7c4f7b4f59a2a524b9ddb09b6f9a1116bf12c8 100644
+--- a/Sources/HanQ/InputFocusAccess.swift
++++ b/Sources/HanQ/InputFocusAccess.swift
+@@ -122,0 +123,30 @@
++    private static let outsideRoles=[kAXGroupRole,kAXButtonRole,kAXWindowRole,"AXWebArea",kAXScrollAreaRole,kAXToolbarRole]
++
++    // Called only after the ordinary four-attribute read found a non-editor.
++    // Keep the editable path intact even for applications with limited AX batches.
++    static func readOutsideWindow(pid:pid_t,element:AXUIElement,role:String,subrole:String?)->AXUIElement? {
++        guard outsideRoles.contains(role),subrole != "AXSecureTextField",
++              AXUIElementSetMessagingTimeout(element,0.01) == .success else{return nil}
++        defer {AXUIElementSetMessagingTimeout(element,0.05)} // focusedElement sets this timeout
++        let names=[kAXRoleAttribute,kAXSubroleAttribute,kAXFocusedAttribute,kAXWindowAttribute] as CFArray
++        var values:CFArray?
++        guard AXUIElementCopyMultipleAttributeValues(element,names,[],&values) == .success,
++              let list=values as? [AnyObject],list.count==4,list[0] as? String==role else{return nil}
++        return outsideWindow(pid:pid,element:element,role:role,subrole:list[1] as? String,focused:list[2],window:list[3])
++    }
++
++    // Only an explicit switch asks for these attributes. Never derive a window
++    // from a text value, an unfocused sibling, or a different process.
++    static func outsideWindow(pid:pid_t,element:AXUIElement,role:String,subrole:String?,
++                              focused:CFTypeRef,window:CFTypeRef,
++                              owner:(AXUIElement)->pid_t? = InputFocusAccess.owner(of:))->AXUIElement? {
++        guard pid>0,subrole != "AXSecureTextField",
++              outsideRoles.contains(role),
++              CFGetTypeID(focused)==CFBooleanGetTypeID(),CFEqual(focused,kCFBooleanTrue),
++              owner(element)==pid else{return nil}
++        if role==kAXWindowRole{return element}
++        guard CFGetTypeID(window)==AXUIElementGetTypeID() else{return nil}
++        let ref=window as! AXUIElement
++        return owner(ref)==pid ? ref:nil
++    }
++
+diff --git a/Sources/HanQ/MismatchRecoveryEngine.swift b/Sources/HanQ/MismatchRecoveryEngine.swift
+index 79200c6c48038ba787caca833fe6c5b40034490a..3df119280fa11cff180d586bdc048489dce8f530 100644
+--- a/Sources/HanQ/MismatchRecoveryEngine.swift
++++ b/Sources/HanQ/MismatchRecoveryEngine.swift
+@@ -377 +377 @@
+-    func snapshot(includeContent:Bool=true,allowComboBox:Bool=false)->MismatchSnapshot?{
++    func snapshot(includeContent:Bool=true,allowComboBox:Bool=false,observeOutsideWindow:((pid_t,AXUIElement)->Void)?=nil)->MismatchSnapshot?{
+@@ -420 +420,6 @@
+-        guard Self.supportsSnapshotRole(role,includeContent:includeContent,allowComboBox:allowComboBox) else{unavailableReason="not_supported_text_field";return nil}
++        guard Self.supportsSnapshotRole(role,includeContent:includeContent,allowComboBox:allowComboBox) else{
++            if includeContent,let observeOutsideWindow,let w=InputFocusAccess.readOutsideWindow(pid:target.processIdentifier,element:element,role:role,subrole:list[1] as? String){
++                observeOutsideWindow(target.processIdentifier,w)
++            }
++            unavailableReason="not_supported_text_field";return nil
++        }
+diff --git a/Sources/HanQ/OnsetRecoveryEngine.swift b/Sources/HanQ/OnsetRecoveryEngine.swift
+index 1cd2ee8c4db293d7aee80523abfc67bd987f26f9..b4b5505cbc8f8ab9f7e3941f58f5d9097309886e 100644
+--- a/Sources/HanQ/OnsetRecoveryEngine.swift
++++ b/Sources/HanQ/OnsetRecoveryEngine.swift
+@@ -244 +244 @@
+-        let fromOutside = switchCheck == .matched
++        let fromOutside = switchCheck.allowsReplay
+@@ -291 +291 @@
+-                guard switchCheck == .matched else{
++                guard switchCheck.allowsReplay else{
+diff --git a/Sources/HanQ/SourceSwitchBarrier.swift b/Sources/HanQ/SourceSwitchBarrier.swift
+index c8f721130739831e2aca1100d396613619621a3c..73441c14f6f0211b3f10c47e5fc528a4a889b371 100644
+--- a/Sources/HanQ/SourceSwitchBarrier.swift
++++ b/Sources/HanQ/SourceSwitchBarrier.swift
+@@ -18,0 +19,2 @@
++    struct SwitchWindow {let pid:pid_t,window:AXUIElement,stamp:CGEventTimestamp,at:Double}
++    var readForOutsideSwitch:(()->(Snapshot?,(pid_t,AXUIElement)?))?
+@@ -35,0 +38 @@
++        var usedPrior=false
+@@ -51 +54,2 @@
+-    func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp) {
++    func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp,prior:SwitchWindow?=nil) {
++        unfocusedSwitch=nil
+@@ -53 +57,7 @@
+-        unfocusedSwitch=UnfocusedSwitch(began:now(),pid:pid,window:frontWindow(pid))
++        let began=now(),current=frontWindow(pid)
++        if let prior {
++            guard prior.pid==pid,prior.stamp==timestamp,
++                  current.map({CFEqual($0,prior.window)}) != false else{return}
++            if current==nil,!(0...0.15).contains(now()-prior.at){return}
++        }
++        unfocusedSwitch=UnfocusedSwitch(began:began,pid:pid,window:current ?? prior?.window,usedPrior:current==nil && prior != nil)
+@@ -67 +77 @@
+-        return .matched
++        return attempt.usedPrior ? .matchedPreSwitchWindow:.matched
+@@ -721 +731 @@
+-    @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0)->Bool {
++    @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
+@@ -732 +742,10 @@
+-        if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
++        if ledger == nil {
++            let snap:Snapshot?
++            if let recordWindow,let readForOutsideSwitch,id==KoreanKeyboardLayout.twoSetID,timestamp != 0,
++               !busy,isReady(),!externalEditPending,repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay {
++                let at=now(),(editor,origin)=readForOutsideSwitch()
++                snap=editor
++                if editor==nil,let (pid,window)=origin{recordWindow(SwitchWindow(pid:pid,window:window,stamp:timestamp,at:at))}
++            }else{snap=read()}
++            if let snap{field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
++        }
+diff --git a/Sources/HanQ/main.swift b/Sources/HanQ/main.swift
+index 15c40a0d53dd541d3d03dc10166aa7ad28360842..defa3e24667c2c110b21c7b2760346584577313f 100644
+--- a/Sources/HanQ/main.swift
++++ b/Sources/HanQ/main.swift
+@@ -118 +118 @@
+-        barrier.read = { [weak self] in
++        let read:(((pid_t,AXUIElement)->Void)?)->SourceSwitchBarrier.Snapshot? = { [weak self] observe in
+@@ -121 +121 @@
+-            guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true) else{return nil}
++            guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true,observeOutsideWindow:observe) else{return nil}
+@@ -123,0 +124,6 @@
++        barrier.read={read(nil)}
++        barrier.readForOutsideSwitch={
++            var origin:(pid_t,AXUIElement)?
++            let editor=read{origin=($0,$1)}
++            return (editor,origin)
++        }
+@@ -512 +518,2 @@
+-        if sourceSwitchBarrier.request(target,at:timestamp) { return noErr }
++        var priorWindow:SourceSwitchBarrier.SwitchWindow?
++        if sourceSwitchBarrier.request(target,at:timestamp,recordWindow:{priorWindow=$0}) { return noErr }
+@@ -517 +524 @@
+-            sourceSwitchBarrier.didSwitchWithoutField(target,at:timestamp)
++            sourceSwitchBarrier.didSwitchWithoutField(target,at:timestamp,prior:priorWindow)
+diff --git a/Tests/OnsetRecovery/StructurePublication/main.swift b/Tests/OnsetRecovery/StructurePublication/main.swift
+index 697f4d9c691efb7ce42aab93963c0e5d61b8806f..e3770edb72e5da0b3047d7d10be90505bb977936 100644
+--- a/Tests/OnsetRecovery/StructurePublication/main.swift
++++ b/Tests/OnsetRecovery/StructurePublication/main.swift
+@@ -235 +235 @@
+-        c.e.unfocusedKeyCheck={stamp,_ in stamp != 0 ? .matched:.timestampMissing}
++        c.e.unfocusedKeyCheck={stamp,_ in stamp == 0 ? .timestampMissing:(left.isEmpty ? .matched:.matchedPreSwitchWindow)}
+@@ -249 +249 @@
+-    c.e.unfocusedKeyCheck={_,ready in mode=="missing_switch" ? .noSwitch:(mode=="still_ABC" && ready ? .layoutNotReady:.matched)}
++    c.e.unfocusedKeyCheck={_,ready in mode=="missing_switch" ? .noSwitch:(mode=="still_ABC" && ready ? .layoutNotReady:.matchedPreSwitchWindow)}
+@@ -261 +261 @@
+-for mode in ["matched","no_switch","other_first","unknown_visibility","old_draft","moved_caret"] {
++for mode in ["matched","matched_prior","no_switch","other_first","unknown_visibility","old_draft","moved_caret"] {
+@@ -267 +267 @@
+-    c.e.unfocusedKeyCheck={_,_ in mode=="no_switch" ? .noSwitch:mode=="other_first" ? .firstDiffers:.matched}
++    c.e.unfocusedKeyCheck={_,_ in mode=="no_switch" ? .noSwitch:mode=="other_first" ? .firstDiffers:mode=="matched_prior" ? .matchedPreSwitchWindow:.matched}
+@@ -273,3 +273,4 @@
+-    let key=mode=="no_switch" ? 2:mode=="other_first" ? 5:1
+-    let lookup=key != 1 ? 0:mode=="unknown_visibility" ? 3:2
+-    let span=mode=="matched" ? 6:mode=="old_draft" ? 2:mode=="moved_caret" ? 1:0
++    let success=["matched","matched_prior"].contains(mode)
++    let key=mode=="no_switch" ? 2:mode=="other_first" ? 5:mode=="matched_prior" ? 14:1
++    let lookup = ![1,14].contains(key) ? 0:mode=="unknown_visibility" ? 3:2
++    let span=success ? 6:mode=="old_draft" ? 2:mode=="moved_caret" ? 1:0
+@@ -279 +280 @@
+-    check(c.posts.filter{$0.1}.count==(mode=="matched" ? 2:0) && c.text==(mode=="matched" ? left+"가"+right:mode=="old_draft" ? "옛 초안 rㅏ":body),"only proven text repairs: \(mode)")
++    check(c.posts.filter{$0.1}.count==(success ? 2:0) && c.text==(success ? left+"가"+right:mode=="old_draft" ? "옛 초안 rㅏ":body),"only proven text repairs: \(mode)")
+diff --git a/Tests/OnsetRecovery/WitnessDiagnostics/main.swift b/Tests/OnsetRecovery/WitnessDiagnostics/main.swift
+index 046e19ffd047700dbc357ad1ec351039f6a179e5..7c5525508dd146fe7238e08dea5d4a38e16954c8 100644
+--- a/Tests/OnsetRecovery/WitnessDiagnostics/main.swift
++++ b/Tests/OnsetRecovery/WitnessDiagnostics/main.swift
+@@ -133 +133 @@
+-independent.switchKey=5
++independent.switchKey=14
+@@ -142 +142 @@
+-    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":14,"draftRead":0,"draftLookup":0,"insertedSpan":0],
++    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":15,"draftRead":0,"draftLookup":0,"insertedSpan":0],
+diff --git a/Tests/SourceSwitchBarrier/InitialLayoutTests.swift b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+index a8bacfda32679555971d4186b2993ab593d4187c..6ee5ef4dc641946f25a82d2b22f3d2bf85848c84 100644
+--- a/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
++++ b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+@@ -38,0 +39,40 @@
++    // Simulate an unavailable post-switch window with three independent
++    // observation points. No OS keys, actual window focus or writes.
++    do {
++        let root=AXUIElementCreateApplication(4104),component=AXUIElementCreateApplication(4105),other=AXUIElementCreateApplication(4106)
++        let own:(AXUIElement)->pid_t?={CFEqual($0,other) ? 92:91}
++        func get(_ role:String,_ focus:CFTypeRef,_ window:CFTypeRef,_ subrole:String?=nil)->AXUIElement? {
++            InputFocusAccess.outsideWindow(pid:91,element:component,role:role,subrole:subrole,focused:focus,window:window,owner:own)
++        }
++        check(get(kAXGroupRole,kCFBooleanTrue,root).map{CFEqual($0,root)}==true,"a focused outside node attests its own window")
++        check(get(kAXWindowRole,kCFBooleanTrue,kCFNull).map{CFEqual($0,component)}==true,"focused window may attest itself")
++        for invalid in [get(kAXTextFieldRole,kCFBooleanTrue,root),get(kAXGroupRole,kCFBooleanFalse,root),get(kAXGroupRole,NSNumber(value:1),root),get(kAXGroupRole,kCFBooleanTrue,other),get(kAXGroupRole,kCFBooleanTrue,kCFNull),get(kAXGroupRole,kCFBooleanTrue,root,"AXSecureTextField")] {
++            check(invalid==nil,"unfocused, editable, secure, foreign or unavailable witnesses fail closed")
++        }
++        for mode in ["prior","direct","direct_slow","conflict","foreign","expired","wrong_request","first_missing","first_moved","last_missing","last_moved","missing_both","other_source","unknown_timestamp","busy_recovery"] {
++            let b=B();var time=10.0,pid:pid_t=91,reads=0,posts=0
++            var window:AXUIElement?=["direct","direct_slow"].contains(mode) ? root:mode=="conflict" ? other:nil
++            b.now={time};b.frontPID={pid};b.frontWindow={_ in window};b.read={nil};b.initialLayout={.ready};b.ready={mode != "busy_recovery"}
++            b.readForOutsideSwitch={reads+=1;return(nil,mode=="missing_both" ? nil:(pid,root))}
++            b.send={_ in posts+=1}
++            let id=mode=="other_source" ? abc:ko, stamp:UInt64=mode=="unknown_timestamp" ? 0:900
++            var prior:B.SwitchWindow?
++            check(!b.request(id,at:stamp,recordWindow:{prior=$0}),"outside remains a direct switch")
++            check(reads==(["other_source","unknown_timestamp","busy_recovery"].contains(mode) ? 0:1),"no extra snapshot outside explicit eligible switches")
++            time+=["expired","direct_slow"].contains(mode) ? 0.16:0.01
++            if mode=="foreign"{pid=92}
++            b.didSwitchWithoutField(id,at:mode=="wrong_request" ? 901:stamp,prior:prior)
++            window=mode=="first_missing" ? nil:mode=="first_moved" ? other:root
++            let first=key(15);first.timestamp=1000
++            check(!b.receive(.keyDown,first),"initial key is always delivered")
++            window=mode=="last_missing" ? nil:mode=="last_moved" ? other:root
++            let result=b.unfocusedKeyCheck(first.timestamp,needsReadyLayout:true)
++            if mode=="prior" {
++                check(result == .matchedPreSwitchWindow && result.allowsReplay,"same original window required at first key and before repair")
++                b.initialLayout={.conflicting}
++                check(!b.unfocusedKeyCheck(first.timestamp,needsReadyLayout:true).allowsReplay,"an unready native layout prevents replay")
++            }else if ["direct","direct_slow"].contains(mode){check(result == .matched,"original direct path retained")}
++            else{check(!result.allowsReplay,"moved, absent or stale evidence never allows editing: \(mode)")}
++            check(posts==0,"observation does not post a key")
++        }
++    }
+diff --git a/Tools/InputTestRecorder/RecorderCore.swift b/Tools/InputTestRecorder/RecorderCore.swift
+index 129474faea66e84f325e4d4a2b92343394231261..93da9b5c752576820ceb7179ceef9d5c9d83a854 100644
+--- a/Tools/InputTestRecorder/RecorderCore.swift
++++ b/Tools/InputTestRecorder/RecorderCore.swift
+@@ -148 +148 @@
+-        return (0...13).contains(k) && (0...13).contains(r) && (0...8).contains(l) && (0...6).contains(s)
++        return (0...14).contains(k) && (0...13).contains(r) && (0...8).contains(l) && (0...6).contains(s)
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index bcf4e5166e988f2288b53a8e7204029f9dab4a60..ce6b1fcf0fa9b407ae9854a8fba914ac9ae83c1a 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -216,0 +217,2 @@
++입력칸 밖에서 두벌식으로 직접 전환할 때, 전환 직후 창을 읽지 못하면 같은 전환 요청의 직전 150ms 안에 포커스가 확인된 같은 앱의 창을 기준으로 사용할 수 있다. 첫 키가 들어올 때와 보정 직전에 원래 창이 확인되어야 한다. 창이 다르거나 첫 키 또는 새 입력 범위를 확인할 수 없으면 기존 본문을 수정하지 않는다.
++
+diff --git a/scripts/summarize-input-incident.py b/scripts/summarize-input-incident.py
+index 3e3ae251361ebce829bb741c8fa060b99923731a..877f69cd680141eded00fe377a4936ad3420f9d8 100644
+--- a/scripts/summarize-input-incident.py
++++ b/scripts/summarize-input-incident.py
+@@ -81 +81 @@
+-    'switchKey':'unmeasured matched no_switch timestamp_missing first_not_seen first_differs expired app_changed original_window_missing current_window_missing window_changed layout_not_ready first_window_missing first_window_changed'.split(),
++    'switchKey':'unmeasured matched no_switch timestamp_missing first_not_seen first_differs expired app_changed original_window_missing current_window_missing window_changed layout_not_ready first_window_missing first_window_changed matched_pre_switch_window'.split(),
+diff --git a/version.env b/version.env
+index b582f5076937c52588aa01d14530d1c4b05e4e9a..39851eefa5eba5274d8495212005acebe1d76b71 100644
+--- a/version.env
++++ b/version.env
+@@ -4 +4 @@
+-BUILD_NUMBER=368
++BUILD_NUMBER=369

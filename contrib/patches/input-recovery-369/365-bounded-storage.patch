@@ -1,0 +1,550 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 58a33d54b7cafbbded6cd69342d4c7d1e99459c4..37720a6326ea70937b12f0d53a92d4f05e5ed2f9 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -12 +12 @@
+-- 입력 문제의 실입력·물리 키 조사는 `prepare-app-test.py prepare --preserve-input-incidents <전용 폴더>`와 `check <record.json> --require-diagnostics`를 사용한다. 현재 실행본의 실제 파일 쓰기·다시 읽기 증명까지 확인한 `input_test_ready` 전에는 사용자에게 재현 입력을 요청하지 않는다. `permissions_ready`·폴더 존재·버튼 ON만으로 저장 성공을 추정하지 않는다. 저장 실패 후에는 누락을 명시하고 실패 자료를 보존하며, 같은 프로세스의 폴더 권한만 수정해 성공했다고 기록하지 않는다.
++- 입력 문제의 실입력·물리 키 조사는 `prepare-app-test.py prepare --preserve-input-incidents <전용 폴더>` 또는 `prepare-app-test.py prepare --bounded-input-incidents <새 전용 폴더>`와 `check <record.json> --require-diagnostics`를 사용한다. 현재 실행본의 실제 파일 쓰기·다시 읽기 증명까지 확인한 `input_test_ready` 전에는 사용자에게 재현 입력을 요청하지 않는다. `permissions_ready`·폴더 존재·버튼 ON만으로 저장 성공을 추정하지 않는다. 저장 실패 후에는 누락을 명시하고 실패 자료를 보존하며, 같은 프로세스의 폴더 권한만 수정해 성공했다고 기록하지 않는다.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 19520cd3350f0f64a1507bdd4894cc5216e35c12..981609253518b29b8961d9b90e9a3f83d5bb9967 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3 +3,5 @@
+-## 0.3.2-beta.1 (빌드 364) — 미배포
++## 0.3.2-beta.1 (빌드 365) — 미배포
++
++- 별도 진단 경로의 자동32MiB·수동16MiB 용량 제한 추가. 기존 조사 저장소·공유 로그의 인수와 정리 거부 및 현재 프로세스의 제한 모드 검증 보강.
++- 지정한 제한 경로의 재실행 유지와 명시적 조사 경로 우선 적용 보강.
++- 제한 경로의 동시 저장과 일반 중복 실행의 선행 저장소 접근 차단.
+diff --git a/Sources/HanQ/InputDiagnostics.swift b/Sources/HanQ/InputDiagnostics.swift
+index 2083a1172d779d1bf40c44096bec8c3a7125c6b6..aa78ec63887bda8d361a6a9e9ba91c71b5cc5bf8 100644
+--- a/Sources/HanQ/InputDiagnostics.swift
++++ b/Sources/HanQ/InputDiagnostics.swift
+@@ -124,0 +125 @@
++    static let boundedDirectoryKey="inputIncidentBoundedDirectory"
+@@ -129 +130,21 @@
+-    static func launch(arguments:[String],defaults:UserDefaults)->(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool) {
++    typealias Launch=(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool,bounded:Bool,valid:Bool)
++    private static func bounded(_ value:String?,enabled:Bool)->Launch {
++        guard let value,value.hasPrefix("/"),!value.contains("\0") else{return (defaultDirectory,false,true,false,true,false)}
++        let directory=URL(fileURLWithPath:value).standardizedFileURL
++        let path=directory.resolvingSymlinksInPath().path.lowercased()
++        let shared=defaultDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path.lowercased()
++        let safe=path != shared && !path.hasPrefix(shared+"/") && !shared.hasPrefix(path=="/" ? "/":path+"/")
++        return (directory,enabled,true,false,true,safe)
++    }
++    static func launch(arguments:[String],defaults:UserDefaults)->Launch {
++        let bounded=arguments.indices.filter{arguments[$0].hasPrefix("--bounded-input-incidents")}
++        if !bounded.isEmpty {
++            let modes=arguments.filter{["--bounded-input-incidents","--preserve-input-incidents","--diagnose-input-incidents"].contains($0)}
++            guard bounded.count==1,let i=bounded.first,arguments[i]=="--bounded-input-incidents",modes.count==1,
++                  i+1<arguments.count,arguments[i+1].hasPrefix("/"),!arguments[i+1].contains("\0") else{
++                return (defaultDirectory,false,true,false,true,false)
++            }
++            // The bounded mode must never adopt the shared diagnostic namespace,
++            // including an alias or an ancestor that contains preserved logs.
++            return self.bounded(arguments[i+1],enabled:true)
++        }
+@@ -131 +152 @@
+-            return (URL(fileURLWithPath:arguments[i+1]),true,true,true)
++            return (URL(fileURLWithPath:arguments[i+1]),true,true,true,false,true)
+@@ -134 +155,7 @@
+-            return (URL(fileURLWithPath:arguments[i+1]),true,false,true)
++            return (URL(fileURLWithPath:arguments[i+1]),true,false,true,false,true)
++        }
++        // An explicitly configured bounded route also applies to login and
++        // permission-recovery launches. Explicit investigation arguments above
++        // retain priority so another session keeps its own destination.
++        if let value=defaults.object(forKey:boundedDirectoryKey) {
++            return self.bounded(value as? String,enabled:defaults.bool(forKey:key))
+@@ -136 +163 @@
+-        return (defaultDirectory,defaults.bool(forKey:key),true,false)
++        return (defaultDirectory,defaults.bool(forKey:key),true,false,false,true)
+@@ -647 +674,2 @@
+-        let archive=UserDefaults.standard.bool(forKey:InputIncidentPreferences.archiveBeforePruningKey)
++        guard option.valid else{fputs("HanQ: invalid isolated bounded diagnostic directory; no shared logs were opened.\n",stderr);_exit(64)}
++        let archive = !option.bounded && UserDefaults.standard.bool(forKey:InputIncidentPreferences.archiveBeforePruningKey)
+@@ -649 +677 @@
+-        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive)
++        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive,boundedStorage:option.bounded)
+@@ -720 +748 @@
+-    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
++    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
+@@ -737 +765 @@
+-        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory)}
++        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory,requiresBoundedPriorPolicy:boundedStorage)}
+@@ -746 +774 @@
+-                    let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID))
++                    let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID,bounded:boundedStorage))
+@@ -1660,0 +1689,3 @@
++    private let requiresBoundedPriorPolicy:Bool
++    private var boundedWriterLock:Int32 = -1
++    private var boundedNamespaceAccepted=false
+@@ -1676 +1707 @@
+-    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil){
++    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,requiresBoundedPriorPolicy:Bool=false){
+@@ -1678,0 +1710 @@
++        self.requiresBoundedPriorPolicy=requiresBoundedPriorPolicy
+@@ -1681,0 +1714,11 @@
++    deinit {if boundedWriterLock>=0{close(boundedWriterLock)}}
++    private func retainBoundedWriterLock(_ directoryFD:Int32)->Bool {
++        if boundedWriterLock>=0{return true}
++        guard flock(directoryFD,LOCK_EX|LOCK_NB)==0 else{_ = failed(3,errno);return false}
++        let retained=dup(directoryFD)
++        guard retained>=0 else{let code=errno;_ = flock(directoryFD,LOCK_UN);_ = failed(3,code);return false}
++        guard fcntl(retained,F_SETFD,FD_CLOEXEC)==0 else{
++            let code=errno;close(retained);_ = flock(directoryFD,LOCK_UN);_ = failed(3,code);return false
++        }
++        boundedWriterLock=retained;return true
++    }
+@@ -1812,0 +1856,3 @@
++        if requiresBoundedPriorPolicy && !persistentOwnership {
++            ownershipPrepared=true;ownershipHealthy=false;return
++        }
+@@ -1814,0 +1861,7 @@
++        defer{if requiresBoundedPriorPolicy && !ownershipHealthy{boundedNamespaceAccepted=false}}
++        if requiresBoundedPriorPolicy {
++            guard policy.maximumAutomaticFiles<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticFiles,
++                  policy.maximumAutomaticBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticBytes,
++                  policy.maximumManualBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumManualBytes,
++                  archiveDirectory==nil else{return}
++        }
+@@ -1815,0 +1869 @@
++        if requiresBoundedPriorPolicy,!retainBoundedWriterLock(dir){return}
+@@ -1821,0 +1876 @@
++            if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
+@@ -1833,0 +1889,9 @@
++        if requiresBoundedPriorPolicy {
++            // Reject a preserved investigation root before trim, migration or
++            // status/index writes. A new bound is not deletion authority.
++            guard index.schema==3,
++                  index.status.maximumAutomaticFiles<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticFiles,
++                  index.status.maximumAutomaticBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticBytes,
++                  let manual=index.status.maximumManualBytes,
++                  manual<=DiagnosticLogRetentionPolicy.incidentDefault.maximumManualBytes else{return}
++        }
+@@ -1901,0 +1966 @@
++        if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
+@@ -2125,0 +2191,3 @@
++        if requiresBoundedPriorPolicy {
++            guard boundedWriterLock>=0,boundedNamespaceAccepted else{return false}
++        }
+@@ -2333,2 +2401,3 @@
+-    static func make(token:String,runID:String)->Self {
+-        Self(schema:1,token:token,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test",runID:runID,ready:true)
++    let bounded: Bool?
++    static func make(token:String,runID:String,bounded:Bool=false)->Self {
++        Self(schema:1,token:token,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test",runID:runID,ready:true,bounded:bounded)
+@@ -2342,2 +2411,7 @@
+-        let args=ProcessInfo.processInfo.arguments
+-        return args.contains("--preserve-input-incidents") || args.contains("--diagnose-input-incidents")
++        explicitRequested(arguments:ProcessInfo.processInfo.arguments,defaults:.standard)
++    }
++    static func explicitRequested(arguments args:[String],defaults:UserDefaults)->Bool {
++        let option=InputIncidentPreferences.launch(arguments:args,defaults:defaults)
++        // An ordinary configured launch waits for the UI instance lock before
++        // creating its writer. Test launches request an actual nonce proof.
++        return args.contains("--preserve-input-incidents") || args.contains("--diagnose-input-incidents") || args.contains("--bounded-input-incidents") || (args.contains(tokenArgument) && option.bounded && option.enabled && option.valid)
+@@ -2369 +2443 @@
+-        let response=Response(token:directory.lastPathComponent,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",directory:InputIncidentTrace.shared.destinationDirectory?.standardizedFileURL.path ?? "",readiness:result)
++        let response=Response(token:directory.lastPathComponent,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",directory:InputIncidentTrace.shared.destinationDirectory?.standardizedFileURL.path ?? "",readiness:result,bounded:InputIncidentPreferences.launch(arguments:args,defaults:.standard).bounded)
+@@ -2378 +2452 @@
+-        let token:String;let pid:Int32;let build:String;let directory:String;let readiness:DiagnosticStorageReadiness
++        let token:String;let pid:Int32;let build:String;let directory:String;let readiness:DiagnosticStorageReadiness;let bounded:Bool
+diff --git a/Tests/AppTestPreparation/test_diagnostic_readiness.py b/Tests/AppTestPreparation/test_diagnostic_readiness.py
+index b451577b2974172dcb6dfcde1b7b67c94a62e116..38790982c82f100c74feb504aae00f62e95acd43 100644
+--- a/Tests/AppTestPreparation/test_diagnostic_readiness.py
++++ b/Tests/AppTestPreparation/test_diagnostic_readiness.py
+@@ -7,0 +8 @@
++from unittest import mock
+@@ -17,0 +19,4 @@
++        self.report_bounded_probe = True
++        self.report_bounded_receipt = True
++        self.probe_mode = None
++        self.launch_mode = None
+@@ -19 +24 @@
+-    def diagnostic_probe(self, app, directory):
++    def diagnostic_probe(self, app, directory, mode='preserve'):
+@@ -20,0 +26 @@
++        self.probe_mode = mode
+@@ -22 +28,2 @@
+-        return {'build': '132', 'readiness': {'ready': self.diagnostic_ready, 'reason': 'fixture'}}
++        return {'build': '132', 'readiness': {'ready': self.diagnostic_ready, 'reason': 'fixture'},
++                'bounded': mode == 'bounded' and self.report_bounded_probe}
+@@ -24 +31,2 @@
+-    def launch_diagnostics(self, app, directory, token):
++    def launch_diagnostics(self, app, directory, token, mode='preserve'):
++        self.launch_mode = mode
+@@ -29 +37,2 @@
+-                                              'build': '132', 'runID': str(uuid.uuid4()), 'ready': True}))
++                                              'build': '132', 'runID': str(uuid.uuid4()), 'ready': True,
++                                              'bounded': mode == 'bounded' and self.report_bounded_receipt}))
+@@ -154,0 +164,99 @@
++
++
++class BoundedReadinessTests(unittest.TestCase):
++    write_plist = common.PreparationTests.write_plist
++    command = common.PreparationTests.command
++    record = common.PreparationTests.record
++    check = common.PreparationTests.check
++
++    def setUp(self):
++        DiagnosticReadinessTests.setUp(self)
++        self.info['HanQBoundedDiagnosticStorageVersion'] = 1
++        self.write_plist()
++
++    def prepare_bounded(self):
++        return preflight.prepare(self.app, self.output, operations=self.ops,
++                                 diagnostics=self.logs, diagnostic_mode='bounded')
++
++    def test_bounded_probe_and_launch_precede_current_process_proof(self):
++        self.assertEqual(self.prepare_bounded(), 0)
++        self.assertEqual(self.ops.calls[:3], ['diagnostic_probe', 'stop', 'reset'])
++        self.assertEqual(self.ops.probe_mode, 'bounded')
++        self.assertEqual(self.ops.launch_mode, 'bounded')
++        self.assertEqual(self.record()['diagnostics']['mode'], 'bounded')
++        self.assertEqual(self.check(), 0)
++        self.assertIs(self.record()['diagnostics']['receipt']['bounded'], True)
++
++    def test_older_app_is_rejected_before_probe_or_stop(self):
++        del self.info['HanQBoundedDiagnosticStorageVersion']
++        self.write_plist()
++        with self.assertRaises(preflight.PreflightError):
++            self.prepare_bounded()
++        self.assertEqual(self.ops.calls, [])
++
++    def test_boolean_capability_is_rejected_before_probe(self):
++        self.info['HanQBoundedDiagnosticStorageVersion'] = True
++        self.write_plist()
++        with self.assertRaises(preflight.PreflightError):
++            self.prepare_bounded()
++        self.assertEqual(self.ops.calls, [])
++
++    def test_nonbounded_probe_never_stops_running_app(self):
++        self.ops.report_bounded_probe = False
++        with self.assertRaises(preflight.PreflightError):
++            self.prepare_bounded()
++        self.assertEqual(self.ops.calls, ['diagnostic_probe'])
++        self.assertEqual(self.record()['steps']['previous_app_stopped'], 'not_run')
++
++    def test_active_writer_storage_refusal_never_stops_running_app(self):
++        self.ops.running = [{'pid': 77, 'app': 'existing', 'helper': False}]
++        before = copy.deepcopy(self.ops.running)
++        self.ops.diagnostic_ready = False
++        with self.assertRaises(preflight.PreflightError):
++            self.prepare_bounded()
++        self.assertEqual(self.ops.running, before)
++        self.assertEqual(self.ops.calls, ['diagnostic_probe'])
++
++    def test_nonbounded_main_receipt_is_not_input_ready(self):
++        self.ops.report_bounded_receipt = False
++        self.prepare_bounded()
++        with self.assertRaises(preflight.PreflightError):
++            self.check()
++        self.assertEqual(self.record()['status'], 'awaiting_diagnostics')
++
++    def test_missing_bounded_receipt_field_cannot_reuse_permission(self):
++        self.prepare_bounded()
++        receipt = json.loads(self.ops.receipt.read_text())
++        del receipt['bounded']
++        self.ops.receipt.write_text(json.dumps(receipt))
++        with self.assertRaises(preflight.PreflightError):
++            self.check()
++
++    def test_old_preserve_receipt_remains_compatible(self):
++        preflight.prepare(self.app, self.output, operations=self.ops, diagnostics=self.logs)
++        receipt = json.loads(self.ops.receipt.read_text())
++        del receipt['bounded']
++        self.ops.receipt.write_text(json.dumps(receipt))
++        self.assertEqual(self.check(), 0)
++
++    def test_unknown_mode_fails_before_stop(self):
++        with self.assertRaises(preflight.PreflightError):
++            preflight.prepare(self.app, self.output, operations=self.ops,
++                              diagnostics=self.logs, diagnostic_mode='unknown')
++        self.assertEqual(self.ops.calls, [])
++
++    def test_bounded_mode_is_forwarded_to_real_launch_arguments(self):
++        ops = preflight.MacOS()
++        with mock.patch.object(ops, '_launch', return_value=700) as launch:
++            self.assertEqual(ops.launch_diagnostics('/test/HanQ.app', '/new/logs', 'nonce', mode='bounded'), 700)
++        launch.assert_called_once_with('/test/HanQ.app', ['--bounded-input-incidents', '/new/logs',
++                                                       '--diagnostic-readiness-token', 'nonce'])
++
++    def test_record_mode_corruption_revokes_readiness(self):
++        self.prepare_bounded()
++        record = self.record()
++        record['diagnostics']['mode'] = 'unknown'
++        (self.output / 'record.json').write_text(json.dumps(record))
++        with self.assertRaises(preflight.PreflightError):
++            self.check()
++        self.assertNotEqual(self.record()['status'], 'input_test_ready')
+diff --git a/Tests/Diagnostics/Bounded/main.swift b/Tests/Diagnostics/Bounded/main.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..92aa57e5f0a96522757ee68d22d52d634b6c98b1
+--- /dev/null
++++ b/Tests/Diagnostics/Bounded/main.swift
+@@ -0,0 +1,133 @@
++import Foundation
++import Darwin
++
++let fm=FileManager.default
++let root=fm.temporaryDirectory.appendingPathComponent("hanq-bounded-"+UUID().uuidString,isDirectory:true)
++try fm.createDirectory(at:root,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
++defer{try? fm.removeItem(at:root)}
++var checks=0
++func check(_ condition:@autoclosure ()throws->Bool,_ label:String){
++    checks+=1;do{if try condition(){return}}catch{}
++    fputs("FAIL bounded: \(label)\n",stderr);exit(1)
++}
++let suite="hanq.bounded.tests."+UUID().uuidString
++let defaults=UserDefaults(suiteName:suite)!
++defer{defaults.removePersistentDomain(forName:suite)}
++defaults.set(true,forKey:InputIncidentPreferences.key)
++defaults.set(true,forKey:InputIncidentPreferences.archiveBeforePruningKey)
++func options(_ args:[String])->(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool,bounded:Bool,valid:Bool){
++    InputIncidentPreferences.launch(arguments:["HanQ"]+args,defaults:defaults)
++}
++let wanted=root.appendingPathComponent("new")
++let good=options(["--bounded-input-incidents",wanted.path])
++check(good.valid && good.bounded && good.enabled && good.persistent && !good.preserve,"bounded explicit persistent root")
++check(good.directory==wanted,"bounded exact destination")
++for args in [["--bounded-input-incidents"],["--bounded-input-incidents","relative"],
++    ["--bounded-input-incidents",wanted.path,"--bounded-input-incidents",wanted.path],
++    ["--bounded-input-incidents",wanted.path,"--preserve-input-incidents",wanted.path],
++    ["--bounded-input-incidents",wanted.path,"--diagnose-input-incidents",wanted.path],
++    ["--bounded-input-incidents="+wanted.path],["--bounded-input-incidents-extra",wanted.path]] {
++    check(!options(args).valid,"invalid/mixed mode rejected before shared-root fallback: \(args)")
++}
++let shared=InputIncidentPreferences.defaultDirectory
++for p in [shared,shared.appendingPathComponent("nested"),shared.deletingLastPathComponent(),URL(fileURLWithPath:"/")] {
++    check(!options(["--bounded-input-incidents",p.path]).valid,"shared namespace/ancestor rejected")
++}
++let alias=root.appendingPathComponent("shared-alias")
++try fm.createSymbolicLink(at:alias,withDestinationURL:shared.deletingLastPathComponent())
++check(!options(["--bounded-input-incidents",alias.appendingPathComponent("InputIncidents").path]).valid,"alias cannot adopt shared logs")
++check(!options(["--bounded-input-incidents",shared.path.uppercased()]).valid,"case alias cannot adopt shared logs")
++let preserved=options(["--preserve-input-incidents",wanted.path])
++check(preserved.valid && preserved.preserve && !preserved.bounded && preserved.persistent,"preserve mode unchanged")
++let transient=options(["--diagnose-input-incidents",wanted.path])
++check(transient.valid && transient.preserve && !transient.bounded && !transient.persistent,"legacy transient mode unchanged")
++let normal=options([])
++check(normal.valid && !normal.bounded && !normal.preserve && normal.directory==shared,"normal mode unchanged")
++check(defaults.bool(forKey:InputIncidentPreferences.archiveBeforePruningKey),"launch parsing leaves archive preference unchanged")
++defaults.set(wanted.path,forKey:InputIncidentPreferences.boundedDirectoryKey)
++let configured=options([])
++check(configured.valid && configured.bounded && configured.enabled && configured.directory==wanted,"saved route survives a normal launch")
++check(!DiagnosticStorageStartup.explicitRequested(arguments:["HanQ"],defaults:defaults),"ordinary configured launch reaches UI instance lock before storage")
++check(!DiagnosticStorageStartup.explicitRequested(arguments:["HanQ","--permission-recovery"],defaults:defaults),"ordinary recovery reaches UI lock before storage")
++check(DiagnosticStorageStartup.explicitRequested(arguments:["HanQ",DiagnosticStorageStartup.tokenArgument,UUID().uuidString],defaults:defaults),"configured test launch requires actual current-process proof")
++check(options(["--permission-recovery"]).bounded && options(["--permission-recovery"]).directory==wanted,"saved route survives permission recovery")
++defaults.set(false,forKey:InputIncidentPreferences.key)
++check(options([]).valid && options([]).bounded && !options([]).enabled,"saved route respects diagnostics OFF")
++check(options(["--bounded-input-incidents",wanted.path]).enabled,"explicit test mode requires collection despite saved OFF")
++defaults.set(true,forKey:InputIncidentPreferences.key)
++for value in [true,"relative",shared.path] as [Any] {
++    defaults.set(value,forKey:InputIncidentPreferences.boundedDirectoryKey)
++    check(!options([]).valid,"bad saved route cannot fall back to shared logs")
++    check(options(["--preserve-input-incidents",wanted.path]).preserve,"another session's explicit preserve route wins")
++    check(!options(["--diagnose-input-incidents",wanted.path]).bounded,"another explicit legacy route wins")
++}
++defaults.removeObject(forKey:InputIncidentPreferences.boundedDirectoryKey)
++
++let run=UUID().uuidString
++func payload(_ id:Int,_ phase:Int,_ manual:Bool=false)->Data {
++    try! JSONSerialization.data(withJSONObject:["schema":1,"build":"test","runID":run,
++        "incident":id,"phase":phase,"trigger":manual ? 1:2,"padding":String(repeating:"x",count:32)],options:.sortedKeys)
++}
++func snapshot(_ dir:URL)throws->[String:Data] {
++    let paths=try fm.contentsOfDirectory(at:dir,includingPropertiesForKeys:nil)
++    return try Dictionary(uniqueKeysWithValues:paths.map{($0.lastPathComponent,try Data(contentsOf:$0))})
++}
++func pair(_ store:DiagnosticLogStore,_ id:Int,_ manual:Bool=false){
++    check(store.save(payload(id,0,manual),incident:id,phase:0,automatic:!manual) == .saved,"pre save")
++    check(store.save(payload(id,1,manual),incident:id,phase:1,automatic:!manual) == .saved,"post save")
++}
++let old=root.appendingPathComponent("old-investigation")
++let investigator=DiagnosticLogStore(directory:old,policy:.investigation,persistentOwnership:true)
++check(investigator.verifyReadiness().ready,"old investigation ready")
++pair(investigator,1);pair(investigator,2,true)
++let oldBytes=try snapshot(old)
++let refuse=DiagnosticLogStore(directory:old,policy:.incidentDefault,persistentOwnership:true,requiresBoundedPriorPolicy:true)
++check(!refuse.verifyReadiness().ready,"bounded mode refuses unbounded ownership before pruning")
++check(refuse.save(payload(3,0),incident:3,phase:0,automatic:true) == .unavailable,"rejected investigation cannot publish a later capture")
++check(try snapshot(old)==oldBytes,"rejected investigation retains every filename and byte including metadata")
++
++let invalid=root.appendingPathComponent("invalid-policy")
++let transientBounded=root.appendingPathComponent("invalid-transient")
++let transientStore=DiagnosticLogStore(directory:transientBounded,policy:.incidentDefault,requiresBoundedPriorPolicy:true)
++check(!transientStore.verifyReadiness().ready,"bounded proof requires persistent ownership")
++check(transientStore.save(payload(1,0),incident:1,phase:0,automatic:true) == .unavailable,"invalid transient combination cannot publish captures or status")
++check(!fm.fileExists(atPath:transientBounded.path),"invalid transient combination opens no directory")
++let invalidStore=DiagnosticLogStore(directory:invalid,policy:.investigation,persistentOwnership:true,requiresBoundedPriorPolicy:true)
++check(!invalidStore.verifyReadiness().ready,"bounded mode cannot issue readiness for an unbounded policy")
++check(!fm.fileExists(atPath:invalid.path),"invalid policy creates no destination")
++let archived=root.appendingPathComponent("invalid-archive")
++let archiveStore=DiagnosticLogStore(directory:archived,policy:.incidentDefault,persistentOwnership:true,
++    archiveDirectory:root.appendingPathComponent("archive"),requiresBoundedPriorPolicy:true)
++check(!archiveStore.verifyReadiness().ready,"bounded mode rejects a growing external archive")
++check(!fm.fileExists(atPath:archived.path),"archive rejection creates no destination")
++
++let fresh=root.appendingPathComponent("bounded"),policy=DiagnosticLogRetentionPolicy(maximumAutomaticFiles:4,maximumAutomaticBytes:2048,maximumManualBytes:2048)
++var bounded:DiagnosticLogStore?=DiagnosticLogStore(directory:fresh,policy:policy,persistentOwnership:true,requiresBoundedPriorPolicy:true)
++check(bounded!.verifyReadiness().ready,"fresh bounded writer proves actual write/read")
++pair(bounded!,1);pair(bounded!,2,true)
++let manual=try snapshot(fresh).filter{$0.key.hasPrefix("incident-2-")}
++pair(bounded!,3);pair(bounded!,4)
++check(bounded!.usage.files==4 && bounded!.usage.bytes<=2048,"automatic pair rotation respects count and bytes")
++check(!(try snapshot(fresh)).keys.contains{$0.hasPrefix("incident-1-")},"only new bounded cohort's oldest automatic pair removed")
++for (name,data) in manual{check(try Data(contentsOf:fresh.appendingPathComponent(name))==data,"automatic rotation preserves bounded manual records")}
++let firstFiles=try snapshot(fresh).filter{$0.key.hasPrefix("incident-")}
++let beforeContender=try snapshot(fresh)
++let contender=DiagnosticLogStore(directory:fresh,policy:policy,persistentOwnership:true,requiresBoundedPriorPolicy:true)
++check(!contender.verifyReadiness().ready,"a second bounded writer is rejected")
++check(contender.save(payload(5,0),incident:5,phase:0,automatic:true) == .unavailable,"rejected writer cannot publish after readiness failure")
++check(contender.status.lastFailureStage==3,"rejected writer uses compatible ownership failure stage")
++check(try snapshot(fresh)==beforeContender,"rejected writer changes no capture, status or ownership bytes")
++bounded=nil
++let resumed=DiagnosticLogStore(directory:fresh,policy:policy,persistentOwnership:true,requiresBoundedPriorPolicy:true)
++check(resumed.verifyReadiness().ready,"bounded ownership resumes after previous writer closes")
++check(try snapshot(fresh).filter{$0.key.hasPrefix("incident-")}==firstFiles,"bounded restart preserves live records")
++let beforeOversize=try snapshot(fresh).filter{$0.key.hasPrefix("incident-")}
++check(resumed.save(Data(repeating:32,count:2049),incident:5,phase:0,automatic:true) == .limit,"oversize automatic record refused")
++check(resumed.save(Data(repeating:32,count:2049),incident:6,phase:0,automatic:false) == .limit,"oversize manual record refused")
++check(try snapshot(fresh).filter{$0.key.hasPrefix("incident-")}==beforeOversize,"oversize refusal preserves prior evidence")
++check(try snapshot(old)==oldBytes,"new bounded rotations leave old investigation unchanged")
++check(resumed.status.maximumAutomaticBytes==2048 && resumed.status.maximumManualBytes==2048,"status reports actual writer bounds")
++let receipt=DiagnosticReadinessReceipt.make(token:UUID().uuidString,runID:run,bounded:true)
++check(receipt.bounded==true && receipt.pid==getpid(),"current-process receipt proves bounded configuration")
++check(DiagnosticReadinessReceipt.make(token:"test",runID:run).bounded==false,"legacy receipt configuration remains unbounded")
++print("PASS \(checks) isolated bounded configuration, preservation, rotation, refusal and process-proof checks; no app/keys/TCC")
+diff --git a/Tests/MismatchRecovery/IdleObservationTests.swift b/Tests/MismatchRecovery/IdleObservationTests.swift
+index 912a640bd407fefdc313e17f1c8e60e53921d692..21f5720ac589eeffb49485f84f345292f829def2 100644
+--- a/Tests/MismatchRecovery/IdleObservationTests.swift
++++ b/Tests/MismatchRecovery/IdleObservationTests.swift
+@@ -18,2 +18,7 @@
+-        RunLoop.current.run(until:Date().addingTimeInterval(0.03))
+-        probeTestCheck(reads==1 && heartbeat && !p.recovering && selections==0 && posts==0,"idle wait duplicated work or blocked input loop")
++        // A scheduler heartbeat is a completion condition, not a 30ms latency
++        // benchmark. Keep a bounded wait and all one-request/no-edit assertions.
++        let heartbeatDeadline=Date().addingTimeInterval(0.5)
++        while (reads==0 || !heartbeat),Date()<heartbeatDeadline {
++            RunLoop.current.run(until:Date().addingTimeInterval(0.005))
++        }
++        probeTestCheck(reads==1 && heartbeat && !p.recovering && selections==0 && posts==0,"idle wait mode=\(mode) reads=\(reads) heartbeat=\(heartbeat) recovering=\(p.recovering) selections=\(selections) posts=\(posts)")
+diff --git a/docs/DEVELOPMENT.md b/docs/DEVELOPMENT.md
+index bc0776649b7e6d0a95f5acefa1d43aad2ce888b9..d102a03b31d6b60d27addfba671476d471d87949 100644
+--- a/docs/DEVELOPMENT.md
++++ b/docs/DEVELOPMENT.md
+@@ -678,0 +679,2 @@
++용량 제한이 필요한 별도 조사 경로는 `prepare-app-test.py prepare <앱> --bounded-input-incidents <새 전용 경로>`와 `check <record.json> --require-diagnostics`로 준비한다. 실제 writer가 자동64파일·32MiB, 수동16MiB의 독립 한도를 적용하고 현재 프로세스의 제한 모드 증명을 확인한다. 한도는 관리하는 진단 JSON의 보관량이며 메타데이터·임시 파일·별도로 보존한 조사 사본의 전체 디스크 quota는 아니다. 일반 진단 폴더와 그 상위·하위 또는 별칭 경로, 기존 비순환 조사 소유 색인은 거부한다. 새 경로의 관리 기록만 순환하며 공유 조사 보관소로 추가 복사하지 않고 기존 archive-before-pruning 설정값은 바꾸지 않는다. 제한 경로를 재사용할 때도 소유권·기존 제한 정책을 확인한다. 제한 경로는 디렉터리의 배타적 쓰기 잠금을 유지한다. 다른 writer가 사용 중이면 사전 검사를 거부하고 현재 앱을 유지한다. 소유 범위나 잠금이 거부되면 후속 캡처와 상태 동반 파일도 발행하지 않는다. 같은 경로를 재사용하는 검사는 이전 writer 종료 후 수행하거나 새 전용 경로를 사용한다. 일반 재실행은 UI 인스턴스 잠금 뒤 저장소를 열며, 디렉터리 인수 없이 현재 프로세스 저장을 검증할 때는 저장한 제한 경로와 새 readiness token을 함께 확인한다. 보존/제한 옵션은 동시에 지정할 수 없다. 실제 제한 모드 검증을 마친 경로를 재실행에도 유지하려면 `inputIncidentBoundedDirectory` 설정에 절대 경로를 저장한다. 일반·로그인·권한 복구 실행에도 같은 경로를 사용하며 진단 OFF 설정은 유지한다. 명시적 보존/개발용 경로는 저장 경로보다 우선한다. 잘못된 저장 경로는 공유 폴더로 대체하지 않고 거부한다. 이 옵션은 이를 지원하는 빌드에만 사용하며 검사 실패 시 기존 앱을 유지하고 입력 시험을 시작하지 않는다.
++
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index 05e538cdee231a88a47c552574955f9e9ebe32c6..e068bd4c639334c1e9ef56eecca12d40acbba121 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -161 +161 @@
+-선택적 입력 이상 진단은 기존 처리 경로의 시각·통과/소비·지연·보정 상태와 기존 AX 관측의 본문 길이·선택 유무와 내용·커서/선택 변경 여부·편집 상태를 제한된 메타데이터로 보관한다. 원문·내용 해시·커서 좌표는 진단 큐/자료에 저장하지 않는다. 기존 snapshot의 일시적 메모리 비교를 사용한다. 입력칸은 제한된 AX 객체 동등성 비교로 익명 식별하며, 진단 ON일 때 기존 비동기 유휴 snapshot의 속성 batch에서만 안내문·레이블·문자 수·창을 함께 조회한다. 입력 callback·복구용 조회에는 추가 속성 조회를 하지 않는다. 원문은 저장하지 않고 빈 값/줄바꿈/공백/그 외 형태, 안내문·레이블 일치 힌트, 문자 수·본문 표현 일치 상태와 포커스 조회 경로·익명 소유/창·식별 세대만 남긴다. 속성 미지원·미측정을 구분하고 창 변경에는 본문 비교를 미확인으로 처리한다. 안내문 일치와 AX 본문 변화는 편집기의 독립적인 실제 본문 증명이 아니며 복구 판단에 사용하지 않는다. 반복 관측의 시작·마지막 시각·횟수와 주기적 기준을 남기며 캡처에는 직전·현재 고정 기준을 ring과 독립 보관한다. 비교 단절은 미확인으로 표시하고 문맥 경계 이후 이전 기준을 새 길이 감소 판단에 사용하지 않는다. 불일치 감지의 생략·후보/복구 거절과 전달 이력 인계 판단도 고정 사유로 구분하며 개별 입력은 기존 익명 이벤트에 연결한다. 입력 소스 ID·키 값·원본 이벤트 시각을 내보내지 않고 같은 유휴 판단은 사유가 바뀔 때만 기록한다. 분기 사유는 입력 callback이 잠금을 기다리지 않는 별도 제한 큐에서 원래 시각·익명 이벤트 연결을 유지해 기록한다. 개별 입력·비정상 판단과 반복 유휴 판단의 슬롯을 분리하며, 큐 상한을 넘은 경우 판단 위치·사유·입력 연결 여부를 별도 집계한다. 캡처 요청 전 제출한 사유를 먼저 반영하며 이벤트 객체·입력 본문은 큐에 보관하지 않는다. worker의 실제 잠금 경합 여부와 획득 경과·큐 대기 시간을 구분해 남기며, 경합한 반복 사유도 보존한다. 판단 위치·사유·입력 연결별 처리/경합 건수·대기 합계/최대는 누적 집계한다. 단조 시계·마이크로초 단위를 사용하고60초 상한 초과는 표시한다. 획득 시간은 입력 callback의 대기나 OS의 순수 수면 시간으로 해석하지 않으며 오래된 자료의 미측정을0으로 보지 않는다. 입력 내용은 저장하지 않으며, 진단을 위해 추가 키 전송·입력 소스 변경을 하지 않는다. 진단 메뉴의 수동 표시 또는 지연·의심 길이 변화로 직전/직후 구간을 로컬에 비동기 저장한다. 기본 폴더의 검증된 관리 기록은 자동 64파일·32MiB, 수동 16MiB의 독립 한도 안에서 각각 오래된 전후 사건 묶음부터 순환한다. 수동 기록의 실행당 누적 건수 제한은 없다. 관리되지 않은 파일은 삭제하지 않으며, 이전 소유 색인이 정상인 경우 형식·소유권·익명 실행 ID·사건/전후 번호가 일치하는 기존 수동 기록만 새 관리 대상으로 이전한다. 새 소유 색인은 볼륨 UUID·디렉터리/파일 생성 정보·저장된 진단 자료의 SHA-256으로 재시동 뒤 동일성을 검증한다. 원문 내용의 해시는 만들지 않으며 소유 색인은 사용자 내보내기에 포함하지 않는다. 같은 부팅 중에는 장치 번호·변경 시각도 검사한다. 구형 색인의 장치 번호가 달라지면 개별 파일의 소유권을 추정해 정리하지 않고, 구조·기존 파일 식별 검사를 통과한 비공개 저장 폴더 전체를 같은 볼륨의 InvestigationArchives/Legacy-…에 보존한 뒤 새 한도 내 기록을 시작한다. 새 형식의 식별 불일치·내용 변경·모호한 구형 자료는 두 종류 모두 새 저장을 거부해 원본을 보존한다. 개발용 명시적 보존 실행은 순환 삭제하지 않는다. 자동 기록의 새 저장 시작은 최소 10초 간격이다. 간격 제한 중에도 요청된 중요 사건의 직전·후속 구간을 별도 제한 메모리에 고정하고, 준비된 구간은 사건 번호 순서로 후속 묶음 저장한다. 겹치는 자동 요청은 종류·원래 시각·익명 참조를 개별 보관하며 마지막 요청 뒤 약 1초까지 후속 관측을 연장한다. 입력 callback은 자리 예약과 고정 메타데이터 제출만 하고 진단 잠금·구간 복사·저장을 기다리지 않는다. 파일 입출력·정리는 입력 callback 밖에서 수행한다. 생략 가능한 관측 기록으로 취급하며 편집기 수신·입력 누락이나 원인 확정으로 해석하지 않는다. 최초 기본값은 OFF이며 메뉴의 ‘진단 및 로그 → 진단 기록 활성화’로 즉시 켜거나 끌 수 있다. 저장된 ON/OFF는 재실행·재부팅 뒤에도 적용하며, 자동 시작은 별도의 로그인 설정을 따른다. OFF는 새 수집과 대기 중 후속 캡처를 멈추고 기존 파일은 보존한다. 다시 ON으로 바꿀 때 이전 메모리 구간·AX 조회를 새 구간에 섞지 않는다. 개발용 `--diagnose-input-incidents <폴더>`는 해당 실행에만 적용하고 저장 설정을 바꾸지 않는다.
++선택적 입력 이상 진단은 기존 처리 경로의 시각·통과/소비·지연·보정 상태와 기존 AX 관측의 본문 길이·선택 유무와 내용·커서/선택 변경 여부·편집 상태를 제한된 메타데이터로 보관한다. 원문·내용 해시·커서 좌표는 진단 큐/자료에 저장하지 않는다. 기존 snapshot의 일시적 메모리 비교를 사용한다. 입력칸은 제한된 AX 객체 동등성 비교로 익명 식별하며, 진단 ON일 때 기존 비동기 유휴 snapshot의 속성 batch에서만 안내문·레이블·문자 수·창을 함께 조회한다. 입력 callback·복구용 조회에는 추가 속성 조회를 하지 않는다. 원문은 저장하지 않고 빈 값/줄바꿈/공백/그 외 형태, 안내문·레이블 일치 힌트, 문자 수·본문 표현 일치 상태와 포커스 조회 경로·익명 소유/창·식별 세대만 남긴다. 속성 미지원·미측정을 구분하고 창 변경에는 본문 비교를 미확인으로 처리한다. 안내문 일치와 AX 본문 변화는 편집기의 독립적인 실제 본문 증명이 아니며 복구 판단에 사용하지 않는다. 반복 관측의 시작·마지막 시각·횟수와 주기적 기준을 남기며 캡처에는 직전·현재 고정 기준을 ring과 독립 보관한다. 비교 단절은 미확인으로 표시하고 문맥 경계 이후 이전 기준을 새 길이 감소 판단에 사용하지 않는다. 불일치 감지의 생략·후보/복구 거절과 전달 이력 인계 판단도 고정 사유로 구분하며 개별 입력은 기존 익명 이벤트에 연결한다. 입력 소스 ID·키 값·원본 이벤트 시각을 내보내지 않고 같은 유휴 판단은 사유가 바뀔 때만 기록한다. 분기 사유는 입력 callback이 잠금을 기다리지 않는 별도 제한 큐에서 원래 시각·익명 이벤트 연결을 유지해 기록한다. 개별 입력·비정상 판단과 반복 유휴 판단의 슬롯을 분리하며, 큐 상한을 넘은 경우 판단 위치·사유·입력 연결 여부를 별도 집계한다. 캡처 요청 전 제출한 사유를 먼저 반영하며 이벤트 객체·입력 본문은 큐에 보관하지 않는다. worker의 실제 잠금 경합 여부와 획득 경과·큐 대기 시간을 구분해 남기며, 경합한 반복 사유도 보존한다. 판단 위치·사유·입력 연결별 처리/경합 건수·대기 합계/최대는 누적 집계한다. 단조 시계·마이크로초 단위를 사용하고60초 상한 초과는 표시한다. 획득 시간은 입력 callback의 대기나 OS의 순수 수면 시간으로 해석하지 않으며 오래된 자료의 미측정을0으로 보지 않는다. 입력 내용은 저장하지 않으며, 진단을 위해 추가 키 전송·입력 소스 변경을 하지 않는다. 진단 메뉴의 수동 표시 또는 지연·의심 길이 변화로 직전/직후 구간을 로컬에 비동기 저장한다. 기본 폴더의 검증된 관리 기록은 자동 64파일·32MiB, 수동 16MiB의 독립 한도 안에서 각각 오래된 전후 사건 묶음부터 순환한다. 수동 기록의 실행당 누적 건수 제한은 없다. 관리되지 않은 파일은 삭제하지 않으며, 이전 소유 색인이 정상인 경우 형식·소유권·익명 실행 ID·사건/전후 번호가 일치하는 기존 수동 기록만 새 관리 대상으로 이전한다. 새 소유 색인은 볼륨 UUID·디렉터리/파일 생성 정보·저장된 진단 자료의 SHA-256으로 재시동 뒤 동일성을 검증한다. 원문 내용의 해시는 만들지 않으며 소유 색인은 사용자 내보내기에 포함하지 않는다. 같은 부팅 중에는 장치 번호·변경 시각도 검사한다. 구형 색인의 장치 번호가 달라지면 개별 파일의 소유권을 추정해 정리하지 않고, 구조·기존 파일 식별 검사를 통과한 비공개 저장 폴더 전체를 같은 볼륨의 InvestigationArchives/Legacy-…에 보존한 뒤 새 한도 내 기록을 시작한다. 새 형식의 식별 불일치·내용 변경·모호한 구형 자료는 두 종류 모두 새 저장을 거부해 원본을 보존한다. 개발용 명시적 보존 실행은 순환 삭제하지 않는다. 별도 용량 제한 실행은 자동64파일·32MiB와 수동16MiB를 새 전용 경로에 적용하고 일반 진단 폴더·그 상위/하위·별칭 및 기존 비순환 조사 소유 구간을 인수하지 않는다. 공유 보관소로의 추가 복사를 하지 않으며 기존 보관 설정은 유지한다. 제한 경로는 배타적 writer 잠금으로 동시 소유 정보 변경을 거부하며 일반 중복 실행은 UI 인스턴스 잠금 전에 저장소를 열지 않는다. 제한은 관리 진단 JSON의 보관량이고 메타데이터·임시 파일·별도 보존 사본은 별개다. 새 프로세스의 실제 저장과 제한 모드 증명을 확인한 뒤 입력 시험을 시작한다. 검증 후 지정한 제한 경로는 일반·로그인·권한 복구 재실행에도 유지할 수 있으며 진단 OFF와 명시적 별도 조사 경로를 우선한다. 잘못된 지정 경로에서 공유 폴더로 자동 복귀하지 않는다. 자동 기록의 새 저장 시작은 최소 10초 간격이다. 간격 제한 중에도 요청된 중요 사건의 직전·후속 구간을 별도 제한 메모리에 고정하고, 준비된 구간은 사건 번호 순서로 후속 묶음 저장한다. 겹치는 자동 요청은 종류·원래 시각·익명 참조를 개별 보관하며 마지막 요청 뒤 약 1초까지 후속 관측을 연장한다. 입력 callback은 자리 예약과 고정 메타데이터 제출만 하고 진단 잠금·구간 복사·저장을 기다리지 않는다. 파일 입출력·정리는 입력 callback 밖에서 수행한다. 생략 가능한 관측 기록으로 취급하며 편집기 수신·입력 누락이나 원인 확정으로 해석하지 않는다. 최초 기본값은 OFF이며 메뉴의 ‘진단 및 로그 → 진단 기록 활성화’로 즉시 켜거나 끌 수 있다. 저장된 ON/OFF는 재실행·재부팅 뒤에도 적용하며, 자동 시작은 별도의 로그인 설정을 따른다. OFF는 새 수집과 대기 중 후속 캡처를 멈추고 기존 파일은 보존한다. 다시 ON으로 바꿀 때 이전 메모리 구간·AX 조회를 새 구간에 섞지 않는다. 개발용 `--diagnose-input-incidents <폴더>`는 해당 실행에만 적용하고 저장 설정을 바꾸지 않는다.
+diff --git a/scripts/build-app.sh b/scripts/build-app.sh
+index 0607f724979f645114ee6f698314333d6fbd3ed2..c47245c893d423a4ef635e5e068b5c82be805d83 100644
+--- a/scripts/build-app.sh
++++ b/scripts/build-app.sh
+@@ -124,0 +125 @@
++<key>HanQBoundedDiagnosticStorageVersion</key><integer>1</integer>
+diff --git a/scripts/prepare-app-test.py b/scripts/prepare-app-test.py
+index cd5e06ae78c9e2df4904f82df669fe9f5e89552e..7fd88102fbc246d539b40687e5d1c5da00c22c53 100644
+--- a/scripts/prepare-app-test.py
++++ b/scripts/prepare-app-test.py
+@@ -153,2 +153,2 @@
+-    def launch_diagnostics(self, app, directory, token):
+-        return self._launch(app, ['--preserve-input-incidents', directory,
++    def launch_diagnostics(self, app, directory, token, mode='preserve'):
++        return self._launch(app, [diagnostic_flag(mode), directory,
+@@ -167 +167 @@
+-    def diagnostic_probe(self, app, directory):
++    def diagnostic_probe(self, app, directory, mode='preserve'):
+@@ -171 +171 @@
+-                 '--preserve-input-incidents', directory])
++                 diagnostic_flag(mode), directory])
+@@ -270 +270,8 @@
+-def prepare_diagnostics(identity, path, operations):
++def diagnostic_flag(mode):
++    if mode not in ('preserve', 'bounded'):
++        raise PreflightError('알 수 없는 진단 저장 모드입니다.')
++    return '--bounded-input-incidents' if mode == 'bounded' else '--preserve-input-incidents'
++
++
++def prepare_diagnostics(identity, path, operations, mode='preserve'):
++    diagnostic_flag(mode)
+@@ -273,0 +281,3 @@
++    if mode == 'bounded' and (type(info.get('HanQBoundedDiagnosticStorageVersion')) is not int or
++                              info['HanQBoundedDiagnosticStorageVersion'] != 1):
++        raise PreflightError('이 앱은 별도 경로의 용량 제한 저장을 지원하지 않습니다. 기존 앱을 유지합니다.')
+@@ -275 +285,2 @@
+-    result = operations.diagnostic_probe(identity['path'], directory)
++    result = (operations.diagnostic_probe(identity['path'], directory, mode='bounded') if mode == 'bounded'
++              else operations.diagnostic_probe(identity['path'], directory))
+@@ -279 +290,3 @@
+-    return {'directory': directory, 'token': str(uuid.uuid4()), 'probe': result,
++    if mode == 'bounded' and result.get('bounded') is not True:
++        raise PreflightError('새 앱의 용량 제한 모드를 확인하지 못했습니다. 기존 앱을 유지합니다.')
++    return {'directory': directory, 'token': str(uuid.uuid4()), 'probe': result, 'mode': mode,
+@@ -284,0 +298,2 @@
++    mode = expected.get('mode', 'preserve')
++    diagnostic_flag(mode)
+@@ -291,0 +307,2 @@
++    if mode == 'bounded' and receipt.get('bounded') is not True:
++        raise PreflightError('현재 프로세스의 용량 제한 저장 증명이 없습니다. 입력 시험을 시작하지 마세요.')
+@@ -301,0 +319,2 @@
++        if d.get('mode', 'preserve') == 'bounded':
++            return operations.launch_diagnostics(record['app']['path'], d['directory'], d['token'], mode='bounded')
+@@ -306 +325 @@
+-def reuse_permissions(app, previous_record, previous_app, output=None, operations=None, diagnostics=None):
++def reuse_permissions(app, previous_record, previous_app, output=None, operations=None, diagnostics=None, diagnostic_mode='preserve'):
+@@ -340 +359 @@
+-            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations)
++            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations, mode=diagnostic_mode)
+@@ -366 +385 @@
+-def prepare(app, output=None, dry_run=False, operations=None, diagnostics=None):
++def prepare(app, output=None, dry_run=False, operations=None, diagnostics=None, diagnostic_mode='preserve'):
+@@ -393 +412 @@
+-            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations)
++            record['diagnostics'] = prepare_diagnostics(identity, diagnostics, operations, mode=diagnostic_mode)
+@@ -492 +511 @@
+-          '권한만 확인했습니다. 로그가 필요한 입력 조사는 --preserve-input-incidents로 다시 준비하세요.')
++          '권한만 확인했습니다. 로그가 필요한 조사는 --preserve-input-incidents 또는 --bounded-input-incidents로 다시 준비하세요.')
+@@ -506 +525,2 @@
+-    prepare_parser.add_argument('--preserve-input-incidents', type=pathlib.Path,
++    diagnostic_group = prepare_parser.add_mutually_exclusive_group()
++    diagnostic_group.add_argument('--preserve-input-incidents', type=pathlib.Path,
+@@ -507,0 +528,2 @@
++    diagnostic_group.add_argument('--bounded-input-incidents', type=pathlib.Path,
++                                  help='새 전용 경로에 자동32MiB·수동16MiB 한도와 현재 프로세스 저장 증명을 적용')
+@@ -514,0 +537 @@
++    diagnostic_parser.add_argument('--bounded', action='store_true', help='별도 경로의 용량 제한 모드로 검사')
+@@ -517,0 +541,2 @@
++            diagnostic_mode = 'bounded' if args.bounded_input_incidents is not None else 'preserve'
++            diagnostic_path = args.bounded_input_incidents if args.bounded_input_incidents is not None else args.preserve_input_incidents
+@@ -522,2 +547,2 @@
+-                                         diagnostics=args.preserve_input_incidents)
+-            return prepare(args.app, args.output, args.dry_run, diagnostics=args.preserve_input_incidents)
++                                         diagnostics=diagnostic_path, diagnostic_mode=diagnostic_mode)
++            return prepare(args.app, args.output, args.dry_run, diagnostics=diagnostic_path, diagnostic_mode=diagnostic_mode)
+@@ -526 +551 @@
+-            verified = prepare_diagnostics(identity, args.directory, MacOS())
++            verified = prepare_diagnostics(identity, args.directory, MacOS(), mode='bounded' if args.bounded else 'preserve')
+diff --git a/scripts/test-diagnostics.sh b/scripts/test-diagnostics.sh
+index 1eb4cae7c6e34dacc8a1aba8348a65e9f73e5fb7..16d634cfdc4db3ab4687e4d3f0ed209ff7ba13ba 100644
+--- a/scripts/test-diagnostics.sh
++++ b/scripts/test-diagnostics.sh
+@@ -7,0 +8,2 @@
++swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/Bounded/main.swift -o "$stage/bounded-tests"
++hanq_test_run "$stage/bounded-tests"
+diff --git a/version.env b/version.env
+index e7bbb92179faf9b788738c0bdfd62b4deb9c3371..e1f8618418a75f76b74784d7752e53759cc4d58b 100644
+--- a/version.env
++++ b/version.env
+@@ -4 +4 @@
+-BUILD_NUMBER=364
++BUILD_NUMBER=365

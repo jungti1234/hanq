@@ -1,0 +1,411 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 37720a6326ea70937b12f0d53a92d4f05e5ed2f9..d5f18644e02f3f048cc9f260a7f3118562b2e46b 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -5,0 +6 @@
++- **테스트 앱은 실행마다 새 임시 폴더를 사용한다.** 입력·진단용 테스트 앱과 도우미는 `/private/tmp` 아래에 현재 사용자 전용 폴더(권한 `0700`)를 만들고, 실행 사본·작업 디렉터리·준비 파일·시험 데이터·로그를 모두 그 안에 둔다. 실행 전에 경로와 심볼릭 링크를 검증한다. 문서·데스크탑·다운로드 등 보호 폴더를 가리키면 앱을 띄우기 전에 중단한다. 파일 접근 승인을 요청하거나 권한을 초기화해 시험을 계속하지 않는다. 보존할 결과만 시험 종료 후 실행 도구가 작업 기록으로 복사한다.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 5b268ef50c2341edb0acca225d62cdadcc055dd5..c9447ff9b560e35738c2768eccb691bb136822ba 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3 +3,3 @@
+-## 0.3.2-beta.1 (빌드 367) — 미배포
++## 0.3.2-beta.1 (빌드 368) — 미배포
++
++- 입력칸 밖에서 전환한 뒤 첫 키의 연결, 입력 전 초안·커서, 새 글자와 주변 본문의 대조 결과를 분리해 진단. 입력 내용과 커서 좌표는 기록하지 않음.
+diff --git a/Sources/HanQ/DiagnosticReview.swift b/Sources/HanQ/DiagnosticReview.swift
+index 988900ea161823c7d2962ae47d514c8c66868497..c9cd3c0612d8660d99ce880fd7549fc786cb3d5e 100644
+--- a/Sources/HanQ/DiagnosticReview.swift
++++ b/Sources/HanQ/DiagnosticReview.swift
+@@ -304,0 +305,4 @@
++            ("switchKey",["미측정","전환 직후 첫 키 확인","유효한 전환 기록 없음","첫 키 시각 없음","첫 키 미관측","다른 첫 키","전환 기한 초과","전면 앱 변경","전환 때 창 미확인","현재 창 미확인","전환 창 변경","재전송 전 자판 미준비","첫 키 때 창 미확인","첫 키 때 창 변경"]),
++            ("draftRead",["미측정","입력 전 초안·커서 관측","초안 속성 확인 불가","초안 역할·보안 조건","초안 값 확인 불가","초안 크기 상한","입력칸 활성 미확인","입력칸 표시 여부 미확인","초안 소속 창 미확인","초안 선택 조회 불가","초안 문맥 미확인","초안 커서 미확인","초안 조회 기한","초안 관측기 없음"]),
++            ("draftLookup",["미측정","입력 전 기준 확인","같은 입력칸 초안 확인","같은 입력칸 초안 기록 없음","첫 키 이전 초안 기록 없음","초안 기록 기한 초과","초안 재확인 때 창 미확인","초안 재확인 때 창 변경","초안 비교 기준 부적합"]),
++            ("insertedSpan",["미측정","삽입 범위·커서 조건","입력 시작이 영문 아님","삽입 앞뒤 초안 불일치","새 글자와 키 이력 불일치","일부 키 반영 대기","새 글자·앞뒤 초안 일치"]),
+diff --git a/Sources/HanQ/InputDiagnostics.swift b/Sources/HanQ/InputDiagnostics.swift
+index 36ceaa93b79f9051503e117fd373598ff14420f9..8b6d0daa0a5fcf6191bbc44b0ebae4c963f7a361 100644
+--- a/Sources/HanQ/InputDiagnostics.swift
++++ b/Sources/HanQ/InputDiagnostics.swift
+@@ -407,0 +408,5 @@
++    // Branch outcomes only; no identifiers, event timestamps, text or cursor positions.
++    enum SwitchKeyCheck:Int {case unmeasured, matched, noSwitch, timestampMissing, firstNotSeen, firstDiffers, expired, appChanged, originalWindowMissing, currentWindowMissing, windowChanged, layoutNotReady, firstWindowMissing, firstWindowChanged}
++    enum DraftRead:Int {case unmeasured, recorded, attributesUnavailable, roleUnavailable, textUnavailable, textTooLarge, notEnabled, visibilityUnproven, windowUnproven, selectionUnreadable, contextUnproven, caretUnproven, deadline, observerMissing}
++    enum DraftLookup:Int {case unmeasured, entry, outside, noFieldRecord, noPreKeyRecord, expired, windowUnavailable, windowChanged, unusable}
++    enum InsertedSpan:Int {case unmeasured, anchorOrRangeInvalid, notRomanFirst, surroundingsChanged, keysDiffer, partial, matched}
+@@ -412 +417,7 @@
+-        var signature:Int {(((discovery*14+representation)*13+lookup)*9+history)+1}
++        // All four are omitted in older captures / unrelated decisions.
++        var switchKey:Int?,draftRead:Int?,draftLookup:Int?,insertedSpan:Int?
++        var signature:Int {
++            let base=(((discovery*14+representation)*13+lookup)*9+history)+1
++            guard let key=switchKey,let read=draftRead,let stored=draftLookup,let span=insertedSpan else{return base}
++            return 65536+(((base*14+key)*14+read)*9+stored)*7+span
++        }
+diff --git a/Sources/HanQ/OnsetFocusHandoff.swift b/Sources/HanQ/OnsetFocusHandoff.swift
+index c602ca2422c1aa9de17e958e1a13ded2b797762c..f99d1ee3b8cce10b056731479b18476865cb4511 100644
+--- a/Sources/HanQ/OnsetFocusHandoff.swift
++++ b/Sources/HanQ/OnsetFocusHandoff.swift
+@@ -28,0 +29,6 @@
++    // Bounded numeric outcomes of existing reads. Select by completion before the
++    // first key so a later focus/read cannot masquerade as a pre-key proof.
++    private var draftReads:[(field:AXUIElement,at:Double,result:InputIncidentTrace.DraftRead)]=[]
++    func preKeyDraftRead(_ field:AXUIElement,before first:Double)->InputIncidentTrace.DraftRead {
++        draftReads.last{$0.at<first && first-$0.at<=0.75 && CFEqual($0.field,field)}?.result ?? .unmeasured
++    }
+@@ -30 +36 @@
+-    func resetWitnessDiagnostics(){representationObservations=[];lastDiscovery=0;lastWitnessLookup=0;lastContextDiagnostic=0}
++    func resetWitnessDiagnostics(){representationObservations=[];draftReads=[];lastDiscovery=0;lastWitnessLookup=0;lastContextDiagnostic=0}
+@@ -140 +146,10 @@
+-        defer{if observing{noteRepresentation(field,representationReason,at:began)}}
++        var draftRead=InputIncidentTrace.DraftRead.attributesUnavailable
++        defer{
++            if observing {
++                noteRepresentation(field,representationReason,at:began)
++                if collectWitnessDiagnostics {
++                    if draftReads.count>=16{draftReads.removeFirst()}
++                    draftReads.append((field,now(),draftRead))
++                }
++            }
++        }
+@@ -145 +160 @@
+-        guard let role=values[0] as? String,OnsetEditableRole.supports(role),values[1] as? String != kAXSecureTextFieldSubrole else{representationReason=3;return false}
++        guard let role=values[0] as? String,OnsetEditableRole.supports(role),values[1] as? String != kAXSecureTextFieldSubrole else{representationReason=3;draftRead = .roleUnavailable;return false}
+@@ -157,5 +172,8 @@
+-        if observing,let text,text.utf16.count<=16384,
+-           values[4] as? Bool==true,values[5] as? Bool==false,
+-           let windowValue=values[6],CFGetTypeID(windowValue)==AXUIElementGetTypeID(),CFEqual(windowValue,window),
+-           let rawRange=values[3],CFGetTypeID(rawRange)==AXValueGetTypeID(),
+-           ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid {
++        func captureDraft()->InputIncidentTrace.DraftRead {
++            guard let text else{return .textUnavailable}
++            guard text.utf16.count<=16384 else{return .textTooLarge}
++            guard values[4] as? Bool==true else{return .notEnabled}
++            guard values[5] as? Bool==false else{return .visibilityUnproven}
++            guard let w=values[6],CFGetTypeID(w)==AXUIElementGetTypeID(),CFEqual(w,window) else{return .windowUnproven}
++            guard let raw=values[3],CFGetTypeID(raw)==AXValueGetTypeID() else{return .selectionUnreadable}
++            guard ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid else{return .contextUnproven}
+@@ -163,4 +181,6 @@
+-            if AXValueGetValue(rawRange as! AXValue,.cfRange,&range),range.length==0,
+-               range.location>=0,range.location<=text.utf16.count,now()>=began,now()-began<0.012 {
+-                observeSnapshot?(.init(element:field,text:text,selection:NSRange(location:range.location,length:0)))
+-            }
++            guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.length==0,
++                  range.location>=0,range.location<=text.utf16.count else{return .caretUnproven}
++            guard now()>=began,now()-began<0.012 else{return .deadline}
++            guard let observeSnapshot else{return .observerMissing}
++            observeSnapshot(.init(element:field,text:text,selection:NSRange(location:range.location,length:0)))
++            return .recorded
+@@ -167,0 +188 @@
++        if observing{draftRead=captureDraft()}
+diff --git a/Sources/HanQ/OnsetLateSequenceDetector.swift b/Sources/HanQ/OnsetLateSequenceDetector.swift
+index 09f5ed1122d5def8a6a8f90a3d630105235686f9..adb88f5a3214124009d01e038a8322cb4ceac50d 100644
+--- a/Sources/HanQ/OnsetLateSequenceDetector.swift
++++ b/Sources/HanQ/OnsetLateSequenceDetector.swift
+@@ -10,0 +11 @@
++                        onSpan:((InputIncidentTrace.InsertedSpan)->Void)?=nil,
+@@ -51,0 +53 @@
++        if romanBaseline != nil{onSpan?(.anchorOrRangeInvalid)}
+@@ -58,2 +60,4 @@
+-            if inserted.utf8.first.map({(65...90).contains($0) || (97...122).contains($0)})==true,
+-               body.replacingCharacters(in:range,with:"").utf16.elementsEqual(anchor.text.utf16) {
++            if inserted.utf8.first.map({(65...90).contains($0) || (97...122).contains($0)}) != true {onSpan?(.notRomanFirst)}
++            else if !body.replacingCharacters(in:range,with:"").utf16.elementsEqual(anchor.text.utf16){onSpan?(.surroundingsChanged)}
++            else {
++                onSpan?(.keysDiffer)
+@@ -69,0 +74 @@
++                            onSpan?(.matched)
+@@ -75 +80 @@
+-                if pending{return .waiting}
++                if pending{onSpan?(.partial);return .waiting}
+diff --git a/Sources/HanQ/OnsetOutsideObservation.swift b/Sources/HanQ/OnsetOutsideObservation.swift
+index 5d1f40c760cf1d943b8f7b36a9142775bc8cd77b..9b00c13160813b991de6b1ea03928a87c78c0c4f 100644
+--- a/Sources/HanQ/OnsetOutsideObservation.swift
++++ b/Sources/HanQ/OnsetOutsideObservation.swift
+@@ -20,4 +20,10 @@
+-    func baseline(for field:AXUIElement,before time:Double)->OnsetSnapshot? {
+-        guard let entry=entries.last(where:{CFEqual($0.snapshot.element,field) && $0.completed<time && time-$0.completed<=0.75}) else{return nil}
+-        if let window=entry.window {
+-            guard let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID(),CFEqual(actual,window) else{return nil}
++    func baseline(for field:AXUIElement,before time:Double,report:((InputIncidentTrace.DraftLookup)->Void)?=nil)->OnsetSnapshot? {
++        var missing=InputIncidentTrace.DraftLookup.noFieldRecord
++        for entry in entries.reversed() where CFEqual(entry.snapshot.element,field) {
++            guard entry.completed<time else{if missing == .noFieldRecord{missing = .noPreKeyRecord};continue}
++            guard time-entry.completed<=0.75 else{missing = .expired;continue}
++            if let window=entry.window {
++                guard let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID() else{report?(.windowUnavailable);return nil}
++                guard CFEqual(actual,window) else{report?(.windowChanged);return nil}
++            }
++            report?(.outside);return entry.snapshot
+@@ -25 +31 @@
+-        return entry.snapshot
++        report?(missing);return nil
+diff --git a/Sources/HanQ/OnsetRecoveryController.swift b/Sources/HanQ/OnsetRecoveryController.swift
+index 1c0851cf833a33ef768f718c5b0565cdab0da9a5..1ac80eb0c865c5490fb22ab682039b8dad508825 100644
+--- a/Sources/HanQ/OnsetRecoveryController.swift
++++ b/Sources/HanQ/OnsetRecoveryController.swift
+@@ -8 +8 @@
+-    var permitsUnfocusedReplay:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->Bool = {_,_ in false}
++    var unfocusedKeyCheck:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->InputIncidentTrace.SwitchKeyCheck = {_,_ in .noSwitch}
+@@ -33 +33 @@
+-        next.permitsUnfocusedReplay = { [weak self] in self?.permitsUnfocusedReplay($0,$1) ?? false }
++        next.unfocusedKeyCheck = { [weak self] in self?.unfocusedKeyCheck($0,$1) ?? .noSwitch }
+diff --git a/Sources/HanQ/OnsetRecoveryEngine.swift b/Sources/HanQ/OnsetRecoveryEngine.swift
+index db9ef987bda5e3f8b9a8c33f88c0c4af4711c09e..1cd2ee8c4db293d7aee80523abfc67bd987f26f9 100644
+--- a/Sources/HanQ/OnsetRecoveryEngine.swift
++++ b/Sources/HanQ/OnsetRecoveryEngine.swift
+@@ -19 +19 @@
+-    var permitsUnfocusedReplay:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->Bool = {_,_ in false}
++    var unfocusedKeyCheck:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->InputIncidentTrace.SwitchKeyCheck = {_,_ in .noSwitch}
+@@ -242,2 +242,6 @@
+-        let fromOutside = !publicationMatches && p.first.sourceID==onsetKoreanID
+-            && permitsUnfocusedReplay(p.first.eventTimestamp,false)
++        let considerOutside = !publicationMatches && p.first.sourceID==onsetKoreanID
++        var switchCheck:InputIncidentTrace.SwitchKeyCheck = considerOutside ? unfocusedKeyCheck(p.first.eventTimestamp,false):.unmeasured
++        let fromOutside = switchCheck == .matched
++        let measure=considerOutside && focusHandoff.collectWitnessDiagnostics
++        var lookup=InputIncidentTrace.DraftLookup.unmeasured
++        var span=InputIncidentTrace.InsertedSpan.unmeasured
+@@ -246 +250 @@
+-        let draft = fromOutside && observed==nil ? outsideObservation.baseline(for:snap.element,before:p.first.time):nil
++        let draft = fromOutside && observed==nil ? outsideObservation.baseline(for:snap.element,before:p.first.time,report:measure ? {lookup=$0}:nil):nil
+@@ -250,0 +255,13 @@
++        if measure,fromOutside {
++            if observed != nil{lookup = .entry}
++            else if draft != nil && romanBaseline==nil{lookup = .unusable}
++        }
++        func outsideDetail(_ history:Int=0)->InputIncidentTrace.OnsetDetail? {
++            guard var detail=focusHandoff.witnessDetail(for:snap.element,history:history) else{return nil}
++            if measure {
++                detail.switchKey=switchCheck.rawValue
++                detail.draftRead=focusHandoff.preKeyDraftRead(snap.element,before:p.first.time).rawValue
++                detail.draftLookup=lookup.rawValue;detail.insertedSpan=span.rawValue
++            }
++            return detail
++        }
+@@ -260,4 +277,4 @@
+-        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,romanBaseline:romanBaseline.map{($0.text,$0.selection.location)},onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
+-        case .waiting:decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_wait",hasSnapshot:true);return true
+-        case .complete:decisionTrace.onsetDecision(.history,.historyComplete,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
+-        case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count,detail:focusHandoff.witnessDetail(for:snap.element,history:rejection.rawValue));traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
++        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,romanBaseline:romanBaseline.map{($0.text,$0.selection.location)},onSpan:measure ? {span=$0}:nil,onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
++        case .waiting:decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count,detail:measure ? outsideDetail():nil);traceReentryObservation("history_wait",hasSnapshot:true);return true
++        case .complete:decisionTrace.onsetDecision(.history,.historyComplete,firstTime:p.first.time,keys:p.keys.count,detail:measure ? outsideDetail():nil);traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
++        case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count,detail:outsideDetail(rejection.rawValue));traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
+@@ -265 +282 @@
+-            decisionTrace.onsetDecision(.history,.historyCandidate,firstTime:p.first.time,keys:p.keys.count)
++            decisionTrace.onsetDecision(.history,.historyCandidate,firstTime:p.first.time,keys:p.keys.count,detail:measure ? outsideDetail():nil)
+@@ -273 +290,5 @@
+-                guard permitsUnfocusedReplay(p.first.eventTimestamp,allRoman) else{return true}
++                switchCheck=unfocusedKeyCheck(p.first.eventTimestamp,allRoman)
++                guard switchCheck == .matched else{
++                    if measure{decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count,detail:outsideDetail())}
++                    return true
++                }
+diff --git a/Sources/HanQ/SourceSwitchBarrier.swift b/Sources/HanQ/SourceSwitchBarrier.swift
+index d19d73254dd24ea0956999ceb238a6d10f7947d8..c8f721130739831e2aca1100d396613619621a3c 100644
+--- a/Sources/HanQ/SourceSwitchBarrier.swift
++++ b/Sources/HanQ/SourceSwitchBarrier.swift
+@@ -37,0 +38 @@
++        var firstCheck=InputIncidentTrace.SwitchKeyCheck.firstNotSeen
+@@ -55,6 +56,12 @@
+-    func isFirstUnfocusedSwitchKey(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->Bool {
+-        guard let attempt=unfocusedSwitch,timestamp != 0,attempt.first==timestamp,
+-              now()-attempt.began<=2.5 else{return false}
+-        guard frontPID()==attempt.pid,let original=attempt.window,let current=frontWindow(attempt.pid),
+-              CFEqual(original,current) else{return false}
+-        return !needsReadyLayout || initialLayout?() == .ready
++    func unfocusedKeyCheck(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->InputIncidentTrace.SwitchKeyCheck {
++        guard let attempt=unfocusedSwitch else{return .noSwitch}
++        guard timestamp != 0 else{return .timestampMissing}
++        guard attempt.first != 0 else{return attempt.firstCheck}
++        guard attempt.first==timestamp else{return .firstDiffers}
++        guard now()-attempt.began<=2.5 else{return .expired}
++        guard frontPID()==attempt.pid else{return .appChanged}
++        guard let original=attempt.window else{return .originalWindowMissing}
++        guard let current=frontWindow(attempt.pid) else{return .currentWindowMissing}
++        guard CFEqual(original,current) else{return .windowChanged}
++        guard !needsReadyLayout || initialLayout?() == .ready else{return .layoutNotReady}
++        return .matched
+@@ -78,3 +85,6 @@
+-            if let original=attempt.window,let current=frontWindow(attempt.pid),CFEqual(original,current) {
+-                attempt.first=event.timestamp
+-            }
++            if let original=attempt.window {
++                if let current=frontWindow(attempt.pid) {
++                    if CFEqual(original,current){attempt.first=event.timestamp}
++                    else{attempt.firstCheck = .firstWindowChanged}
++                }else{attempt.firstCheck = .firstWindowMissing}
++            }else{attempt.firstCheck = .originalWindowMissing}
+diff --git a/Sources/HanQ/main.swift b/Sources/HanQ/main.swift
+index 9f69f9cabcd893a59a9d790ad40fb14b1b5352b2..15c40a0d53dd541d3d03dc10166aa7ad28360842 100644
+--- a/Sources/HanQ/main.swift
++++ b/Sources/HanQ/main.swift
+@@ -12 +12 @@
+-        controller.permitsUnfocusedReplay = { [weak self] in self?.sourceSwitchBarrier.isFirstUnfocusedSwitchKey($0,needsReadyLayout:$1) ?? false }
++        controller.unfocusedKeyCheck = { [weak self] in self?.sourceSwitchBarrier.unfocusedKeyCheck($0,needsReadyLayout:$1) ?? .noSwitch }
+diff --git a/Tests/DiagnosticReview/main.swift b/Tests/DiagnosticReview/main.swift
+index aa16da8c9ae509487b5632d1f654391bcd1f49f5..7894102cf2a09f164bf43a98242a21ee1a193873 100644
+--- a/Tests/DiagnosticReview/main.swift
++++ b/Tests/DiagnosticReview/main.swift
+@@ -224,2 +224,2 @@
+-let detailRead=try projected([["kind":13,"lane":3,"category":5,"onsetEvidence":["keys":1,"detail":["discovery":8,"representation":6,"lookup":2,"history":8,"text":"SECRET_DETAIL"]]]])
+-for label in ["첫 입력 세부: 탐색 불완전","첫 입력 세부: 문자 수 조회 불가","첫 입력 세부: 같은 입력칸 표본 없음","첫 입력 세부: 전체 본문·커서 불일치"] {
++let detailRead=try projected([["kind":13,"lane":3,"category":5,"onsetEvidence":["keys":1,"detail":["discovery":8,"representation":6,"lookup":2,"history":8,"switchKey":1,"draftRead":7,"draftLookup":3,"insertedSpan":3,"text":"SECRET_DETAIL"]]]])
++for label in ["첫 입력 세부: 탐색 불완전","첫 입력 세부: 문자 수 조회 불가","첫 입력 세부: 같은 입력칸 표본 없음","첫 입력 세부: 전체 본문·커서 불일치","첫 입력 세부: 전환 직후 첫 키 확인","첫 입력 세부: 입력칸 표시 여부 미확인","첫 입력 세부: 같은 입력칸 초안 기록 없음","첫 입력 세부: 삽입 앞뒤 초안 불일치"] {
+diff --git a/Tests/Diagnostics/test_incident_summary.py b/Tests/Diagnostics/test_incident_summary.py
+index 17b7b1d7e142501e3868a2262156a5e108d89894..4535425dee009f89cb0fd015932317b06bf38464 100644
+--- a/Tests/Diagnostics/test_incident_summary.py
++++ b/Tests/Diagnostics/test_incident_summary.py
+@@ -56,0 +57,6 @@
++        outside=dict(switchKey=1,draftRead=7,draftLookup=3,insertedSpan=0)
++        extended=dict(row,onsetEvidence=dict(keys=2,detail=dict(detail,**outside)))
++        named=summary.summarize(dict(schema=1,trigger=1,frames=[extended]))['onset_decisions'][0]['detail_names']
++        self.assertEqual([named[k] for k in outside],['matched','visibility_unproven','no_field_record','not_checked'])
++        for invalid_group in [dict(switchKey=1),dict(outside,insertedSpan=7),dict(outside,draftRead=True),dict(outside,cursor=5)]:
++            with self.assertRaises(ValueError):summary.onset_detail(dict(detail,**invalid_group))
+diff --git a/Tests/OnsetRecovery/StructurePublication/main.swift b/Tests/OnsetRecovery/StructurePublication/main.swift
+index 8b600b553e953841adf947ab83fbd586924bce58..697f4d9c691efb7ce42aab93963c0e5d61b8806f 100644
+--- a/Tests/OnsetRecovery/StructurePublication/main.swift
++++ b/Tests/OnsetRecovery/StructurePublication/main.swift
+@@ -23 +23 @@
+-    init(sourceID:String=KoreanKeyboardLayout.twoSetID,label:String="arbitrary presentation",role:String=kAXTextAreaRole,priorCaret:Int=0){
++    init(sourceID:String=KoreanKeyboardLayout.twoSetID,label:String="arbitrary presentation",role:String=kAXTextAreaRole,priorCaret:Int=0,visibilityKnown:Bool=true,trace:InputIncidentTrace?=nil){
+@@ -60,0 +61 @@
++        if let trace{e.decisionTrace=trace;e.synchronizeWitnessDiagnostics()}
+@@ -72 +73 @@
+-            if name=="AXHidden"{return kCFBooleanFalse}
++            if name=="AXHidden"{return visibilityKnown ? kCFBooleanFalse:nil}
+@@ -75,0 +77,2 @@
++        e.outsideObservation.read=h.read
++        h.observeSnapshot={ [weak self] snap in self?.e.outsideObservation.remember(snap,window:root) }
+@@ -81,3 +84 @@
+-        e.outsideObservation.read=h.read
+-        h.observeSnapshot={ [weak self] snap in self?.e.outsideObservation.remember(snap,window:root) }
+-        if priorCaret>0{e.outsideObservation.remember(.init(element:field,text:label,selection:NSRange(location:priorCaret,length:0)),window:root)}
++
+@@ -234 +235 @@
+-        c.e.permitsUnfocusedReplay={ stamp,_ in stamp != 0 }
++        c.e.unfocusedKeyCheck={stamp,_ in stamp != 0 ? .matched:.timestampMissing}
+@@ -248 +249 @@
+-    c.e.permitsUnfocusedReplay={ _,ready in mode != "missing_switch" && !(mode=="still_ABC" && ready) }
++    c.e.unfocusedKeyCheck={_,ready in mode=="missing_switch" ? .noSwitch:(mode=="still_ABC" && ready ? .layoutNotReady:.matched)}
+@@ -257,0 +259,23 @@
++// The same visible body can result from independent failures. Have the engine
++// obtain its own pre-key record and validate the actual exported decision.
++for mode in ["matched","no_switch","other_first","unknown_visibility","old_draft","moved_caret"] {
++    var captures:[InputIncidentTrace.Capture]=[]
++    let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
++    let left="앞🙂:",right=":끝",body=left+"rㅏ"+right
++    let c=Case(label:left+right,priorCaret:left.utf16.count,visibilityKnown:mode != "unknown_visibility",trace:trace)
++    c.prefix=left;c.suffix=right
++    c.e.unfocusedKeyCheck={_,_ in mode=="no_switch" ? .noSwitch:mode=="other_first" ? .firstDiffers:.matched}
++    c.original(15,true);c.original(15,false);c.original(40,true);c.original(40,false)
++    c.visible=true;c.text=mode=="old_draft" ? "옛 초안 rㅏ":body
++    c.selection=NSRange(location:mode=="old_draft" ? c.text.utf16.count:mode=="moved_caret" ? 0:left.utf16.count+2,length:0)
++    c.e.sample();c.spin();trace.flush();trace.mark();trace.flush()
++    let measured=captures.flatMap{$0.frames}.filter{$0.kind == .onsetDecision && $0.onsetEvidence?.keys==2}.compactMap{$0.onsetEvidence?.detail}.last{$0.switchKey != nil}
++    let key=mode=="no_switch" ? 2:mode=="other_first" ? 5:1
++    let lookup=key != 1 ? 0:mode=="unknown_visibility" ? 3:2
++    let span=mode=="matched" ? 6:mode=="old_draft" ? 2:mode=="moved_caret" ? 1:0
++    check(measured?.switchKey==key && measured?.draftRead==(mode=="unknown_visibility" ? 7:1) && measured?.draftLookup==lookup,"independent switch, pre-key read and lookup: \(mode) (\(String(describing:measured)))")
++    if mode=="old_draft"{check([2,3].contains(measured?.insertedSpan ?? -1),"restored draft never grants a span")}
++    else{check(measured?.insertedSpan==span,"exact span diagnosis: \(mode)")}
++    check(c.posts.filter{$0.1}.count==(mode=="matched" ? 2:0) && c.text==(mode=="matched" ? left+"가"+right:mode=="old_draft" ? "옛 초안 rㅏ":body),"only proven text repairs: \(mode)")
++    c.close();trace.stopAndFlush()
++}
+diff --git a/Tests/OnsetRecovery/WitnessDiagnostics/main.swift b/Tests/OnsetRecovery/WitnessDiagnostics/main.swift
+index 280f303c17b11529468346dc349d82b862e9d437..046e19ffd047700dbc357ad1ec351039f6a179e5 100644
+--- a/Tests/OnsetRecovery/WitnessDiagnostics/main.swift
++++ b/Tests/OnsetRecovery/WitnessDiagnostics/main.swift
+@@ -129,0 +130,5 @@
++var independent=detail(4,100)
++independent.switchKey=1;independent.draftRead=7;independent.draftLookup=3;independent.insertedSpan=0
++for _ in 0..<20{trace.onsetDecision(.history,.historyRejected,firstTime:first,keys:2,detail:independent)}
++independent.switchKey=5
++trace.onsetDecision(.history,.historyRejected,firstTime:first,keys:2,detail:independent)
+@@ -133 +138 @@
+-check(frames.count==2,"state changes survive coalescing but age-only changes do not flood")
++check(frames.count==4,"state changes survive coalescing but age-only changes do not flood")
+@@ -135,0 +141,3 @@
++    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":1],
++    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":14,"draftRead":0,"draftLookup":0,"insertedSpan":0],
++    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":true,"draftRead":0,"draftLookup":0,"insertedSpan":0],
+diff --git a/Tests/SourceSwitchBarrier/InitialLayoutTests.swift b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+index edc72bc9e4b42fd89c4f3f494c887732a3762770..a8bacfda32679555971d4186b2993ab593d4187c 100644
+--- a/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
++++ b/Tests/SourceSwitchBarrier/InitialLayoutTests.swift
+@@ -22 +22 @@
+-        check(!b.receive(.keyDown,first) && b.isFirstUnfocusedSwitchKey(1000),"first outside key stays native and has a matching identity")
++        check(!b.receive(.keyDown,first) && b.unfocusedKeyCheck(1000) == .matched,"first outside key stays native and has a matching identity")
+@@ -24 +24 @@
+-        check(!b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"entirely ASCII output waits without owning input")
++        check(b.unfocusedKeyCheck(1000,needsReadyLayout:true) == .layoutNotReady,"entirely ASCII output waits without owning input")
+@@ -26 +26 @@
+-        check(b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"two-set layout allows the verified native replay")
++        check(b.unfocusedKeyCheck(1000,needsReadyLayout:true) == .matched,"two-set layout allows the verified native replay")
+@@ -28,3 +28,3 @@
+-        check(!b.receive(.keyDown,second) && !b.isFirstUnfocusedSwitchKey(2000),"later keys cannot claim the first identity")
+-        pid=92;check(!b.isFirstUnfocusedSwitchKey(1000),"a different application cannot use the history");pid=91
+-        window=AXUIElementCreateApplication(4102);check(!b.isFirstUnfocusedSwitchKey(1000),"different window in the same application");window=originalWindow
++        check(!b.receive(.keyDown,second) && b.unfocusedKeyCheck(2000) == .firstDiffers,"later keys cannot claim the first identity")
++        pid=92;check(b.unfocusedKeyCheck(1000) == .appChanged,"a different application cannot use the history");pid=91
++        window=AXUIElementCreateApplication(4102);check(b.unfocusedKeyCheck(1000) == .windowChanged,"different window in the same application");window=originalWindow
+@@ -32 +32 @@
+-        check(!b.receive(.leftMouseDown,click) && !b.isFirstUnfocusedSwitchKey(1000),"pointer invalidation")
++        check(!b.receive(.leftMouseDown,click) && b.unfocusedKeyCheck(1000) != .matched,"pointer invalidation")
+@@ -34 +34 @@
+-        check(!b.receive(.keyDown,first) && !b.isFirstUnfocusedSwitchKey(1000),"first key outside the switch deadline")
++        check(!b.receive(.keyDown,first) && b.unfocusedKeyCheck(1000) != .matched,"first key outside the switch deadline")
+@@ -37 +37 @@
+-        check(!b.isFirstUnfocusedSwitchKey(1000) && !b.busy,"another source switch invalidates the observation")
++        check(b.unfocusedKeyCheck(1000) != .matched && !b.busy,"another source switch invalidates the observation")
+diff --git a/Tools/InputTestRecorder/RecorderCore.swift b/Tools/InputTestRecorder/RecorderCore.swift
+index 9d54ef21c274e41c9fa562d165378a2bfaf9208f..129474faea66e84f325e4d4a2b92343394231261 100644
+--- a/Tools/InputTestRecorder/RecorderCore.swift
++++ b/Tools/InputTestRecorder/RecorderCore.swift
+@@ -143 +143,8 @@
+-    var valid:Bool {(0...9).contains(discovery) && (0...13).contains(representation) && (0...12).contains(lookup) && (0...8).contains(history) && (observationAgeMicros.map{(0...60_000_000).contains($0)} ?? true)}
++    let switchKey,draftRead,draftLookup,insertedSpan:Int?
++    static let outsideKeys=Set(["switchKey","draftRead","draftLookup","insertedSpan"])
++    private var validOutside:Bool {
++        if switchKey==nil,draftRead==nil,draftLookup==nil,insertedSpan==nil{return true}
++        guard let k=switchKey,let r=draftRead,let l=draftLookup,let s=insertedSpan else{return false}
++        return (0...13).contains(k) && (0...13).contains(r) && (0...8).contains(l) && (0...6).contains(s)
++    }
++    var valid:Bool {validOutside && (0...9).contains(discovery) && (0...13).contains(representation) && (0...12).contains(lookup) && (0...8).contains(history) && (observationAgeMicros.map{(0...60_000_000).contains($0)} ?? true)}
+@@ -145 +152,4 @@
+-        guard let value=raw as? [String:Any],Set(value.keys).subtracting(["observationAgeMicros"])==Set(["discovery","representation","lookup","history"]) else{return false}
++        guard let value=raw as? [String:Any] else{return false}
++        let required=Set(["discovery","representation","lookup","history"])
++        let keys=Set(value.keys).subtracting(["observationAgeMicros"])
++        guard keys==required || keys==required.union(outsideKeys) else{return false}
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index b9fc79fe1c382681329dc6e2c1271d139f4b097e..bcf4e5166e988f2288b53a8e7204029f9dab4a60 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -216,0 +217,2 @@
++입력칸 밖에서 두벌식으로 전환한 뒤 첫 입력의 보정 여부를 조사할 때에는 전환과 첫 키의 일치, 같은 입력란의 입력 전 초안·커서 관측, 새 글자와 주변 본문의 대조 결과를 따로 기록한다. 사용한 판정만 기록하며 본문·키 값·커서 좌표를 저장하지 않는다. 진단은 편집을 허용하는 조건을 바꾸지 않는다.
++
+diff --git a/scripts/summarize-input-incident.py b/scripts/summarize-input-incident.py
+index d5c8fec6ac45041b7615bfc4c7aacbf16d3d6361..3e3ae251361ebce829bb741c8fa060b99923731a 100644
+--- a/scripts/summarize-input-incident.py
++++ b/scripts/summarize-input-incident.py
+@@ -79,0 +80,6 @@
++ONSET_OUTSIDE_NAMES={
++    'switchKey':'unmeasured matched no_switch timestamp_missing first_not_seen first_differs expired app_changed original_window_missing current_window_missing window_changed layout_not_ready first_window_missing first_window_changed'.split(),
++    'draftRead':'unmeasured recorded attributes_unavailable role_unavailable text_unavailable too_large not_enabled visibility_unproven window_unproven selection_unreadable context_unproven caret_unproven deadline observer_missing'.split(),
++    'draftLookup':'not_checked verified_entry verified_draft no_field_record no_pre_key_record expired window_unavailable window_changed unusable'.split(),
++    'insertedSpan':'not_checked range_invalid first_not_roman surroundings_changed keys_differ partial matched'.split(),
++}
+@@ -81,0 +88 @@
++    if isinstance(value,dict) and set(value)&set(ONSET_OUTSIDE_NAMES):limits.update({k:len(names)-1 for k,names in ONSET_OUTSIDE_NAMES.items()})
+@@ -84 +91 @@
+-    return dict(discovery=ONSET_DISCOVERY[value['discovery']],representation=ONSET_REPRESENTATION[value['representation']],lookup=ONSET_LOOKUP[value['lookup']],history=ONSET_HISTORY[value['history']],interpretation='last_evaluated_branch_only_age_capped_60s_not_IME_root_cause')
++    return dict(**{k:names[value[k]] for k,names in ONSET_OUTSIDE_NAMES.items() if k in value},discovery=ONSET_DISCOVERY[value['discovery']],representation=ONSET_REPRESENTATION[value['representation']],lookup=ONSET_LOOKUP[value['lookup']],history=ONSET_HISTORY[value['history']],interpretation='last_evaluated_branch_only_age_capped_60s_not_IME_root_cause')
+diff --git a/version.env b/version.env
+index 33a2ddcdf2d415f54f4161978716801e49cb957d..b582f5076937c52588aa01d14530d1c4b05e4e9a 100644
+--- a/version.env
++++ b/version.env
+@@ -4 +4 @@
+-BUILD_NUMBER=367
++BUILD_NUMBER=368

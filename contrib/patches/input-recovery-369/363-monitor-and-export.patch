@@ -1,0 +1,699 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 9e6bbf67a4dadf7c8fb3c7c4fdd4b0b087c703c0..32d0cbd04b68b939f09d9644b9a104d393de74ae 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3 +3,5 @@
+-## 0.3.2-beta.1 (빌드 362) — 미배포
++## 0.3.2-beta.1 (빌드 363) — 미배포
++
++- 중복 감시 중단 알림에서 유휴 재등록 판단이 사라지는 경로 수정. 복구·보관 입력의 안전 중단 유지.
++- 자동 복구 감시의 등록·중단·재시도·입력 수신 상태 진단 추가.
++- 진단 내보내기의 단계 표시·취소·시간 및 여유 공간 검사와 사본·미리보기 준비 비용 보완.
+diff --git a/Sources/HanQ/DiagnosticReview.swift b/Sources/HanQ/DiagnosticReview.swift
+index 04aef8641ead8024607651757c406e6833917755..8be43e95be81be67e6d0520d827e709730ed942a 100644
+--- a/Sources/HanQ/DiagnosticReview.swift
++++ b/Sources/HanQ/DiagnosticReview.swift
+@@ -120,0 +121,6 @@
++fileprivate final class DiagnosticReviewDirectory {
++    let url:URL
++    var owned=false
++    init(_ url:URL){self.url=url}
++    deinit{if owned{try? FileManager.default.removeItem(at:url)}}
++}
+@@ -121,0 +128 @@
++    fileprivate let owner:DiagnosticReviewDirectory
+@@ -123,2 +130,12 @@
+-    let data: Data
+-    let preview: DiagnosticReviewDocument
++    let url: URL
++    let bytes: Int
++    let digest: String
++    let header: DiagnosticReviewCaptureHeader
++    func load() throws -> (Data, DiagnosticReviewDocument) {
++        let data=try DiagnosticReviewSnapshot.read(url)
++        guard data.count==bytes,SHA256.hash(data:data).map({String(format:"%02x",$0)}).joined()==digest,
++              DiagnosticReviewCaptureHeader.read(data)==header else{throw DiagnosticReviewError.invalidCapture}
++        let object=try DiagnosticReviewSnapshot.object(data)
++        guard object["frames"] is [[String:Any]] else{throw DiagnosticReviewError.invalidCapture}
++        return (data,try DiagnosticReviewSnapshot.capture(object,phase:header.phase))
++    }
+@@ -134 +151 @@
+-    var documents: [Int: DiagnosticReviewDocument] { originals.mapValues(\.preview) }
++    var documents: [Int: DiagnosticReviewDocument] { get throws {try originals.mapValues{try $0.load().1}} }
+@@ -154,0 +172 @@
++    private let owner: DiagnosticReviewDirectory
+@@ -159 +177 @@
+-    init(directory: URL) throws {
++    init(directory: URL, request: DiagnosticSnapshotRequest=DiagnosticSnapshotRequest()) throws {
+@@ -160,0 +179,2 @@
++        owner=DiagnosticReviewDirectory(directory)
++        try request.check()
+@@ -164,0 +185,7 @@
++        let catalogURL=directory.appendingPathComponent("review-catalog.json")
++        let catalog:DiagnosticReviewCatalog?
++        if FileManager.default.fileExists(atPath:catalogURL.path) {
++            let value=try JSONDecoder().decode(DiagnosticReviewCatalog.self,from:Self.read(catalogURL))
++            guard value.schema==1,Set(value.files.keys)==Set(files.map(\.lastPathComponent)) else{throw DiagnosticReviewError.invalidCapture}
++            catalog=value
++        }else{catalog=nil}
+@@ -166,12 +193,20 @@
+-        for file in files {
+-            let data = try Self.read(file)
+-            let object = try Self.object(data)
+-            guard Self.integer(object["schema"]) == 1, let number = Self.integer(object["incident"]), number > 0,
+-                  let phase = Self.integer(object["phase"]), (0...1).contains(phase),
+-                  let trigger = Self.integer(object["trigger"]), (1...7).contains(trigger),
+-                  object["frames"] is [[String: Any]] else { throw DiagnosticReviewError.invalidCapture }
+-            let run: String
+-            if let raw = object["runID"] as? String {
+-                guard let uuid = UUID(uuidString: raw) else { throw DiagnosticReviewError.invalidCapture }
+-                run = uuid.uuidString
+-            } else { run = "legacy" }
++        request.report(.listing,0,files.count)
++        for (index,file) in files.enumerated() {
++            try request.check()
++            let header:DiagnosticReviewCaptureHeader,bytes:Int,digest:String
++            if let entry=catalog?.files[file.lastPathComponent] {
++                guard entry.header.valid,entry.bytes>=0,entry.bytes<=Self.maximumFileBytes,
++                      entry.digest.range(of:"^[0-9a-f]{64}$",options:.regularExpression) != nil else{throw DiagnosticReviewError.invalidCapture}
++                var info=stat()
++                guard lstat(file.path,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),
++                      info.st_mode&0o077==0,info.st_size==entry.bytes else{throw DiagnosticReviewError.invalidCapture}
++                header=entry.header;bytes=entry.bytes;digest=entry.digest
++            }else{
++                // Compatibility for older snapshots: inspect one capture at a
++                // time, then release its full JSON instead of retaining it.
++                let data=try Self.read(file),object=try Self.object(data)
++                guard let value=DiagnosticReviewCaptureHeader.read(data),object["frames"] is [[String:Any]] else{throw DiagnosticReviewError.invalidCapture}
++                header=value;bytes=data.count;digest=SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()
++            }
++            let number=header.incident,phase=header.phase,trigger=header.trigger
++            let run=header.runID.flatMap{UUID(uuidString:$0)?.uuidString} ?? "legacy"
+@@ -184,2 +219 @@
+-            group.3[phase] = DiagnosticReviewOriginal(filename: file.lastPathComponent, data: data,
+-                                                     preview: try Self.capture(object, phase: phase))
++            group.3[phase] = DiagnosticReviewOriginal(owner:owner,filename:file.lastPathComponent,url:file,bytes:bytes,digest:digest,header:header)
+@@ -186,0 +221 @@
++            if (index+1)%64==0 || index+1==files.count{request.report(.listing,index+1,files.count)}
+@@ -199,0 +235 @@
++        owner.owned=true
+@@ -201 +236,0 @@
+-    deinit { try? FileManager.default.removeItem(at: directory) }
+@@ -203 +238 @@
+-    private static func read(_ url: URL) throws -> Data {
++    fileprivate static func read(_ url: URL) throws -> Data {
+@@ -214 +249 @@
+-    private static func object(_ data: Data) throws -> [String: Any] {
++    fileprivate static func object(_ data: Data) throws -> [String: Any] {
+@@ -233 +268 @@
+-    private static func capture(_ object: [String: Any], phase: Int) throws -> DiagnosticReviewDocument {
++    fileprivate static func capture(_ object: [String: Any], phase: Int) throws -> DiagnosticReviewDocument {
+@@ -366,0 +402,13 @@
++        if let status=object["monitorStatus"] as? [String:Any],let current=status["current"] as? [String:Any] {
++            let reasons=[0:"실행 가능",1:"감시 제어 꺼짐",2:"입력 사용 불가",3:"별도 시험 감시 실행 중",4:"손쉬운 사용 권한 없음",5:"보안 입력",6:"실행 옵션으로 꺼짐",7:"입력 탭 비활성",8:"재등록 횟수 제한",9:"안전 조건으로 재등록 보류",10:"감시 등록 실패",11:"재시도 간격 대기"]
++            func state(_ key:String)->String{(current[key] as? Bool).map{$0 ? "예":"아니요"} ?? "미측정"}
++            sections.append(.init(title:"자동 복구 감시",fields:[
++                .init(label:"감시 등록",value:state("enabled")),.init(label:"감시 중단",value:state("suspended")),
++                .init(label:"현재 판단",value:integer(current["reason"]).flatMap{reasons[$0]} ?? "미측정"),
++                .init(label:"탭 상태",value:integer(current["tapState"]).flatMap{[0:"미확인",1:"활성",2:"비활성"][$0]} ?? "미측정"),
++                field("감시 입력 수신 누적",current["receivedEvents"]),field("마지막 수신 경과 (µs, 최대 60초)",current["lastEventAgeMicros"]),
++                field("감시 등록 시도",current["attempts"]),field("감시 중단 알림",current["failures"]),
++                .init(label:"최근 중단 유형",value:integer(current["stopReason"]).flatMap{[0:"미측정",1:"입력 탭 장애",2:"전환 감시 장애",3:"입력 사용 불가",4:"입력 감시 종료",5:"기타 중단",6:"입력 보존을 위한 안전 중단"][$0]} ?? "미측정"),
++                .init(label:"안전 재등록 허용",value:state("restartAllowed")),field("보관 입력",current["retained"]),
++                field("대기 입력",current["pending"]),field("오래된 상태 전환 제외",status["discardedTransitions"])]))
++        }
+@@ -401 +449,2 @@
+-    func files(selected: Set<String>, environment: DiagnosticReviewEnvironment) throws -> [DiagnosticReviewFile] {
++    func files(selected: Set<String>, environment: DiagnosticReviewEnvironment,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest()) throws -> [DiagnosticReviewFile] {
++        try request.check()
+@@ -419,2 +468,4 @@
+-                    files.append(DiagnosticReviewFile(original.filename, "사건 \(index + 1) · \(original.preview.title)",
+-                        original: original.data, preview: original.preview))
++                    try request.check()
++                    let (data,preview)=try original.load()
++                    files.append(DiagnosticReviewFile(original.filename, "사건 \(index + 1) · \(preview.title)",
++                        original:data,preview:preview))
+@@ -436 +487,2 @@
+-    init(files: [DiagnosticReviewFile]) throws {
++    init(files: [DiagnosticReviewFile],request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest()) throws {
++        try request.check()
+@@ -447,0 +500,2 @@
++            let space=try fm.attributesOfFileSystem(forPath:directory.path)[.systemFreeSize] as? NSNumber
++            guard let space,space.uint64Value>=UInt64(sourceBytes)*2+256*1024*1024 else{throw DiagnosticLogExport.Failure.insufficientSpace}
+@@ -450,0 +505 @@
++                try request.check()
+@@ -456 +511 @@
+-            try DiagnosticLogExport.compress(contents, to: url)
++            try DiagnosticLogExport.compress(contents, to: url,request:request)
+diff --git a/Sources/HanQ/DiagnosticReviewController.swift b/Sources/HanQ/DiagnosticReviewController.swift
+index addb55c73999c9fcaf99f0aaee24ef9f8f1a0fdd..11283d19dac7061245586e96b57db6fbcdd05b43 100644
+--- a/Sources/HanQ/DiagnosticReviewController.swift
++++ b/Sources/HanQ/DiagnosticReviewController.swift
+@@ -39,0 +40,2 @@
++    private var loadRequest: DiagnosticSnapshotRequest?
++    private var selectionRequest: DiagnosticSnapshotRequest?
+@@ -76,0 +79,12 @@
++        loadRequest?.cancel()
++        let operation=DiagnosticSnapshotRequest { [weak self] phase,completed,total in
++            DispatchQueue.main.async {
++                guard let self,!self.closed,self.generation==request else{return}
++                switch phase {
++                case .waiting:self.statusLabel.stringValue="저장 중인 후속 기록 \(completed)건을 기다리고 있습니다…"
++                case .copying:self.statusLabel.stringValue="기록 사본을 준비하고 있습니다… \(completed)/\(total)개"
++                case .listing:self.statusLabel.stringValue="기록 목록을 읽고 있습니다… \(completed)/\(total)개"
++                }
++            }
++        }
++        loadRequest=operation
+@@ -78 +92 @@
+-        Self.loadSnapshot(from: trace, directory: directory) { [weak self] result in
++        Self.loadSnapshot(from: trace, directory: directory, request:operation) { [weak self] result in
+@@ -87,0 +102 @@
++                             request: DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),
+@@ -89 +104 @@
+-        trace.prepareExport(to: directory, reviewMetadata: true) { result in
++        trace.prepareExport(to: directory, reviewMetadata: true, request:request) { result in
+@@ -92 +107 @@
+-                do { try result.get(); loaded = .success(try DiagnosticReviewSnapshot(directory: directory)) }
++                do { try result.get(); loaded = .success(try DiagnosticReviewSnapshot(directory: directory,request:request)) }
+@@ -102 +117 @@
+-        case .failure:
++        case .failure(let error):
+@@ -104 +119 @@
+-            statusLabel.stringValue = "기록을 안전하게 읽을 수 없습니다. 원본은 유지됩니다. 창을 닫고 다시 시도해 주세요."
++            statusLabel.stringValue = (error as? DiagnosticLogExport.Failure)?.localizedDescription ?? "기록을 안전하게 읽을 수 없습니다. 원본은 유지됩니다. 창을 닫고 다시 시도해 주세요."
+@@ -294,0 +310,2 @@
++        selectionRequest?.cancel()
++        let operation=DiagnosticSnapshotRequest();selectionRequest=operation
+@@ -310 +327 @@
+-            let result = Result { try DiagnosticReviewArchive(files: snapshot.files(selected: selection, environment: environment)) }
++            let result = Result { try DiagnosticReviewArchive(files: snapshot.files(selected: selection, environment: environment,request:operation),request:operation) }
+@@ -321,2 +338,2 @@
+-                case .failure:
+-                    self.statusLabel.stringValue = "ZIP을 준비하지 못했습니다. 선택을 바꾸거나 창을 다시 열어 주세요."
++                case .failure(let error):
++                    self.statusLabel.stringValue = (error as? DiagnosticLogExport.Failure)?.localizedDescription ?? "ZIP을 준비하지 못했습니다. 선택을 바꾸거나 창을 다시 열어 주세요."
+@@ -375,0 +393,2 @@
++        loadRequest?.cancel();loadRequest=nil
++        selectionRequest?.cancel();selectionRequest=nil
+diff --git a/Sources/HanQ/InputDiagnostics.swift b/Sources/HanQ/InputDiagnostics.swift
+index d99ebd99285439e37ccb46826432c1df79693c23..e60ff30877367ef48b4d69a35a8b2c385fedf6a0 100644
+--- a/Sources/HanQ/InputDiagnostics.swift
++++ b/Sources/HanQ/InputDiagnostics.swift
+@@ -465,0 +466,16 @@
++    // Fixed lifecycle values, independent of input text and process identifiers.
++    struct MonitorSample:Codable,Equatable {
++        var observedAtMilliseconds=0
++        var stage=0,reason=0,tapState=0
++        var active=false,enabled=false,suspended=false,recovering=false,rollingBack=false,restartAllowed=false
++        var pending=0,retained=0,attempts=0,failures=0,failureKind=0,stopReason=0,receivedEvents=0
++        var lastEventAgeMicros:Int?=nil
++        func sameState(as other:Self)->Bool {
++            var left=self,right=other
++            left.observedAtMilliseconds=0;right.observedAtMilliseconds=0
++            left.lastEventAgeMicros=nil;right.lastEventAgeMicros=nil
++            left.receivedEvents=0;right.receivedEvents=0
++            return left==right
++        }
++    }
++    struct MonitorStatus:Codable {var current:MonitorSample;var transitions:[MonitorSample];var discardedTransitions=0}
+@@ -583,0 +600 @@
++        var monitorStatus:MonitorStatus?=nil
+@@ -604,0 +622 @@
++    private var monitorStatus:MonitorStatus?
+@@ -741,0 +760 @@
++                monitorStatus=nil
+@@ -769,0 +789 @@
++        value.monitorStatus=monitorStatus
+@@ -771,0 +792,15 @@
++    func monitor(_ sample:MonitorSample){
++        guard enabled else{return}
++        let time=clock()
++        _ = submit(.context,.mismatch,31,observedAt:time){[self] _ in
++            var current=sample
++            current.observedAtMilliseconds=Int(max(0,min((time-origin)*1000,9_000_000_000_000_000)))
++            var changes=monitorStatus?.transitions ?? []
++            var discarded=monitorStatus?.discardedTransitions ?? 0
++            if monitorStatus?.current.sameState(as:current) != true {
++                changes.append(current)
++                if changes.count>16{discarded+=changes.count-16;changes.removeFirst(changes.count-16)}
++            }
++            monitorStatus=MonitorStatus(current:current,transitions:changes,discardedTransitions:discarded)
++        }
++    }
+@@ -1381 +1416 @@
+-    func prepareExport(to directory:URL,reviewMetadata:Bool=false,completion:@escaping(Result<Void,Error>)->Void){
++    func prepareExport(to directory:URL,reviewMetadata:Bool=false,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),completion:@escaping(Result<Void,Error>)->Void){
+@@ -1384 +1419 @@
+-            finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,deadline:DispatchTime.now()+15,completion:completion)
++            finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,request:request,deadline:DispatchTime.now()+15,completion:completion)
+@@ -1387 +1422,2 @@
+-    private func finishExport(incidents:Set<Int>,to directory:URL,reviewMetadata:Bool,deadline:DispatchTime,completion:@escaping(Result<Void,Error>)->Void){
++    private func finishExport(incidents:Set<Int>,to directory:URL,reviewMetadata:Bool,request:DiagnosticSnapshotRequest,deadline:DispatchTime,completion:@escaping(Result<Void,Error>)->Void){
++        do{try request.check()}catch{completion(.failure(error));return}
+@@ -1389,0 +1426 @@
++            request.report(.waiting,pending.count,incidents.count)
+@@ -1391 +1428 @@
+-            decisionQueue.asyncAfter(deadline:.now()+0.05){[self] in finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,deadline:deadline,completion:completion)}
++            decisionQueue.asyncAfter(deadline:.now()+0.05){[self] in finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,request:request,deadline:deadline,completion:completion)}
+@@ -1397 +1434 @@
+-                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata)
++                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request)
+@@ -1431 +1468 @@
+-        case noLogs,unavailable,busy,compression
++        case noLogs,unavailable,busy,compression,cancelled,timedOut,insufficientSpace
+@@ -1437,0 +1475,3 @@
++            case .cancelled:return "진단 기록 준비를 취소했습니다. 원본은 유지됩니다."
++            case .timedOut:return "진단 기록 준비 시간이 초과되었습니다. 원본은 유지됩니다. 창을 다시 열어 주세요."
++            case .insufficientSpace:return "진단 기록을 준비할 여유 공간이 부족합니다. 원본은 유지됩니다. 공간을 확보한 후 다시 시도해 주세요."
+@@ -1442 +1482,2 @@
+-    static func compress(_ directory:URL,to archive:URL)throws {
++    static func compress(_ directory:URL,to archive:URL,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest())throws {
++        try request.check()
+@@ -1447 +1488,8 @@
+-        try process.run();process.waitUntilExit()
++        try process.run()
++        do {
++            while process.isRunning{try request.check();Thread.sleep(forTimeInterval:0.05)}
++            process.waitUntilExit()
++        }catch{
++            if process.isRunning{kill(process.processIdentifier,SIGKILL)}
++            process.waitUntilExit();throw error
++        }
+@@ -1486,0 +1535,44 @@
++/// One review request owns its cancellation and bounded preparation time.
++/// Progress runs on a worker queue; callers marshal it onto the UI queue.
++final class DiagnosticSnapshotRequest {
++    enum Phase:Int {case waiting,copying,listing}
++    private let lock=NSLock()
++    private var cancelled=false
++    private let deadline:DispatchTime
++    private let progress:(Phase,Int,Int)->Void
++    private var lastProgress:(Int,Int,Int)?
++    init(timeout:Double=45,progress:@escaping(Phase,Int,Int)->Void={_,_,_ in}){
++        deadline = .now()+timeout;self.progress=progress
++    }
++    func cancel(){lock.lock();cancelled=true;lock.unlock()}
++    func check()throws {
++        lock.lock();let stopped=cancelled;lock.unlock()
++        if stopped{throw DiagnosticLogExport.Failure.cancelled}
++        if DispatchTime.now()>=deadline{throw DiagnosticLogExport.Failure.timedOut}
++    }
++    func report(_ phase:Phase,_ completed:Int,_ total:Int){
++        if phase != .waiting && completed != 0 && completed != total && completed%64 != 0{return}
++        lock.lock()
++        let same=lastProgress.map{$0.0==phase.rawValue && $0.1==completed && $0.2==total} ?? false
++        lastProgress=(phase.rawValue,completed,total);lock.unlock()
++        if !same{progress(phase,completed,total)}
++    }
++}
++
++/// Review-only catalog, built while the writer already has the capture bytes.
++/// Original diagnostic JSON is never replaced with a serialization of this model.
++struct DiagnosticReviewCaptureHeader:Codable,Equatable {
++    let schema:Int,trigger:Int,incident:Int,phase:Int
++    let runID:String?
++    var valid:Bool{schema==1 && (1...7).contains(trigger) && incident>0 && (0...1).contains(phase) && (runID==nil || UUID(uuidString:runID!) != nil)}
++    static func read(_ data:Data)->Self? {
++        guard let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
++        return value
++    }
++}
++struct DiagnosticReviewCatalog:Codable {
++    struct Entry:Codable {let bytes:Int,digest:String,header:DiagnosticReviewCaptureHeader}
++    var schema=1
++    let files:[String:Entry]
++}
++
+@@ -1521,2 +1613,3 @@
+-        init(name:String,phase:Int,identity:stat,digest:String?=nil){
+-            self.name=name;self.phase=phase;self.identity=identity;self.digest=digest
++        let header:DiagnosticReviewCaptureHeader?
++        init(name:String,phase:Int,identity:stat,digest:String?=nil,header:DiagnosticReviewCaptureHeader?=nil){
++            self.name=name;self.phase=phase;self.identity=identity;self.digest=digest;self.header=header
+@@ -1676 +1769 @@
+-        return File(name:entry.name,phase:entry.phase,identity:after,digest:digest)
++        return File(name:entry.name,phase:entry.phase,identity:after,digest:digest,header:DiagnosticReviewCaptureHeader.read(data))
+@@ -1841 +1934 @@
+-        return (header.runID+":\(header.incident)",header.incident,File(name:name,phase:header.phase,identity:info,digest:Self.digest(data)))
++        return (header.runID+":\(header.incident)",header.incident,File(name:name,phase:header.phase,identity:info,digest:Self.digest(data),header:DiagnosticReviewCaptureHeader.read(data)))
+@@ -2055 +2148,2 @@
+-    func copyExportSnapshot(to destination:URL,reviewMetadata:Bool=false)throws {
++    func copyExportSnapshot(to destination:URL,reviewMetadata:Bool=false,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),availableBytes:(()->UInt64?)?=nil)throws {
++        try request.check()
+@@ -2062 +2156,17 @@
+-        for file in captures {
++        var completed=false
++        defer{if !completed{try? FileManager.default.removeItem(at:destination)}}
++        let output=open(destination.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
++        guard output>=0 else{throw DiagnosticLogExport.Failure.unavailable}
++        defer{close(output)}
++        func checkSpace(_ bytes:Int)throws {
++            var volume=statfs()
++            let free:UInt64?
++            if let availableBytes{free=availableBytes()}
++            else if fstatfs(output,&volume)==0{free=UInt64(volume.f_bavail)*UInt64(volume.f_bsize)}
++            else{free=nil}
++            guard let free else{throw DiagnosticLogExport.Failure.unavailable}
++            guard free>=UInt64(bytes)+256*1024*1024 else{throw DiagnosticLogExport.Failure.insufficientSpace}
++        }
++        request.report(.copying,0,captures.count)
++        for (index,file) in captures.enumerated() {
++            try request.check();try checkSpace(0)
+@@ -2068,3 +2178 @@
+-            guard fstat(fd,&info)==0,matches(file.identity,info),
+-                  let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:file.bytes+1),data.count==file.bytes,
+-                  fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
++            guard fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
+@@ -2072 +2180,13 @@
+-            try data.write(to:path,options:.withoutOverwriting)
++            // APFS clones preserve an immutable byte snapshot without allocating
++            // another full copy of a potentially large investigation store.
++            if fclonefileat(fd,output,file.name,UInt32(CLONE_NOFOLLOW)) != 0 {
++                let code=errno
++                guard [ENOTSUP,EXDEV,EINVAL,ENOSYS].contains(code) else{
++                    throw code==ENOSPC ? DiagnosticLogExport.Failure.insufficientSpace:DiagnosticLogExport.Failure.unavailable
++                }
++                try checkSpace(file.bytes)
++                guard let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:file.bytes+1),data.count==file.bytes else{throw DiagnosticLogExport.Failure.unavailable}
++                try request.check()
++                try data.write(to:path,options:.withoutOverwriting)
++            }
++            guard fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
+@@ -2073,0 +2194 @@
++            request.report(.copying,index+1,captures.count)
+@@ -2086,0 +2208,8 @@
++            if captures.allSatisfy({$0.header != nil && $0.digest != nil}) {
++                let catalog=DiagnosticReviewCatalog(files:Dictionary(uniqueKeysWithValues:captures.map{
++                    ($0.name,.init(bytes:$0.bytes,digest:$0.digest!,header:$0.header!))
++                }))
++                let catalogPath=destination.appendingPathComponent("review-catalog.json")
++                try JSONEncoder().encode(catalog).write(to:catalogPath,options:.withoutOverwriting)
++                try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:catalogPath.path)
++            }
+@@ -2087,0 +2217 @@
++        try request.check();completed=true
+@@ -2127 +2257 @@
+-        let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data))
++        let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data),header:DiagnosticReviewCaptureHeader.read(data))
+diff --git a/Sources/HanQ/MismatchMonitorLifecycle.swift b/Sources/HanQ/MismatchMonitorLifecycle.swift
+index 183fd522315a8e0fc55390b12dd0fa7177033077..cab77e22bd55ed649a23fc2313821316069cc23c 100644
+--- a/Sources/HanQ/MismatchMonitorLifecycle.swift
++++ b/Sources/HanQ/MismatchMonitorLifecycle.swift
+@@ -8,2 +8,7 @@
+-        monitorRestartAllowed = !suspended && !recovering && !rollingBack &&
+-            pending.isEmpty && retained.isEmpty && switchGate?.filter.consuming != true
++        monitorFailureCount+=1;monitorFailureKind=kind
++        // Both taps can report the same interruption before queued teardown.
++        // Keep the first decision until teardown and the guarded restart consume it.
++        if !suspended {
++            monitorRestartAllowed = !recovering && !rollingBack &&
++                pending.isEmpty && retained.isEmpty && switchGate?.filter.consuming != true
++        }
+diff --git a/Sources/HanQ/MismatchRecoveryController.swift b/Sources/HanQ/MismatchRecoveryController.swift
+index 909270dcbaccb5b334058caa0e74dd307dc4e069..173daf51edbae6506133fe5700e02d5f73a2eed2 100644
+--- a/Sources/HanQ/MismatchRecoveryController.swift
++++ b/Sources/HanQ/MismatchRecoveryController.swift
+@@ -14 +14,8 @@
+-    var permissionReady:()->Bool = {AXIsProcessTrusted() && !IsSecureEventInputEnabled()}
++    private var readinessReason=0
++    private var startAttempts=0
++    private var tapState=0
++    lazy var permissionReady:()->Bool = { [weak self] in
++        guard AXIsProcessTrusted() else{self?.readinessReason=4;return false}
++        guard !IsSecureEventInputEnabled() else{self?.readinessReason=5;return false}
++        self?.readinessReason=0;return true
++    }
+@@ -23 +30,3 @@
+-        guard active else{return}
++        var stage=1,reason=0
++        defer{recordMonitor(stage:stage,reason:reason)}
++        guard active else{reason=1;return}
+@@ -25,2 +34,5 @@
+-        guard canRun(),!probe,permissionReady(),
+-              !ProcessInfo.processInfo.arguments.contains("--disable-mismatch-recovery") else {
++        let runnable=canRun()
++        let ready=runnable && !probe && permissionReady()
++        let disabled=ProcessInfo.processInfo.arguments.contains("--disable-mismatch-recovery")
++        guard runnable,!probe,ready,!disabled else {
++            reason = !runnable ? 2:(probe ? 3:(!ready ? (readinessReason==0 ? 4:readinessReason):6))
+@@ -30,3 +42,3 @@
+-        if engine.enabled,!engine.suspended,!engine.monitorTapsHealthy {
+-            engine.monitorTapFailed(3)
+-            return
++        if engine.enabled,!engine.suspended {
++            tapState=engine.monitorTapsHealthy ? 1:2
++            if tapState==2{reason=7;engine.monitorTapFailed(3);return}
+@@ -38 +50,2 @@
+-                guard restartTimes.count<3,engine.prepareIdleMonitorRestart() else{return}
++                guard restartTimes.count<3 else{reason=8;return}
++                guard engine.prepareIdleMonitorRestart() else{reason=9;return}
+@@ -41,0 +55 @@
++            startAttempts+=1;stage=2;tapState=0
+@@ -42,0 +57,14 @@
++            if !engine.enabled{reason=10}else{stage=3}
++        }else if !engine.enabled{reason=11}
++    }
++    private func recordMonitor(stage:Int,reason:Int){
++        guard engine.incidentTrace.enabled else{return}
++        var sample=InputIncidentTrace.MonitorSample()
++        sample.stage=stage;sample.reason=reason;sample.tapState=engine.enabled ? tapState:0
++        sample.active=active;sample.enabled=engine.enabled;sample.suspended=engine.suspended
++        sample.recovering=engine.recovering;sample.rollingBack=engine.rollingBack;sample.restartAllowed=engine.monitorRestartAllowed
++        sample.pending=engine.pending.count;sample.retained=engine.retained.count
++        sample.attempts=startAttempts;sample.failures=engine.monitorFailureCount;sample.failureKind=engine.monitorFailureKind
++        sample.stopReason=engine.monitorStopReason;sample.receivedEvents=engine.monitorReceivedEvents
++        if let last=engine.monitorLastEventAt {
++            sample.lastEventAgeMicros=Int(max(0,min((now()-last)*1_000_000,60_000_000)))
+@@ -43,0 +72 @@
++        engine.incidentTrace.monitor(sample)
+@@ -45 +74 @@
+-    func stop(){active=false;timer?.invalidate();timer=nil;engine.suspend("hanq_input_stopped")}
++    func stop(){active=false;timer?.invalidate();timer=nil;engine.suspend("hanq_input_stopped");recordMonitor(stage:4,reason:1)}
+diff --git a/Sources/HanQ/MismatchRecoveryEngine.swift b/Sources/HanQ/MismatchRecoveryEngine.swift
+index 4fa6b277c9eb87cea6c1e7ddbe0a3418a86b8d98..79200c6c48038ba787caca833fe6c5b40034490a 100644
+--- a/Sources/HanQ/MismatchRecoveryEngine.swift
++++ b/Sources/HanQ/MismatchRecoveryEngine.swift
+@@ -517,0 +518 @@
++        if incidentTrace.enabled{monitorReceivedEvents+=1;monitorLastEventAt=handlerStart}
+@@ -1294,0 +1296 @@
++        monitorStopReason=6
+@@ -1333,0 +1336,2 @@
++    var monitorFailureCount=0,monitorFailureKind=0,monitorStopReason=0,monitorReceivedEvents=0
++    var monitorLastEventAt:Double?
+@@ -1411,0 +1416 @@
++        monitorStopReason=["tap_disabled","switch_gate_disabled","input_unavailable","hanq_input_stopped"].firstIndex(of:reason).map{$0+1} ?? 5
+diff --git a/Tests/DiagnosticReview/main.swift b/Tests/DiagnosticReview/main.swift
+index 692b8cf095e9e787eee63893bdc7e00e78bceb73..9cb0ca0b0a2c3c3f4bf00a7fe4b22b050a24df69 100644
+--- a/Tests/DiagnosticReview/main.swift
++++ b/Tests/DiagnosticReview/main.swift
+@@ -241 +241 @@
+-let spaceText=spacePreview.incidents[0].documents[0]!.readableText
++let spaceText=try spacePreview.incidents[0].documents[0]!.readableText
+diff --git a/Tests/DiagnosticReviewIntegration/main.swift b/Tests/DiagnosticReviewIntegration/main.swift
+index 1161cdef5a4d971f8623ad02488fa23aa3a4122c..bad10a1b4e145c4dc0f1249b761ae5e8be80b7be 100644
+--- a/Tests/DiagnosticReviewIntegration/main.swift
++++ b/Tests/DiagnosticReviewIntegration/main.swift
+@@ -53,0 +54 @@
++check(fm.fileExists(atPath:firstURL.appendingPathComponent("review-catalog.json").path),"writer supplies a lightweight review catalog")
+@@ -67,0 +69,38 @@
++// Cloned bytes are isolated from their source. The catalog lists records without
++// parsing full bodies, while selecting a changed body fails its original digest.
++let lazyURL=root.appendingPathComponent("lazy")
++try snapshot(trace,to:lazyURL)
++let lazyBefore=try manifest(directory)
++let damagedName=(try fm.contentsOfDirectory(atPath:lazyURL.path)).first{$0.hasPrefix("incident-")}!
++let damagedPath=lazyURL.appendingPathComponent(damagedName)
++var damaged=try Data(contentsOf:damagedPath);damaged[damaged.count-1] ^= 1
++try damaged.write(to:damagedPath)
++let lazyReview=try DiagnosticReviewSnapshot(directory:lazyURL)
++check(lazyReview.incidents.count==1,"catalog listing does not load or parse every capture body")
++do{_=try lazyReview.files(selected:Set(lazyReview.incidents.map(\.id)),environment:env);check(false,"changed selected body rejected")}
++catch{check(true,"selected body is verified before preview or export")}
++check(try manifest(directory)==lazyBefore,"changing a cloned review file cannot change the live original")
++let failureSource=root.appendingPathComponent("failure-source")
++let failureStore=DiagnosticLogStore(directory:failureSource,policy:policy)
++let failureData=try JSONSerialization.data(withJSONObject:["schema":1,"trigger":1,"incident":1,"phase":0,"runID":UUID().uuidString,"frames":[]] as [String:Any])
++check(failureStore.save(failureData,incident:1,phase:0,automatic:false) == .saved,"failure tests own a separate store")
++let failureBefore=try manifest(failureSource),liveBeforeFailures=try manifest(directory)
++let cancelled=DiagnosticSnapshotRequest();cancelled.cancel()
++let cancelledURL=root.appendingPathComponent("cancelled")
++do{try failureStore.copyExportSnapshot(to:cancelledURL,request:cancelled);check(false,"cancelled preparation rejected")}
++catch DiagnosticLogExport.Failure.cancelled{check(true,"cancelled request reports cancellation")}
++check(!fm.fileExists(atPath:cancelledURL.path),"cancelled request creates no snapshot")
++let noSpace=root.appendingPathComponent("no-space")
++do{try failureStore.copyExportSnapshot(to:noSpace,availableBytes:{0});check(false,"low space rejected")}
++catch DiagnosticLogExport.Failure.insufficientSpace{check(true,"low space reports its own failure")}
++check(!fm.fileExists(atPath:noSpace.path),"low-space failure removes its partial snapshot")
++var mid:DiagnosticSnapshotRequest!
++mid=DiagnosticSnapshotRequest{phase,_,_ in if phase == .copying{mid.cancel()}}
++let midURL=root.appendingPathComponent("mid-cancel")
++do{try failureStore.copyExportSnapshot(to:midURL,request:mid);check(false,"in-progress cancellation rejected")}
++catch DiagnosticLogExport.Failure.cancelled{check(true,"in-progress cancellation is observed between files")}
++check(!fm.fileExists(atPath:midURL.path),"in-progress cancellation removes its partial snapshot")
++let timed=root.appendingPathComponent("timed-out")
++do{try failureStore.copyExportSnapshot(to:timed,request:DiagnosticSnapshotRequest(timeout:0));check(false,"expired request rejected")}
++catch DiagnosticLogExport.Failure.timedOut{check(true,"expired request reports a time bound")}
++check(try manifest(failureSource)==failureBefore && manifest(directory)==liveBeforeFailures && trace.enabled,"space, cancellation and timeout failures preserve source and collection")
+diff --git a/Tests/Diagnostics/test_incident_summary.py b/Tests/Diagnostics/test_incident_summary.py
+index 003bf08c702357cd5a7e1932738b4873505d2dac..f3fedd79ab4e1f2c645a7d8dce8717506a540c1b 100644
+--- a/Tests/Diagnostics/test_incident_summary.py
++++ b/Tests/Diagnostics/test_incident_summary.py
+@@ -11,0 +12,14 @@
++    def test_monitor_lifecycle_is_bounded_typed_and_optional(self):
++        sample=dict(observedAtMilliseconds=10,stage=1,reason=9,tapState=0,active=True,enabled=False,
++                    suspended=True,recovering=False,rollingBack=False,restartAllowed=False,
++                    pending=0,retained=1,attempts=2,failures=2,failureKind=2,stopReason=6,receivedEvents=4,lastEventAgeMicros=60000000)
++        status=dict(current=sample,transitions=[sample],discardedTransitions=3)
++        result=summary.summarize(dict(schema=1,trigger=1,frames=[],monitorStatus=status))['monitor_status']
++        self.assertEqual(result['current_reason'],'safe_restart_refused')
++        self.assertEqual(result['discardedTransitions'],3)
++        self.assertIsNone(summary.summarize(dict(schema=1,trigger=1,frames=[]))['monitor_status'])
++        for change in [dict(reason=99),dict(enabled=1),dict(receivedEvents=True),dict(text='PRIVATE'),dict(lastEventAgeMicros=-1)]:
++            with self.assertRaises(ValueError):summary.monitor_status(dict(status,current=dict(sample,**change)))
++        for change in [dict(transitions=[sample]*17),dict(discardedTransitions=-1),dict(transitions=[dict(sample,observedAtMilliseconds=11)])]:
++            with self.assertRaises(ValueError):summary.monitor_status(dict(status,**change))
++
+diff --git a/Tests/MismatchRecovery/MonitorLifecycleTests.swift b/Tests/MismatchRecovery/MonitorLifecycleTests.swift
+index a5392af29d82f66f2ed4e919ae70ea6527faa736..e3b6bae8fa48bfc4cf52ab53106f109c9efd9a96 100644
+--- a/Tests/MismatchRecovery/MonitorLifecycleTests.swift
++++ b/Tests/MismatchRecovery/MonitorLifecycleTests.swift
+@@ -19 +19 @@
+-        p.monitorTapFailed(1)
++        p.monitorTapFailed(1);p.monitorTapFailed(2)
+@@ -25,0 +26,10 @@
++        probeTestCheck(p.monitorFailureCount==2 && p.monitorFailureKind==2,"both failure notifications remain countable")
++    }
++    for order in [[1,2],[2,1],[3,1,2]] {
++        let p=MismatchRecoveryEngine();p.enabled=true
++        for kind in order { p.monitorTapFailed(kind) }
++        RunLoop.current.run(until:Date().addingTimeInterval(0.015))
++        probeTestCheck(!p.enabled && p.suspended && p.monitorRestartAllowed,
++                       "duplicate tap failures preserve the first idle restart decision")
++        probeTestCheck(p.prepareIdleMonitorRestart(),"duplicate failure permits one idle restart")
++        probeTestCheck(!p.prepareIdleMonitorRestart(),"restart authorization is consumed once")
+@@ -39,0 +50,9 @@
++    var records:[InputIncidentTrace.Capture]=[]
++    let trace=InputIncidentTrace(destination:nil,writer:{records.append($0)})
++    c.engine.incidentTrace=trace;c.active=true;c.engine.enabled=false
++    c.engine.retained.removeAll();c.engine.suspended=true;c.engine.monitorRestartAllowed=false
++    c.tick();trace.flush();trace.mark();trace.flush()
++    probeTestCheck(records.last?.monitorStatus?.current.reason==9,"unsafe restart is diagnosed without a start attempt")
++    permission=false;c.tick();trace.flush();trace.mark();trace.flush()
++    probeTestCheck(records.last?.monitorStatus?.current.reason==4,"permission refusal is distinguishable from idle input")
++    probeTestCheck(starts==4,"diagnostics cannot authorize registration")
+diff --git a/Tests/SourceEvidence/main.swift b/Tests/SourceEvidence/main.swift
+index f625ccf32fb6275792c46d4fcff0bed8f8efb586..0279c8addcbd915fd99bc8a42389eeb7415cceae 100644
+--- a/Tests/SourceEvidence/main.swift
++++ b/Tests/SourceEvidence/main.swift
+@@ -128,0 +129,22 @@
++// Lifecycle status survives ring rotation, remains bounded and contains no
++// arbitrary strings. Receiving another event updates current status, not history.
++do {
++    var captured:[InputIncidentTrace.Capture]=[],instant=100.0
++    let t=InputIncidentTrace(destination:nil,capacity:8,clock:{instant},writer:{captured.append($0)})
++    var sample=InputIncidentTrace.MonitorSample();sample.active=true;sample.enabled=true;sample.tapState=1;sample.stage=1
++    t.monitor(sample);t.flush()
++    for value in 1...20{instant+=0.01;sample.attempts=value;t.monitor(sample);t.flush()}
++    for value in 1...40{instant+=0.01;sample.receivedEvents=value;sample.lastEventAgeMicros=value;t.monitor(sample);t.flush();t.context()}
++    t.flush();t.mark();t.flush()
++    let bytes=try JSONEncoder().encode(captured[0]),read=try RecorderTrace.decode(bytes)
++    check(read.monitorStatus?.transitions.count==16 && read.monitorStatus?.discardedTransitions==5,"monitor history reports its bounded truncation")
++    check(read.monitorStatus?.current.receivedEvents==40 && read.monitorStatus?.transitions.last?.receivedEvents==0,"event counters update without erasing lifecycle history")
++    check(read.monitorStatus?.current.tapState==1,"current monitor status survives ordinary frame rotation")
++    var object=try JSONSerialization.jsonObject(with:bytes) as! [String:Any]
++    var status=object["monitorStatus"] as! [String:Any],current=status["current"] as! [String:Any]
++    for (key,value) in [("reason",99),("text","SECRET"),("enabled",1)] as [(String,Any)] {
++        var bad=current;bad[key]=value;status["current"]=bad;object["monitorStatus"]=status
++        do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:object));check(false,"malformed monitor sample rejected")}
++        catch{check(true,"malformed monitor sample rejected")}
++    }
++}
+diff --git a/Tools/InputTestRecorder/RecorderCore.swift b/Tools/InputTestRecorder/RecorderCore.swift
+index 24838f38499dc1dbd78effcf00ee7c81a9d60b96..69793844c99f5df7bd86819f5eef8705beaf2784 100644
+--- a/Tools/InputTestRecorder/RecorderCore.swift
++++ b/Tools/InputTestRecorder/RecorderCore.swift
+@@ -193 +193 @@
+-        case 6:return detail==0 || (code/32%8==3 && (1...7).contains(detail)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail)) || (code/32%8==2 && (17...20).contains(detail))
++        case 6:return detail==0 || (code/32%8==3 && ((1...7).contains(detail) || detail==31)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail)) || (code/32%8==2 && (17...20).contains(detail))
+@@ -277,0 +278,21 @@
++struct RecorderMonitorSample:Codable {
++    let observedAtMilliseconds,stage,reason,tapState:Int
++    let active,enabled,suspended,recovering,rollingBack,restartAllowed:Bool
++    let pending,retained,attempts,failures,failureKind,stopReason,receivedEvents:Int
++    let lastEventAgeMicros:Int?
++    static let keys=Set(["observedAtMilliseconds","stage","reason","tapState","active","enabled","suspended","recovering","rollingBack","restartAllowed","pending","retained","attempts","failures","failureKind","stopReason","receivedEvents"])
++    var valid:Bool {
++        [observedAtMilliseconds,pending,retained,attempts,failures,receivedEvents].allSatisfy{(0...9_000_000_000_000_000).contains($0)} &&
++        (0...4).contains(stage) && (0...11).contains(reason) && (0...2).contains(tapState) &&
++        (0...3).contains(failureKind) && (0...6).contains(stopReason) && (lastEventAgeMicros.map{(0...60_000_000).contains($0)} ?? true)
++    }
++}
++struct RecorderMonitorStatus:Codable {
++    let current:RecorderMonitorSample,transitions:[RecorderMonitorSample],discardedTransitions:Int
++    var valid:Bool {current.valid && transitions.count<=16 && transitions.allSatisfy{$0.valid && $0.observedAtMilliseconds<=current.observedAtMilliseconds} && discardedTransitions>=0 && zip(transitions,transitions.dropFirst()).allSatisfy{$0.observedAtMilliseconds<=$1.observedAtMilliseconds}}
++    static func accepts(_ value:Any)->Bool {
++        guard let value=value as? [String:Any],Set(value.keys)==Set(["current","transitions","discardedTransitions"]),
++              let current=value["current"] as? [String:Any],let transitions=value["transitions"] as? [[String:Any]],transitions.count<=16 else{return false}
++        return ([current]+transitions).allSatisfy{Set($0.keys).subtracting(["lastEventAgeMicros"])==RecorderMonitorSample.keys}
++    }
++}
+@@ -281,0 +303 @@
++    let monitorStatus:RecorderMonitorStatus?
+@@ -350 +372 @@
+-              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","shapeBaselines","capturePreservation","captureBacklog"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
++              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","monitorStatus","shapeBaselines","capturePreservation","captureBacklog"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
+@@ -363,0 +386 @@
++        if let status=object["monitorStatus"],!RecorderMonitorStatus.accepts(status){throw RecorderError.invalidTrace}
+@@ -437,0 +461 @@
++        guard value.monitorStatus?.valid ?? true else{throw RecorderError.invalidTrace}
+diff --git a/docs/SPEC.md b/docs/SPEC.md
+index 2cb324a40fc7485d24638151f15b73f62f257ac7..8a54cdf55cae12d01b98cce7fd6ed634824c8c01 100644
+--- a/docs/SPEC.md
++++ b/docs/SPEC.md
+@@ -346,0 +347,2 @@
++같은 중단에 두 탭의 알림이 연속으로 도착해도 첫 안전 판단을 유지하며, 재등록 직전에 안전 조건을 다시 검사한다. 진단 ON이면 기존 제어 주기에서 등록·탭 활성·안전 중단·재시도 판단과 수신 누적·마지막 수신 경과를 고정 숫자 상태로 남긴다. 현재 상태와 최근 상태 전환 16개·오래된 전환의 제외 수를 보존한다. 수신 경과는 60초에서 제한하며, 추가 입력 조회·AX 조회·주기적 파일 쓰기는 하지 않는다. 이 상태는 대상 앱 내부의 입력기 상태를 증명하지 않는다.
++
+@@ -379,0 +382,2 @@
++준비 화면은 후속 저장 대기·사본 준비·목록 읽기·선택 기록 ZIP 준비를 구분한다. 후속 저장 대기는 요청 시점의 기록에 한해 최대 15초, 사본과 목록의 준비는 요청부터 최대 45초로 제한하며 닫으면 취소한다. 가능한 파일시스템에서는 바이트가 독립적으로 보존되는 복제 사본을 사용한다. 목록에는 writer가 만든 메타데이터만 읽고, 선택한 최대 5건의 본문·해시·미리보기만 확인한다. 구형 사본은 한 파일씩 읽고 메모리에서 해제한다. 공간 부족·취소·시간 초과·읽기 실패는 부분 사본을 정리하고 원본을 유지한다. 사본 준비에는 최소 256MiB의 여유를 남기고, 일반 복사 및 ZIP 준비에는 필요한 추가 공간도 확인한다.
++
+diff --git a/scripts/summarize-input-incident.py b/scripts/summarize-input-incident.py
+index ed17cf4f2ce1431149db473b7b8ef38aba9ff134..7a6028c20e9c0033fcd45249830d7c81f14d7cf8 100644
+--- a/scripts/summarize-input-incident.py
++++ b/scripts/summarize-input-incident.py
+@@ -242,0 +243,17 @@
++def monitor_status(value):
++    keys={'observedAtMilliseconds','stage','reason','tapState','active','enabled','suspended','recovering','rollingBack','restartAllowed','pending','retained','attempts','failures','failureKind','stopReason','receivedEvents'}
++    booleans={'active','enabled','suspended','recovering','rollingBack','restartAllowed'}
++    def sample(row):
++        if not isinstance(row,dict) or set(row)-{'lastEventAgeMicros'}!=keys:raise ValueError('invalid monitor sample fields')
++        if any(type(row[k]) is not bool for k in booleans):raise ValueError('invalid monitor boolean')
++        if any(type(row[k]) is not int or not 0<=row[k]<=9_000_000_000_000_000 for k in keys-booleans):raise ValueError('invalid monitor counter')
++        for key,maximum in [('stage',4),('reason',11),('tapState',2),('failureKind',3),('stopReason',6),('lastEventAgeMicros',60_000_000)]:
++            if key in row and (type(row[key]) is not int or not 0<=row[key]<=maximum):raise ValueError('invalid monitor code')
++        return row
++    if not isinstance(value,dict) or set(value)!={'current','transitions','discardedTransitions'} or not isinstance(value['transitions'],list) or len(value['transitions'])>16 or type(value['discardedTransitions']) is not int or value['discardedTransitions']<0:raise ValueError('invalid monitor status')
++    current=sample(value['current']);transitions=[sample(r) for r in value['transitions']]
++    times=[r['observedAtMilliseconds'] for r in transitions]+[current['observedAtMilliseconds']]
++    if times!=sorted(times):raise ValueError('invalid monitor time order')
++    reasons=['ready','controller_inactive','input_unavailable','probe_active','accessibility_unavailable','secure_input','launch_disabled','taps_unhealthy','restart_rate_limit','safe_restart_refused','start_failed','retry_delay']
++    return dict(value,current_reason=reasons[current['reason']],interpretation='controller_samples_and_last_16_state_changes_no_keys_no_editor_internal_IME_state')
++
+@@ -281,0 +299 @@
++    monitor=monitor_status(data['monitorStatus']) if 'monitorStatus' in data else None
+@@ -334 +352 @@
+-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
++                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0,31]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
+@@ -439 +457 @@
+-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
++            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
+@@ -504 +522 @@
+-            'capture_preservation':preservation,'capture_backlog':backlog,
++            'capture_preservation':preservation,'capture_backlog':backlog,'monitor_status':monitor,
+diff --git a/version.env b/version.env
+index 47fc5ca0e42a192d9ce3e707d56ea80faed32334..2ed50532df312f2421498392f69d6841209a290b 100644
+--- a/version.env
++++ b/version.env
+@@ -4 +4 @@
+-BUILD_NUMBER=362
++BUILD_NUMBER=363
