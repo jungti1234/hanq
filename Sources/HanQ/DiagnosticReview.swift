@@ -329,6 +329,10 @@ final class DiagnosticReviewSnapshot {
             // frames, times, links, classifications and other diagnostic evidence.
             if kind == 6 { counts[states[code] ?? "해석하지 못한 처리 상태", default: 0] += 1 }
             if kind == 7 { counts[boundaries[code] ?? "해석하지 못한 경계 상태", default: 0] += 1 }
+            if kind == 14,let raw=frame["boundaryEvidence"] as? [String:Any],let evidence=InputIncidentTrace.BoundaryEvidence.parse(raw) {
+                counts["전환 범위 비교: "+evidence.resolutionLabel,default:0]+=1
+                if evidence.suppressed>0 {counts["전환 비교 변화 기록 상한 도달",default:0]+=1}
+            }
             if kind == 8 { counts[decisions[code] ?? "해석하지 못한 판단 사유", default: 0] += 1 }
             if kind == 13 { counts[onsetReasons[code] ?? "해석하지 못한 첫 입력 판단", default: 0] += 1 }
             if kind == 10 {

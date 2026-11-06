@@ -247,6 +247,22 @@ def monitor_status(value):
     reasons=['ready','controller_inactive','input_unavailable','probe_active','accessibility_unavailable','secure_input','launch_disabled','taps_unhealthy','restart_rate_limit','safe_restart_refused','start_failed','retry_delay']
     return dict(value,current_reason=reasons[current['reason']],interpretation='controller_samples_and_last_16_state_changes_no_keys_no_editor_internal_IME_state')
 
+BOUNDARY_REQUIRED={'transaction','phase','reason','text','start','end','expected','reported','change','resolution','seed','mutation','revision','observations','suppressed','coalesced','fieldRelation'}
+BOUNDARY_AGES={'baselineAgeMicros','mutationAgeMicros','requestAgeMicros','sampleAgeMicros'}
+BOUNDARY_RESOLUTIONS=['unmeasured','matched','reported_reached_stable_prediction','prediction_reached_stable_report','both_changed_before_match','persistent_mismatch_unresolved']
+BOUNDARY_CAUSES=['unmeasured','pre_key_read','request_read','native_select_all','onset_replay','verified_manual_edit','verified_replay','source_commit','verified_deletion_history','initial_body_removed','observed_key','selected_replacement','repair_acknowledged','deletion_reconciled']
+def boundary_evidence(value):
+    bounds={'transaction':(1,1_000_000_000),'phase':(1,3),'reason':(0,4),'text':(0,5),'start':(0,3),'end':(0,3),'expected':(0,2),'reported':(0,2),'change':(0,4),'resolution':(0,5),'seed':(0,13),'mutation':(0,13),'revision':(0,1_000_000),'observations':(0,1_000_000),'suppressed':(0,1_000_000),'coalesced':(0,1_000_000),'fieldRelation':(0,2)}
+    if not isinstance(value,dict) or set(value)-BOUNDARY_AGES!=BOUNDARY_REQUIRED or any(type(v) is not int for v in value.values()):raise ValueError('invalid boundary comparison fields')
+    if any(not low<=value[k]<=high for k,(low,high) in bounds.items()) or any(not 0<=value[k]<=60_000_000 for k in BOUNDARY_AGES&set(value)):raise ValueError('invalid boundary comparison values')
+    if (value['phase']==3)!=(value['reason']>0) or (value['phase']==1 and (value['observations']!=0 or value['text']!=0 or value['resolution']!=0)):raise ValueError('inconsistent boundary comparison phase')
+    if 1<=value['resolution']<=4 and not(value['fieldRelation']==1 and 1<=value['text']<=4 and value['start']==value['end']==2 and value['expected']>0 and value['expected']==value['reported']):raise ValueError('inconsistent boundary comparison match')
+    return dict(value,phase_name=['unknown','request','comparison','end'][value['phase']],end_reason=['none','success','deadline','context_changed','other_abort'][value['reason']],
+                text_match=['unmeasured','existing_equality','insertion_style','terminal_lf','terminal_lf_style','mismatch'][value['text']],
+                start_relation=['unknown','prediction_before_report','equal','prediction_after_report'][value['start']],end_relation=['unknown','prediction_before_report','equal','prediction_after_report'][value['end']],
+                change_name=['first','unchanged','report_only','prediction_only','both'][value['change']],resolution_name=BOUNDARY_RESOLUTIONS[value['resolution']],
+                seed_name=BOUNDARY_CAUSES[value['seed']],mutation_name=BOUNDARY_CAUSES[value['mutation']],interpretation='observed_relation_changes_only_not_editor_internal_IME_or_causal_fault_proof')
+
 def summarize(data):
     if data.get('schema') != 1 or not isinstance(data.get('frames'), list):
         raise ValueError('unsupported incident schema')
@@ -384,8 +400,13 @@ def summarize(data):
                 'editor_coordinates_unverified','metadata_only','other']
     baselines=shape_baselines(data['shapeBaselines']) if 'shapeBaselines' in data else None
     source_actions=dict(enumerate(["observed","requested","committed","deferred","resumed","rejected","roman_skipped"],start=1))
+    boundary_rows=[]
     for frame in data['frames']:
         lane=lanes.get(frame['lane'],'unknown')
+        if frame['kind']==14 or 'boundaryEvidence' in frame:
+            required={'sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','consumed','durationMicros','count','selected','field','observationTiming','boundaryEvidence'}
+            if set(frame)!=required or any(type(frame.get(k)) is not int for k in ['sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','durationMicros','count','field']) or frame['sequence']<=0 or frame['milliseconds']<0 or frame['kind']!=14 or frame['lane']!=8 or any(frame[k]!=0 for k in ['event','edge','category','inputOrigin','durationMicros','count','field']) or frame['consumed'] is not False or frame['selected'] is not False or not valid_timing(frame['observationTiming']):raise ValueError('invalid boundary comparison frame')
+            boundary_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],**boundary_evidence(frame['boundaryEvidence'])))
         if 'focusEvidence' in frame:
             focus=focus_evidence(frame['focusEvidence'])
             if frame['kind']!=2 or frame['category']!=2 or 'readOutcome' not in frame or frame['lane']!=(6 if focus['path']==1 else 7):raise ValueError('invalid focus evidence frame')
@@ -504,7 +525,7 @@ def summarize(data):
             'callback_work_timelines':work_timelines(work_rows,shape_rows),'work_interval_evidence':work_rows,
             'snapshot_focus_observations':focus_rows,'snapshot_read_outcomes':read_rows,'snapshot_read_outcome_counts':dict(collections.Counter(r['lane']+':'+r['outcome'] for r in read_rows)),
             'space_observations':None if preservation is None else [dict(r,reason={1:'rapid_space_downs',2:'space_consumed',3:'hanq_replay_marker',4:'repeat_flag'}[r['detail']],interpretation='observation_only_not_duplicate_text_or_root_cause') for r in preservation['requests'] if r['trigger']==7],
-            'onset_decisions':onset_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
+            'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,

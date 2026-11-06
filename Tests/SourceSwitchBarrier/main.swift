@@ -8,6 +8,7 @@ func key(_ code:CGKeyCode,_ flags:CGEventFlags=[])->CGEvent {let e=CGEvent(keybo
 let en="com.apple.keylayout.ABC",ko="com.apple.inputmethod.Korean.2SetKorean"
 let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(456)
 runNativeObservationTests()
+runBoundaryDiagnosticTests()
 // A native select-all is an observation boundary, never an edit command.
 for body in ["ㄱㅡ럼", "그럼", "ordinary"] {
  let b=SourceSwitchBarrier();var range=NSRange(location:body.utf16.count,length:0),writes=0,posts=0

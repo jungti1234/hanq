@@ -8,6 +8,11 @@ final class SourceSwitchBarrier {
     private var deferredHistoryEpoch:Int?
     var didConfirmSource:(String,CGEventTimestamp)->Void = {_,_ in}
     var incidentTrace=InputIncidentTrace.shared
+    var diagnostic:(InputIncidentTrace.BoundaryEvidence)->Void = {_ in}
+    private var diagnosticGeneration:Int32=0
+    private var diagnosticHistory=BoundaryDiagnosticHistory()
+    private var diagnosticTransaction:BoundaryDiagnosticTransaction?
+    private var diagnosticSequence=0
     struct Snapshot { let field:AXUIElement; let text:String; let selection:NSRange }
     static let marker:Int64 = 0x4851535749544348
     var read:()->Snapshot? = {nil}
@@ -170,15 +175,21 @@ final class SourceSwitchBarrier {
     private func resolveDeletionBoundary(_ snap:Snapshot) {
         guard let candidate=ledger,candidate.postDeletionPrefixCount != nil,
               selectedRange==nil,let field,CFEqual(field,snap.field) else{return}
-        ledger=resolvingDeletionBoundary(snap,candidate)
+        let resolved=resolvingDeletionBoundary(snap,candidate)
+        if diagnosticEnabled(),candidate.selection != resolved.selection || candidate.postDeletionPrefixCount != resolved.postDeletionPrefixCount {noteDiagnosticHistory(13)}
+        ledger=resolved
     }
     private func noteTextMatch(_ snap:Snapshot) {
-        guard let ledger,let match=textMatch(snap,ledger) else{return}
+        guard let ledger else{return}
+        let result=textMatch(snap,ledger)
+        guard let match=result else{noteDiagnosticComparison(snap,match:nil);return}
         mismatchedSnapshot=nil
         if pendingSelectAll,(match == .terminalLF || match == .terminalLFStyle),
            selectedRange==NSRange(location:0,length:ledger.text.utf16.count) {
             selectedRange=NSRange(location:0,length:snap.text.utf16.count)
+            noteDiagnosticHistory(9)
         }
+        noteDiagnosticComparison(snap,match:match)
         guard lastTextMatch != match else{return};lastTextMatch=match
         switch match {
         case .exact:break
@@ -210,6 +221,7 @@ final class SourceSwitchBarrier {
         acknowledged.segments=previous.segments
         ledger=acknowledged
         selectedRange=NSRange(location:0,length:snap.text.utf16.count)
+        noteDiagnosticHistory(9,baseline:true)
         trace("select_all_initial_body_removed")
     }
     /// A source request also provides an explicit boundary. Only accept an
@@ -225,10 +237,10 @@ final class SourceSwitchBarrier {
         acknowledged.segments=previous.segments
         guard textMatch(snap,acknowledged) != nil,
               snap.selection==acknowledged.selection,!isPendingTextPrefix(snap) else{return}
-        ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil
+        ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil;noteDiagnosticHistory(9,baseline:true)
         trace("source_initial_body_removed")
     }
-    func resetObservation(){deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
     // Backspace can remove one component of live Hangul rather than commit the
     // remaining syllable. Reuse only our observed key prefix, after the editor
     // proves its entire text and caret. Never decompose existing editor text.
@@ -241,7 +253,7 @@ final class SourceSwitchBarrier {
             guard textMatch(snap,candidate) != nil,candidate.selection==snap.selection else{return false}
             var candidate=candidate
             candidate.postDeletionPrefixCount=candidate.segments.last?.source==mismatchKoreanID ? candidate.segments.last?.keys.count:nil
-            field=snap.field;ledger=candidate;historyStarted=saved.started;return true
+            field=snap.field;ledger=candidate;historyStarted=saved.started;noteDiagnosticHistory(8,baseline:true);return true
         }
         if adopt(saved.ledger){return}
         // Deleting the last medial can leave the initial detached from the
@@ -302,6 +314,7 @@ final class SourceSwitchBarrier {
         guard !busy,caret>=0,caret<=before.utf16.count else{return}
         resetObservation()
         self.field=field;ledger=MismatchReplayLedger(before:before,caret:caret)
+        noteDiagnosticHistory(4,baseline:true)
     }
     /// A completed boundary leaves prediction history for the next key. A new
     /// focused field must start its own history before that key is submitted.
@@ -339,6 +352,7 @@ final class SourceSwitchBarrier {
         resetObservation();repairInFlight.removeAll();externalEditPending=false
         field=snapshot.field;ledger=MismatchReplayLedger(before:snapshot.text,caret:snapshot.selection.location)
         selectedRange=snapshot.selection.length>0 ? snapshot.selection:nil
+        noteDiagnosticHistory(5,baseline:true)
         trace("manual_edit_verified")
         if busy{schedule()}
     }
@@ -362,6 +376,7 @@ final class SourceSwitchBarrier {
         guard transactionField == nil || CFEqual(transactionField!,snapshot.element) else{return}
         field=snapshot.element;ledger=replay;selectedRange=nil;externalEditPending=false
         priorKeyLedger=nil;lastKeyAt=now();historyStarted=MismatchRecoveryEngine.sourceEventTime()
+        noteDiagnosticHistory(6,baseline:true)
         trace("repair_history_adopted")
     }
     /// The onset engine reports its own successful posts synchronously. A
@@ -413,8 +428,9 @@ final class SourceSwitchBarrier {
         }
         if event.getIntegerValueField(.keyboardEventKeycode)==0,flags == .maskCommand,!event.flags.contains(.maskShift) {
             refreshIdleField()
-            if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)}
+            if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);noteDiagnosticHistory(3,baseline:true)}
             selectedRange=ledger.map{NSRange(location:0,length:$0.text.utf16.count)}
+            noteDiagnosticHistory(3)
             pendingSelectAll=selectedRange != nil
             selectionAttempts=0
             if pendingSelectAll {
@@ -438,9 +454,10 @@ final class SourceSwitchBarrier {
             if ledger == nil {
                 field=snap.field
                 ledger=MismatchReplayLedger(before:(snap.text as NSString).replacingCharacters(in:snap.selection,with:""),caret:snap.selection.location)
+                noteDiagnosticHistory(1,baseline:true)
             }
         }
-        if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil}
+        if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil;noteDiagnosticHistory(11)}
         guard (ledger?.segments.reduce(0,{$0+$1.keys.count}) ?? 0)<128 else{resetObservation();return}
         // A completed switch can preserve the proved body/ledger but starts a
         // new (empty) source interval. Timestamp its first accepted key rather
@@ -450,6 +467,7 @@ final class SourceSwitchBarrier {
         }
         priorKeyLedger=ledger;priorKeyAt=lastKeyAt;lastKeyAt=now()
         ledger?.append(source:id,keys:[(code,event.flags.contains(.maskShift))])
+        noteDiagnosticHistory(10)
         if deferred != nil,let evidence=sourceEvidence {
             deferredHistoryEpoch=evidence.epoch
             incidentTrace.sourceEvidence(.deferred,evidence.diagnostic(selected:selected,history:true),event:event)
@@ -520,12 +538,12 @@ final class SourceSwitchBarrier {
         if let edit=manualEdit {
             if !busy{transactionField=edit.field}
             busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1;waitReason=nil;lastTextMatch=nil
-            trace("waiting_for_editor");schedule();return true
+            beginDiagnosticRequest(at:deadline-1);trace("waiting_for_editor");schedule();return true
         }
-        if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection}
+        if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
         guard field != nil,ledger != nil else{return false}
         if !busy { transactionField=field }
-        busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1.0;waitReason=nil;lastTextMatch=nil;trace("waiting_for_editor");schedule();return true
+        busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1.0;waitReason=nil;lastTextMatch=nil;beginDiagnosticRequest(at:deadline-1);trace("waiting_for_editor");schedule();return true
     }
     private func wait(_ reason:String) {
         if waitReason != reason {waitReason=reason;trace(reason)}
@@ -605,6 +623,7 @@ final class SourceSwitchBarrier {
             guard isReady() else{wait("waiting_for_repair");return}
             ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)
             selectedRange=snap.selection;field=snap.field;externalEditPending=false
+            noteDiagnosticHistory(12,baseline:true)
             trace("repair_acknowledged")
         }
         if !matchesText(snap) {acknowledgeSourceInitialBodyRemoval(snap)}
@@ -644,7 +663,7 @@ final class SourceSwitchBarrier {
             let snap=switchSnapshot!;switchSnapshot=nil
             didConfirmSource(target,targetTimestamp)
             didSelect(targetTimestamp);targetTimestamp=0
-            let previous=ledger
+            let previous=ledger,previousDiagnosticHistory=diagnosticHistory
             self.target=nil;resetObservation();self.field=snap.field
             // AX restoration is asynchronous even after a successful source
             // switch. Preserve the verified selection until the editor observes
@@ -656,9 +675,11 @@ final class SourceSwitchBarrier {
                 // segment commits composition even if no key uses this source.
                 ledger=previous;ledger?.postDeletionPrefixCount=nil
                 ledger?.segments.append((source:target,keys:[]))
+                diagnosticHistory=previousDiagnosticHistory;noteDiagnosticHistory(7)
             } else {
                 ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)
                 selectedRange=snap.selection
+                noteDiagnosticHistory(7,baseline:true)
             }
             awaitingSelection=true
             selectionAttempts=1;selectionRetryAt=now()+0.01
@@ -669,7 +690,7 @@ final class SourceSwitchBarrier {
         }
         guard isReady() else{wait("waiting_for_repair");return}
         if expected == nil || matches(snap) {
-            busy=false;self.transactionField=nil;trace("finished")
+            busy=false;self.transactionField=nil;finishDiagnosticRequest(1);trace("finished")
         }else{waitForMatch(snap)}
     }
     private func replayNext(){
@@ -685,6 +706,7 @@ final class SourceSwitchBarrier {
         awaitingReplay=true;deadline=now()+1.0;send(event);schedule()
     }
     func fail(_ reason:String){
+        finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
         manualEdit=nil;manualEditSequence+=1
 
         cancelSelection();switchSnapshot=nil
@@ -696,5 +718,109 @@ final class SourceSwitchBarrier {
         let pending=queued;queued=[];resetObservation()
         if !pending.isEmpty{retained(pending)}
         trace(reason)
+    }
+
+    private func diagnosticEnabled()->Bool {
+        let generation=incidentTrace.collectionGeneration
+        if generation != diagnosticGeneration {
+            diagnosticGeneration=generation;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticTransaction=nil
+        }
+        return generation>0
+    }
+    private func noteDiagnosticHistory(_ cause:Int,baseline:Bool=false) {
+        guard diagnosticEnabled() else{return}
+        diagnosticHistory.note(cause,baseline:baseline,at:now())
+    }
+    private func beginDiagnosticRequest(at time:Double) {
+        guard diagnosticEnabled() else{return}
+        finishDiagnosticRequest(4)
+        diagnosticSequence=diagnosticSequence==1_000_000_000 ? 1:diagnosticSequence+1
+        diagnosticTransaction=BoundaryDiagnosticTransaction(id:diagnosticSequence,started:time)
+        diagnostic(diagnosticTransaction!.evidence(phase:1,reason:0,history:diagnosticHistory,at:time))
+    }
+    private func noteDiagnosticComparison(_ snap:Snapshot,match:TextMatch?) {
+        guard diagnosticEnabled(),busy,diagnosticTransaction != nil else{return}
+        let text:Int
+        switch match {case .exact:text=1;case .style:text=2;case .terminalLF:text=3;case .terminalLFStyle:text=4;case nil:text=5}
+        // step() already verified the transaction field. No extra field/source query.
+        if let value=diagnosticTransaction?.observe(prediction:selectedRange ?? ledger?.selection,reported:snap.selection,text:text,history:diagnosticHistory,at:now()) {diagnostic(value)}
+    }
+    private func finishDiagnosticRequest(_ reason:Int) {
+        guard diagnosticEnabled(),let transaction=diagnosticTransaction else{return}
+        diagnostic(transaction.evidence(phase:3,reason:reason,history:diagnosticHistory,at:now()))
+        diagnosticTransaction=nil
+    }
+}
+
+// Only ranges needed for relation changes remain in this bounded, transient state.
+// Encoded evidence contains fixed relations and capped ages, never the ranges.
+struct BoundaryDiagnosticHistory {
+    var seed=0,mutation=0,revision=0
+    var seededAt:Double?,mutatedAt:Double?
+    mutating func note(_ cause:Int,baseline:Bool,at time:Double) {
+        revision=revision==1_000_000 ? 0:revision+1;mutation=cause;mutatedAt=time
+        if baseline{seed=cause;seededAt=time}
+    }
+}
+struct BoundaryDiagnosticTransaction {
+    let id:Int,started:Double
+    private var prediction:NSRange?,reported:NSRange?,previousRevision:Int?
+    private var mismatchPrediction:NSRange?,mismatchReported:NSRange?,mismatchRevision:Int?
+    private var predictionChanged=false,reportChanged=false
+    private var resolvedAfterMismatch:Int?
+    private var text=0,change=0,resolution=0,observations=0,suppressed=0,coalesced=0,emitted=0
+    private var sampledAt:Double?,signature:InputIncidentTrace.BoundaryEvidence?
+    init(id:Int,started:Double){self.id=id;self.started=started}
+    private static func age(_ from:Double?,_ to:Double)->Int? {
+        guard let from,from.isFinite,to.isFinite,to>=from else{return nil}
+        return Int(min(60,to-from)*1_000_000)
+    }
+    private static func validRange(_ range:NSRange?)->NSRange? {
+        guard let range,range.location>=0,range.length>=0,range.location != NSNotFound,
+              !range.location.addingReportingOverflow(range.length).overflow else{return nil}
+        return range
+    }
+    private static func relation(_ a:Int?,_ b:Int?)->Int {
+        guard let a,let b else{return 0};return a<b ? 1:(a==b ? 2:3)
+    }
+    func evidence(phase:Int,reason:Int,history:BoundaryDiagnosticHistory,at time:Double)->InputIncidentTrace.BoundaryEvidence {
+        let a=Self.validRange(prediction),b=Self.validRange(reported)
+        return .init(transaction:id,phase:phase,reason:reason,text:text,
+            start:Self.relation(a?.location,b?.location),end:Self.relation(a.map{NSMaxRange($0)},b.map{NSMaxRange($0)}),
+            expected:a.map{$0.length==0 ? 1:2} ?? 0,reported:b.map{$0.length==0 ? 1:2} ?? 0,
+            change:change,resolution:resolution,seed:history.seed,mutation:history.mutation,revision:history.revision,
+            observations:observations,suppressed:suppressed,coalesced:coalesced,fieldRelation:observations>0 ? 1:0,
+            baselineAgeMicros:Self.age(history.seededAt,time),mutationAgeMicros:Self.age(history.mutatedAt,time),
+            requestAgeMicros:Self.age(started,time),sampleAgeMicros:Self.age(sampledAt,time))
+    }
+    mutating func observe(prediction next:NSRange?,reported actual:NSRange,text:Int,history:BoundaryDiagnosticHistory,at time:Double)->InputIncidentTrace.BoundaryEvidence? {
+        let next=Self.validRange(next),actual=Self.validRange(actual)
+        let p=prediction != next || previousRevision.map{$0 != history.revision} == true,r=reported != actual
+        change=observations==0 ? 0:(p ? (r ? 4:3):(r ? 2:1))
+        prediction=next;reported=actual;previousRevision=history.revision;self.text=text;sampledAt=time
+        observations=min(1_000_000,observations+1)
+        let matched=next != nil && next==actual && (1...4).contains(text)
+        if let revision=mismatchRevision,resolvedAfterMismatch==nil {
+            predictionChanged = predictionChanged || mismatchPrediction != next || revision != history.revision
+            reportChanged = reportChanged || mismatchReported != actual
+        }
+        if matched {
+            if mismatchRevision != nil,resolvedAfterMismatch==nil {resolvedAfterMismatch=predictionChanged ? (reportChanged ? 4:3):(reportChanged ? 2:1)}
+            resolution=resolvedAfterMismatch ?? 1
+        } else {
+            if next != nil,actual != nil,(mismatchRevision==nil || resolvedAfterMismatch != nil) {
+                mismatchPrediction=next;mismatchReported=actual;mismatchRevision=history.revision
+                predictionChanged=false;reportChanged=false;resolvedAfterMismatch=nil
+            }
+            resolution=next != nil && actual != nil ? 5:0
+        }
+        let value=evidence(phase:2,reason:0,history:history,at:time)
+        var key=value
+        key.observations=0;key.suppressed=0;key.coalesced=0
+        key.baselineAgeMicros=nil;key.mutationAgeMicros=nil;key.requestAgeMicros=nil;key.sampleAgeMicros=nil
+        guard key != signature else{coalesced=min(1_000_000,coalesced+1);return nil}
+        signature=key
+        guard emitted<32 else{suppressed=min(1_000_000,suppressed+1);return nil}
+        emitted+=1;return value
     }
 }
