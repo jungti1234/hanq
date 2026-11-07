@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 
 var checks=0,failures=0
 func check(_ value:Bool,_ name:String){checks+=1;if !value{failures+=1;print("FAIL",name)}}
@@ -118,6 +119,7 @@ for mode in ["fresh","old","missing","normal"] {
     var captures:[InputIncidentTrace.Capture]=[]
     let trace=InputIncidentTrace(destination:nil,initiallyEnabled:enabled,writer:{captures.append($0)})
     c.e.decisionTrace=trace;c.g.incidentTrace=trace
+    let secureBefore=IsSecureEventInputEnabled()
     let start=ProcessInfo.processInfo.systemUptime
     func at(_ t:Double){let wait=start+t-ProcessInfo.processInfo.systemUptime;if wait>0{RunLoop.current.run(until:Date(timeIntervalSinceNow:wait))}}
     c.original(5,true);at(0.080);c.publish("ㅎ");at(0.081);c.original(5,false);c.e.sample()
@@ -128,6 +130,9 @@ for mode in ["fresh","old","missing","normal"] {
     else{queryCounts[mode]=queries}
     at(0.850);c.original(0,false);c.e.sample();c.spin()
     trace.flush();trace.mark();trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
+    let secureAfter=IsSecureEventInputEnabled()
+    let onsetFrames=captures.flatMap{$0.frames}.filter{$0.kind == .onsetDecision}.count
+    if enabled,onsetFrames==0{print("DIAGNOSTIC_ENV",mode,"secureBefore",secureBefore,"secureAfter",secureAfter,"traceEnabled",trace.enabled,"frameKinds",captures.map{$0.frames.map{$0.kind.rawValue}})}
     if enabled {
         check(captures.allSatisfy{(try? RecorderTrace.decode(JSONEncoder().encode($0))) != nil},"engine frames are strict")
         let data=try! JSONEncoder().encode(captures.first!)
@@ -145,10 +150,10 @@ for mode in ["fresh","old","missing","normal"] {
     check((c.text=="흠")==expected,"same final body with diagnostic \(enabled)")
     check(c.originals==6 && c.e.retainedInput.isEmpty && c.g.held.isEmpty,"input order and drain unchanged")
     check(mode=="normal" || mode=="missing" ? c.posts.isEmpty:c.posts.count==6,"normal/unproved input is not replayed")
-    rows.append(["enabled":enabled,"mode":mode,"queriesBeforeClaim":queries,"originalEdges":c.originals,"replayEdges":c.posts.count,"composed":c.text=="흠"])
+    rows.append(["enabled":enabled,"mode":mode,"queriesBeforeClaim":queries,"originalEdges":c.originals,"replayEdges":c.posts.count,"composed":c.text=="흠","secureBefore":secureBefore,"secureAfter":secureAfter,"onsetFrames":onsetFrames,"traceEnabled":trace.enabled])
     trace.stopAndFlush();c.close()
 }
 }
 try! JSONSerialization.data(withJSONObject:["cases":rows,"checks":checks,"failures":failures],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("result.json"))
-print("PASS \(checks) engine diagnostic ON/OFF, routing, query counts and privacy checks")
+print("\(failures==0 ? "PASS":"FAIL") \(checks) engine diagnostic ON/OFF, routing, query counts and privacy checks")
 exit(failures==0 ? 0:1)

@@ -22,6 +22,28 @@ final class OnsetFocusHandoff {
     private var emptyEntries:[(field:AXUIElement,window:AXUIElement,time:Double)]=[]
     private var representedEntries:[(snapshot:OnsetSnapshot,window:AXUIElement,time:Double)]=[]
     private var representationEpoch:UInt64=0
+    var collectWitnessDiagnostics=false {
+        didSet {if oldValue != collectWitnessDiagnostics && !collectWitnessDiagnostics {resetWitnessDiagnostics()}}
+    }
+    private var representationObservations:[(field:AXUIElement,reason:Int,time:Double)]=[]
+    private var lastDiscovery=0,lastWitnessLookup=0,lastContextDiagnostic=0
+    func resetWitnessDiagnostics(){representationObservations=[];lastDiscovery=0;lastWitnessLookup=0;lastContextDiagnostic=0}
+    func noteDiscovery(_ reason:Int){if collectWitnessDiagnostics{lastDiscovery=reason}}
+    private func noteRepresentation(_ field:AXUIElement,_ reason:Int,at time:Double){
+        guard collectWitnessDiagnostics else{return}
+        representationObservations.removeAll{CFEqual($0.field,field)}
+        representationObservations.append((field,reason,time))
+        if representationObservations.count>8{representationObservations.removeFirst()}
+    }
+    func witnessDetail(for field:AXUIElement,history:Int=0)->InputIncidentTrace.OnsetDetail? {
+        guard collectWitnessDiagnostics else{return nil}
+        let observed=representationObservations.last{CFEqual($0.field,field)}
+        let age=observed.flatMap{entry -> Int? in
+            let elapsed=now()-entry.time
+            return elapsed.isFinite && elapsed>=0 ? Int(min(elapsed,60)*1_000_000):nil
+        }
+        return .init(discovery:lastDiscovery,representation:observed?.reason ?? 0,lookup:lastWitnessLookup,history:history,observationAgeMicros:age)
+    }
     private var draftEntries:[(snapshot:OnsetSnapshot,window:AXUIElement,time:Double)]=[]
     // A recently observed editor is only a search hint. Pointer/shortcut input
     // still clears every proof; this reference can authorize no write.
@@ -42,7 +64,7 @@ final class OnsetFocusHandoff {
         return proof.snapshot
     }
     // Pointer/shortcut input invalidates both empty and existing-body evidence.
-    func invalidateEmptyEntries(){emptyEntries=[];draftEntries=[];representedEntries=[];representationEpoch &+= 1}
+    func invalidateEmptyEntries(){emptyEntries=[];draftEntries=[];representedEntries=[];representationEpoch &+= 1;representationObservations=[];lastWitnessLookup=0}
     private var nextRefresh=0.0
     var sceneCacheEnabled=false
     private var queue:[(AXUIElement,Int)]=[]
@@ -95,7 +117,7 @@ final class OnsetFocusHandoff {
     var owner:(AXUIElement)->pid_t?=InputFocusAccess.owner
     var frontPID:()->pid_t?={NSWorkspace.shared.frontmostApplication?.processIdentifier}
     var ready:()->Bool={AXIsProcessTrusted() && !IsSecureEventInputEnabled()}
-    func reset(){resetCount=min(9_999_999,resetCount+1);candidate=nil;root=nil;outside=nil;cachedEditor=nil;nextRefresh=0;queue=[];pendingSearch=nil;searchesThisScan=0;visited=[:];visitedCount=0;editors=0;found=nil;uncertain=false;uncertainReasons=0;attempted=false;nextScan=0;nextRecentValidation=0}
+    func reset(){resetCount=min(9_999_999,resetCount+1);candidate=nil;root=nil;outside=nil;cachedEditor=nil;nextRefresh=0;queue=[];pendingSearch=nil;searchesThisScan=0;visited=[:];visitedCount=0;editors=0;found=nil;uncertain=false;uncertainReasons=0;attempted=false;nextScan=0;nextRecentValidation=0;lastDiscovery=0}
     func beginDiagnosticObservation(){
         diagnosticEditor=nil;diagnosticEditorAt=0
         focusedSeen=0;focusedMatch=0;focusedShape=0;focusedSize=0;focusedCaret=0;rangeOneClass=0
@@ -114,11 +136,13 @@ final class OnsetFocusHandoff {
     private static let details=[kAXRoleAttribute,kAXSubroleAttribute,kAXValueAttribute,kAXSelectedTextRangeAttribute,kAXEnabledAttribute,"AXHidden",kAXWindowAttribute,kAXNumberOfCharactersAttribute]
     private func emptyEditor(_ field:AXUIElement,window:AXUIElement,observing:Bool=false,recording:Bool=true,readDraft:((OnsetSnapshot)->Void)?=nil)->Bool {
         let began=now()
+        var representationReason=2
+        defer{if observing{noteRepresentation(field,representationReason,at:began)}}
         let values=batch(field,Self.details)
         lastFieldCheck=1
         guard values.count==Self.details.count else{return false}
         lastFieldCheck=2
-        guard let role=values[0] as? String,OnsetEditableRole.supports(role),values[1] as? String != kAXSecureTextFieldSubrole else{return false}
+        guard let role=values[0] as? String,OnsetEditableRole.supports(role),values[1] as? String != kAXSecureTextFieldSubrole else{representationReason=3;return false}
         let text:String?,valueKind:Int
         if let raw=values[2],CFGetTypeID(raw) != CFNullGetTypeID() {
             if let string=raw as? String{text=string;valueKind=1}
@@ -141,20 +165,30 @@ final class OnsetFocusHandoff {
                 observeSnapshot?(.init(element:field,text:text,selection:NSRange(location:range.location,length:0)))
             }
         }
-        if observing,let text,!text.isEmpty,text.utf16.count<=4096,
-           count==Double(text.utf16.count),Self.origin(values[3]),
-           values[4] as? Bool==true,values[5] as? Bool==false,
-           let rawWindow=values[6],CFGetTypeID(rawWindow)==AXUIElementGetTypeID(),CFEqual(rawWindow,window),
-           ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid,
-           now()>=began,now()-began<0.012 {
+        func observeRepresentation(){
+            guard let text else{representationReason=4;return}
+            guard !text.isEmpty,text.utf16.count<=4096 else{representationReason=5;return}
+            guard let count else{representationReason=6;return}
+            guard count==Double(text.utf16.count) else{representationReason=7;return}
+            guard Self.origin(values[3]) else{representationReason=8;return}
+            guard values[4] as? Bool==true,values[5] as? Bool==false else{representationReason=9;return}
+            guard let rawWindow=values[6],CFGetTypeID(rawWindow)==AXUIElementGetTypeID() else{representationReason=10;return}
+            guard CFEqual(rawWindow,window) else{representationReason=11;return}
+            guard ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid else{representationReason=12;return}
+            guard now()>=began,now()-began<0.012 else{representationReason=13;return}
             let time=now()
+            // A validated display is also a read-only refresh hint. It grants
+            // no focus/write authority and retains the existing sample limits.
+            rememberEditorHint(field,time:time)
             representedEntries.removeAll{time-$0.time>1.1}
             let previous=representedEntries.last(where:{CFEqual($0.snapshot.element,field)})
             if previous.map({!InputFocusAccess.literalTextEqual($0.snapshot.text,text) || !CFEqual($0.window,window) || time-$0.time>=0.05}) ?? true {
                 representedEntries.append((.init(element:field,text:text,selection:NSRange(location:0,length:0)),window,time))
                 if representedEntries.count>8{representedEntries.removeFirst()}
             }
+            representationReason=1
         }
+        if observing{observeRepresentation()}
         if observing,valueKind==1,let text,
            let draft=verifiedDraft(field,window:window,values:values,text:text,count:count,began:began) {
             readDraft?(draft)
@@ -262,8 +296,17 @@ final class OnsetFocusHandoff {
     // cache's 1.1s expiry must not revoke it mid-word. This frozen witness keeps
     // the original 2s input-history limit, context checks and explicit invalidation.
     func representationWitness(for field:AXUIElement,before time:Double)->RepresentationWitness? {
-        guard let entry=representedEntries.last(where:{CFEqual($0.snapshot.element,field) && $0.time<time && time-$0.time<=0.75}),
-              now()>=entry.time,now()-entry.time<=1.1,currentContext(field,window:entry.window) else{return nil}
+        guard let entry=representedEntries.last(where:{CFEqual($0.snapshot.element,field) && $0.time<time && time-$0.time<=0.75}) else{
+            if collectWitnessDiagnostics {
+                let matching=representedEntries.filter{CFEqual($0.snapshot.element,field)}
+                lastWitnessLookup=matching.isEmpty ? 2:(matching.contains{$0.time<time} ? 4:3)
+            }
+            return nil
+        }
+        guard now()>=entry.time else{if collectWitnessDiagnostics{lastWitnessLookup=5};return nil}
+        guard now()-entry.time<=1.1 else{if collectWitnessDiagnostics{lastWitnessLookup=6};return nil}
+        guard currentContext(field,window:entry.window) else{if collectWitnessDiagnostics{lastWitnessLookup=lastContextDiagnostic};return nil}
+        if collectWitnessDiagnostics{lastWitnessLookup=1}
         let epoch=representationEpoch,window=entry.window
         return RepresentationWitness(snapshot:entry.snapshot,isCurrent:{[weak self] in
             guard let self,self.representationEpoch==epoch,
@@ -272,9 +315,13 @@ final class OnsetFocusHandoff {
         })
     }
     func currentContext(_ field:AXUIElement,window:AXUIElement)->Bool {
-        guard ready(),let pid=frontPID(),owner(field)==pid,owner(window)==pid,
-              let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID(),
-              CFEqual(actual,window),ready(),frontPID()==pid else{return false}
+        func failure(_ reason:Int)->Bool{if collectWitnessDiagnostics{lastContextDiagnostic=reason};return false}
+        guard ready() else{return failure(7)}
+        guard let pid=frontPID(),owner(field)==pid,owner(window)==pid else{return failure(8)}
+        guard let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID() else{return failure(9)}
+        guard CFEqual(actual,window) else{return failure(10)}
+        guard ready() else{return failure(11)}
+        guard frontPID()==pid else{return failure(12)}
         return true
     }
     private func rememberEditorHint(_ field:AXUIElement,time:Double){
@@ -363,6 +410,7 @@ final class OnsetFocusHandoff {
                 return
             }
             queue=[(window,0)];searchesThisScan=0;visited=[:];visitedCount=0;editors=0;found=nil;sceneEditor=nil;uncertain=false;uncertainReasons=0;scanCount=min(9_999_999,scanCount+1)
+            noteDiscovery(4)
             nextScan=start+0.5
         }
         var count=0
@@ -397,6 +445,7 @@ final class OnsetFocusHandoff {
     private func finishScan(window:AXUIElement){
             completedScans=min(9_999_999,completedScans+1)
             let unique = !uncertain && editors==1
+            noteDiscovery((uncertainReasons & 60) != 0 ? 9:(uncertain ? 8:(editors>1 ? 7:(unique ? 6:5))))
             cachedEditor=unique ? sceneEditor:nil
             if diagnosticsEnabled,let cachedEditor{diagnosticEditor=cachedEditor;diagnosticEditorAt=now()}
             candidate = unique ? found.map{Candidate(field:$0,window:window,observedAt:now())}:nil

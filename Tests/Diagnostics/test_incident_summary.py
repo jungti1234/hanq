@@ -18,6 +18,18 @@ class IncidentSummaryTests(unittest.TestCase):
             with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
         self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[]))['onset_decisions'],[])
 
+    def test_onset_detail_is_optional_bounded_and_named(self):
+        timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
+        detail=dict(discovery=8,representation=6,lookup=2,history=8,observationAgeMicros=60000000)
+        row=dict(sequence=1,milliseconds=80,lane=3,kind=13,event=0,edge=2,category=5,inputOrigin=0,consumed=False,durationMicros=0,count=0,selected=False,field=0,observationTiming=timing,onsetEvidence=dict(keys=1,detail=detail))
+        parsed=summary.summarize(dict(schema=1,trigger=1,frames=[row]))['onset_decisions'][0]
+        self.assertEqual(parsed['detail_names']['representation'],'count_unavailable')
+        self.assertEqual(parsed['detail_names']['lookup'],'no_same_field_record')
+        self.assertEqual(parsed['detail_names']['history'],'body_mismatch')
+        for update in [dict(discovery=10),dict(representation=14),dict(lookup=13),dict(history=9),dict(history=True),dict(text='secret'),dict(observationAgeMicros=-1),dict(observationAgeMicros=60000001),dict(observationAgeMicros=True)]:
+            invalid=dict(row,onsetEvidence=dict(keys=1,detail=dict(detail,**update)))
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[invalid]))
+
     def test_onset_context_counters_are_bounded(self):
         counters=dict(capacity=4,readCapacity=1,processed={'1361':1},coalesced={'1361':2},overflow={},omitted={})
         result=summary.summarize(dict(schema=1,trigger=1,frames=[],observationDelivery=counters))

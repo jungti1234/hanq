@@ -211,6 +211,11 @@ let queued = try projected([["kind": 6, "category": 8], ["kind": 7, "category": 
 for label in ["후속 입력 임시 보관", "후속 입력 대기열 보관", "영문 소스에서 관측 생략"] {
     check(queued.readableText.contains(label), "existing fixed state is not silently omitted: \(label)")
 }
+let detailRead=try projected([["kind":13,"lane":3,"category":5,"onsetEvidence":["keys":1,"detail":["discovery":8,"representation":6,"lookup":2,"history":8,"text":"SECRET_DETAIL"]]]])
+for label in ["첫 입력 세부: 탐색 불완전","첫 입력 세부: 문자 수 조회 불가","첫 입력 세부: 같은 입력칸 표본 없음","첫 입력 세부: 전체 본문·커서 불일치"] {
+    check(detailRead.readableText.contains(label),"fixed detail is readable: \(label)")
+}
+check(!detailRead.readableText.contains("SECRET_DETAIL"),"unknown detail text never enters readable preview")
 let failedRead=try projected([["kind":2,"lane":6,"category":2,"durationMicros":1,"readOutcome":10],
                               ["kind":2,"lane":7,"category":2,"durationMicros":1,"readOutcome":11],
                               ["kind":2,"lane":7,"category":2,"durationMicros":1]])

@@ -122,3 +122,5 @@ for group in EditorSearch StructurePublication CommittedUnicode; do
 done
 
 bash scripts/test-first-publication.sh
+bash scripts/test-witness-refresh.sh
+bash scripts/test-witness-diagnostics.sh

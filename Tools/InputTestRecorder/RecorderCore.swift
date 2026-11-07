@@ -137,10 +137,23 @@ struct RecorderFocusEvidence:Codable {
     var valid:Bool {(1...3).contains(path) && (0...10).contains(role) && (0...2).contains(route) && (0...3).contains(ownerRelation) && (0...3).contains(elementRelation) && (0...3).contains(withinRead)}
 }
 
+struct RecorderOnsetDetail:Codable {
+    let discovery,representation,lookup,history:Int
+    let observationAgeMicros:Int?
+    var valid:Bool {(0...9).contains(discovery) && (0...13).contains(representation) && (0...12).contains(lookup) && (0...8).contains(history) && (observationAgeMicros.map{(0...60_000_000).contains($0)} ?? true)}
+    static func accepts(_ raw:Any)->Bool {
+        guard let value=raw as? [String:Any],Set(value.keys).subtracting(["observationAgeMicros"])==Set(["discovery","representation","lookup","history"]) else{return false}
+        return value.values.allSatisfy{raw in
+            guard let n=raw as? NSNumber else{return false}
+            return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
+        }
+    }
+}
 struct RecorderOnsetEvidence:Codable {
     let keys:Int
     let firstKeyAgeMicros:Int?
-    var valid:Bool {(0...16).contains(keys) && (firstKeyAgeMicros.map{(0...60_000_000).contains($0)} ?? true)}
+    var detail:RecorderOnsetDetail?=nil
+    var valid:Bool {(0...16).contains(keys) && (firstKeyAgeMicros.map{(0...60_000_000).contains($0)} ?? true) && (detail?.valid ?? true)}
 }
 struct RecorderFrame: Codable {
     let sequence, milliseconds, lane, kind, event, edge, category, inputOrigin: Int
@@ -371,10 +384,11 @@ struct RecorderTrace: Codable {
         guard rows.allSatisfy({ row in
             guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence"])==keys else{return false}
             if row.keys.contains("onsetEvidence") {
-                guard let value=row["onsetEvidence"] as? [String:Any],Set(value.keys).subtracting(["firstKeyAgeMicros"])==Set(["keys"]),value.values.allSatisfy({raw in
+                guard let value=row["onsetEvidence"] as? [String:Any],Set(value.keys).subtracting(["firstKeyAgeMicros","detail"])==Set(["keys"]),value.filter({$0.key != "detail"}).values.allSatisfy({raw in
                     guard let n=raw as? NSNumber else{return false}
                     return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
                 }) else{return false}
+                if let detail=value["detail"],!RecorderOnsetDetail.accepts(detail){return false}
             }
             if row.keys.contains("focusEvidence") {
                 guard let value=row["focusEvidence"] as? [String:Any],Set(value.keys)==RecorderFocusEvidence.keys,

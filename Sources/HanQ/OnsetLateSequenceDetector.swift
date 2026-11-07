@@ -4,21 +4,25 @@ import Foundation
 // requires the entire baseline, inserted text, caret and physical key history.
 enum OnsetLateSequenceDetector {
     enum Result { case waiting, complete, rejected, candidate(OnsetRecoveryPlan) }
+    enum Rejection:Int {case unmeasured=0,keyCount,selectionOrRange,layoutUnavailable,initialUnsupported,shiftedSpace,unmappedKey,missingMedial,bodyMismatch}
     static func inspect(keys:[(UInt16,Bool)],before:String,caret:Int,text:String,selection:NSRange,
-                        sourceID:String=KoreanKeyboardLayout.twoSetID,allowObservedReplay:Bool=false)->Result {
-        guard (2...16).contains(keys.count),caret>=0,caret<=before.utf16.count,selection.length==0,
-              let layout=KoreanKeyboardLayout.load(sourceID:sourceID),
-              let initial=OnsetKeyboardLayout.load(sourceID:sourceID),
-              !initial.variants(code:keys[0].0,shift:keys[0].1).isEmpty else{return .rejected}
+                        sourceID:String=KoreanKeyboardLayout.twoSetID,allowObservedReplay:Bool=false,
+                        onRejected:((Rejection)->Void)?=nil)->Result {
+        func reject(_ reason:Rejection)->Result{onRejected?(reason);return .rejected}
+        guard (2...16).contains(keys.count) else{return reject(.keyCount)}
+        guard caret>=0,caret<=before.utf16.count,selection.length==0 else{return reject(.selectionOrRange)}
+        guard let layout=KoreanKeyboardLayout.load(sourceID:sourceID),
+              let initial=OnsetKeyboardLayout.load(sourceID:sourceID) else{return reject(.layoutUnavailable)}
+        guard !initial.variants(code:keys[0].0,shift:keys[0].1).isEmpty else{return reject(.initialUnsupported)}
         var chars:[Character]=[]
         for (code,shift) in keys {
-            if code==49 {guard !shift else{return .rejected};chars.append(" ");continue}
-            guard PhysicalLetterKeys.printableCodes.contains(code) else{return .rejected}
+            if code==49 {guard !shift else{return reject(.shiftedSpace)};chars.append(" ");continue}
+            guard PhysicalLetterKeys.printableCodes.contains(code) else{return reject(.unmappedKey)}
             let char:Character?
             if layout.physicalKeys.isEmpty {
                 char=PhysicalLetterKeys.letters[code].flatMap{layout.keys[Character(shift ? $0.uppercased():$0)]}
             }else{char=(shift ? layout.shiftedPhysicalKeys:layout.physicalKeys)[code]}
-            guard let char else{return .rejected};chars.append(char)
+            guard let char else{return reject(.unmappedKey)};chars.append(char)
         }
         func medial(_ char:Character)->Bool {
             guard let scalar=char.unicodeScalars.first else{return false}
@@ -26,7 +30,7 @@ enum OnsetLateSequenceDetector {
         }
         // Three-set doubles an initial by repeating its key before the medial.
         // Final-only keys and runs without a medial never start a repair.
-        guard medial(chars[1]) || (layout.kind == .threeSet && chars.count>=3 && chars[1]==chars[0] && medial(chars[2])) else{return .rejected}
+        guard medial(chars[1]) || (layout.kind == .threeSet && chars.count>=3 && chars[1]==chars[0] && medial(chars[2])) else{return reject(.missingMedial)}
         func render(_ chars:ArraySlice<Character>)->String {
             let raw=String(chars)
             switch layout.kind {
@@ -56,6 +60,6 @@ enum OnsetLateSequenceDetector {
             let prefix=Array(chars.prefix(length))
             if view(render(prefix.prefix(1))+render(prefix.dropFirst())) {return .waiting}
         }
-        return .rejected
+        return reject(.bodyMismatch)
     }
 }

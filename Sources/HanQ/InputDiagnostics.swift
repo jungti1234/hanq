@@ -349,10 +349,17 @@ final class InputIncidentTrace {
         case proofCurrent,proofUnavailable,historyWaiting,historyComplete,historyRejected,historyCandidate,keysStillDown
         case claimRejected,claimAccepted,guardFailed,fieldChanged,reservationReleased,selectionNotWritable
     }
+    struct OnsetDetail:Codable {
+        // Fixed branch outcomes only. Observation age is capped at 60s.
+        let discovery,representation,lookup,history:Int
+        let observationAgeMicros:Int?
+        var signature:Int {(((discovery*14+representation)*13+lookup)*9+history)+1}
+    }
     struct OnsetEvidence:Codable {
         // 0 keys = unmeasured. nil age = no first-key clock or out of range.
         let keys:Int
         let firstKeyAgeMicros:Int?
+        var detail:OnsetDetail?=nil
     }
     enum HUDStage:Int {case requested=1,ordered,firstDraw,suppressed,unavailable}
     struct EventEvidence:Codable {
@@ -647,7 +654,7 @@ final class InputIncidentTrace {
     private var position=0,stored=0,sequence=0,overwritten=0,eventSequence=0
     private var identities:[Identity:Int]=[:]
     private var lastDecisions:[DecisionSite:DecisionReason]=[:]
-    private var lastOnsetDecisions:[Int:(first:Double,keys:Int)]=[:]
+    private var lastOnsetDecisions:[Int:(first:Double,keys:Int,detail:Int)]=[:]
     private var lastSourceEvidence:[Int:Int]=[:]
     private var shapes:[Lane:Shape]=[:]
     private var fields:[UInt:Int]=[:]
@@ -1289,7 +1296,7 @@ final class InputIncidentTrace {
     }
     // Existing numeric branch results only. No additional AX/source query,
     // event objects, synchronous lock or file I/O on the caller.
-    func onsetDecision(_ site:OnsetSite,_ reason:OnsetReason,firstTime:Double?=nil,keys:Int=0){
+    func onsetDecision(_ site:OnsetSite,_ reason:OnsetReason,firstTime:Double?=nil,keys:Int=0,detail:OnsetDetail?=nil){
         guard enabled,!IsSecureEventInputEnabled() else{return}
         let time=clock(),count=max(0,min(keys,16))
         let age=firstTime.flatMap{first -> Int? in
@@ -1298,13 +1305,14 @@ final class InputIncidentTrace {
         }
         _ = submit(.context,.onset,16+site.rawValue,observedAt:time){[self] timing in
             let code=site.rawValue*32+reason.rawValue
-            if let firstTime,let prior=lastOnsetDecisions[code],prior.first==firstTime,prior.keys==count {
+            let signature=detail?.signature ?? 0
+            if let firstTime,let prior=lastOnsetDecisions[code],prior.first==firstTime,prior.keys==count,prior.detail==signature {
                 observationCoalesced[observationCode(.context,.onset,16+site.rawValue),default:0]+=1
                 return
             }
-            if let firstTime{lastOnsetDecisions[code]=(firstTime,count)}
+            if let firstTime{lastOnsetDecisions[code]=(firstTime,count,signature)}
             append(.onset,.onsetDecision,observedAt:time,observationTiming:timing,edge:site.rawValue,category:reason.rawValue)
-            ring[(position-1+capacity)%capacity]?.onsetEvidence=OnsetEvidence(keys:count,firstKeyAgeMicros:age)
+            ring[(position-1+capacity)%capacity]?.onsetEvidence=OnsetEvidence(keys:count,firstKeyAgeMicros:age,detail:detail)
             updatePreservedLastFrame()
         }
     }

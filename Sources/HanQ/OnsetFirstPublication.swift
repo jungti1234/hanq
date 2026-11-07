@@ -19,9 +19,14 @@ extension OnsetRecoveryEngine {
     /// prior displayed value. This grants no edit/replay proof.
     @discardableResult
     func observeFirstPublication(_ passed:OnsetInputGate.PassedInput,_ snap:OnsetSnapshot)->Bool {
+        synchronizeWitnessDiagnostics()
         let first=passed.first
         guard firstPublication==nil,firstPublicationAttemptedTime != first.time else{return false}
-        func decision(_ reason:InputIncidentTrace.OnsetReason){decisionTrace.onsetDecision(.publication,reason,firstTime:first.time,keys:passed.keys.count)}
+        var rejection=OnsetLateSequenceDetector.Rejection.unmeasured
+        func decision(_ reason:InputIncidentTrace.OnsetReason){
+            decisionTrace.onsetDecision(.publication,reason,firstTime:first.time,keys:passed.keys.count,
+                detail:focusHandoff.witnessDetail(for:snap.element,history:rejection.rawValue))
+        }
         guard canBeginRepair() else{decision(.publicationBlocked);return false}
         guard currentSource()==first.sourceID else{decision(.sourceChanged);return false}
         guard let witness=focusHandoff.representationWitness(for:snap.element,before:first.time) else{decision(.representationMissing);return false}
@@ -44,7 +49,8 @@ extension OnsetRecoveryEngine {
             guard firstOnly else{decision(.firstBodyMismatch);return false}
         }else{
             guard case .candidate(let proof)=OnsetLateSequenceDetector.inspect(keys:passed.keys,before:"",caret:0,
-                text:snap.text,selection:snap.selection,sourceID:first.sourceID,allowObservedReplay:true),
+                text:snap.text,selection:snap.selection,sourceID:first.sourceID,allowObservedReplay:true,
+                onRejected:decisionTrace.enabled ? {rejection=$0}:nil),
                 proof.isObservedReplay else{decision(.firstBodyMismatch);return false}
         }
         firstPublication=OnsetFirstPublication(first:first,field:snap.element,isCurrent:witness.isCurrent)

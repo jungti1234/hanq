@@ -1,11 +1,20 @@
 import Foundation
 import ApplicationServices
+import Carbon
 
 var checks=0
-func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;if !value(){fputs("FAIL: \(message)\n",stderr);exit(1)}}
+var failureEvidence:(()->Void)?
+func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;if !value(){failureEvidence?();fputs("FAIL: \(message)\n",stderr);exit(1)}}
 func strict(_ capture:InputIncidentTrace.Capture)->Bool{(try? RecorderTrace.decode(JSONEncoder().encode(capture))) != nil}
 var time=100.0,captures:[InputIncidentTrace.Capture]=[]
 let trace=InputIncidentTrace(destination:nil,clock:{time},writer:{captures.append($0)})
+failureEvidence={
+    trace.flush()
+    fputs("ENV secureNow=\(IsSecureEventInputEnabled()) enabled=\(trace.enabled) generation=\(trace.collectionGeneration) onsetCounts=\(captures.map{$0.frames.filter{$0.kind == .onsetDecision}.count})\n",stderr)
+    if CommandLine.arguments.count>1 {
+        try? JSONEncoder().encode(captures).write(to:URL(fileURLWithPath:CommandLine.arguments[1]+".failure.json"))
+    }
+}
 trace.shape(.onsetAX,identity:1,count:1,selected:false,editing:false)
 trace.flush()
 for _ in 0..<200{trace.onsetDecision(.reservation,.baselineMissing,firstTime:99.9,keys:1)}

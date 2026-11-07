@@ -5,6 +5,15 @@ let onsetKoreanID="com.apple.inputmethod.Korean.2SetKorean"
 struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange }
 final class OnsetRecoveryEngine:NSObject {
     var decisionTrace=InputIncidentTrace.shared
+    private var witnessTraceID:ObjectIdentifier?
+    private var witnessDiagnosticGeneration:Int32=0
+    func synchronizeWitnessDiagnostics(){
+        let generation=decisionTrace.collectionGeneration,traceID=ObjectIdentifier(decisionTrace)
+        if witnessTraceID != traceID || witnessDiagnosticGeneration != generation {
+            focusHandoff.resetWitnessDiagnostics();witnessTraceID=traceID;witnessDiagnosticGeneration=generation
+        }
+        focusHandoff.collectWitnessDiagnostics=generation>0
+    }
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
     var canBeginRepair: () -> Bool = { true }
     var willBeginRepair: () -> Void = {}
@@ -233,10 +242,11 @@ final class OnsetRecoveryEngine:NSObject {
         let allowObservedReplay = !committedBoundary && ((baseline != nil && baseline!.selection.location==baseline!.text.utf16.count)
             || firstPublication?.matches(p,snap) == true)
         if allowObservedReplay,Self.awaitingEmptyEntryPublication(baseline,current:snap){return true}
-        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay) {
+        var rejection=OnsetLateSequenceDetector.Rejection.unmeasured
+        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
         case .waiting:decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_wait",hasSnapshot:true);return true
         case .complete:decisionTrace.onsetDecision(.history,.historyComplete,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
-        case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
+        case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count,detail:focusHandoff.witnessDetail(for:snap.element,history:rejection.rawValue));traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
         case .candidate(let candidate):
             decisionTrace.onsetDecision(.history,.historyCandidate,firstTime:p.first.time,keys:p.keys.count)
             traceReentryObservation("history_candidate",hasSnapshot:true)
@@ -407,11 +417,12 @@ final class OnsetRecoveryEngine:NSObject {
         }
     }
     func observeFocusHandoff(){
-        guard testSnapshot==nil,let target,!target.isTerminated,
-              let ax,
-              canBeginRepair(),focusAccess.currentPID()==target.processIdentifier,
-              let raw=attr(ax,kAXFocusedWindowAttribute),CFGetTypeID(raw)==AXUIElementGetTypeID(),
-              let outside=focusAccess.focusedElement(application:ax,pid:target.processIdentifier) else{return}
+        synchronizeWitnessDiagnostics()
+        guard testSnapshot==nil else{return}
+        guard let target,!target.isTerminated,let ax,
+              canBeginRepair(),focusAccess.currentPID()==target.processIdentifier else{focusHandoff.noteDiscovery(1);return}
+        guard let raw=attr(ax,kAXFocusedWindowAttribute),CFGetTypeID(raw)==AXUIElementGetTypeID() else{focusHandoff.noteDiscovery(2);return}
+        guard let outside=focusAccess.focusedElement(application:ax,pid:target.processIdentifier) else{focusHandoff.noteDiscovery(3);return}
         let window=raw as! AXUIElement
         if let observer=axObserver,focusLayoutWindow.map({!CFEqual($0,window)}) ?? true {
             if let old=focusLayoutWindow{AXObserverRemoveNotification(observer,old,kAXLayoutChangedNotification as CFString)}
@@ -788,6 +799,7 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func sample(){
         guard enabled,!recovering else{return}
+        synchronizeWitnessDiagnostics()
         if currentLayout() == nil,gate?.reservation() == nil {
             cancelDeferredObservation()
             gate?.configurePassedBaseline(nil)
