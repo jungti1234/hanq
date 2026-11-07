@@ -78,7 +78,7 @@ ONSET_LOOKUP=['unmeasured','available','no_same_field_record','no_pre_key_record
 ONSET_HISTORY=['unmeasured','key_count','selection_or_range','layout_unavailable','initial_unsupported','shifted_space','unmapped_key','missing_medial','body_mismatch']
 
 ONSET_OUTSIDE_NAMES={
-    'switchKey':'unmeasured matched no_switch timestamp_missing first_not_seen first_differs expired app_changed original_window_missing current_window_missing window_changed layout_not_ready first_window_missing first_window_changed'.split(),
+    'switchKey':'unmeasured matched no_switch timestamp_missing first_not_seen first_differs expired app_changed original_window_missing current_window_missing window_changed layout_not_ready first_window_missing first_window_changed matched_pre_switch_window'.split(),
     'draftRead':'unmeasured recorded attributes_unavailable role_unavailable text_unavailable too_large not_enabled visibility_unproven window_unproven selection_unreadable context_unproven caret_unproven deadline observer_missing'.split(),
     'draftLookup':'not_checked verified_entry verified_draft no_field_record no_pre_key_record expired window_unavailable window_changed unusable'.split(),
     'insertedSpan':'not_checked range_invalid first_not_roman surroundings_changed keys_differ partial matched'.split(),

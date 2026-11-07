@@ -241,7 +241,7 @@ final class OnsetRecoveryEngine:NSObject {
         // first original event from the explicit unfocused switch.
         let considerOutside = !publicationMatches && p.first.sourceID==onsetKoreanID
         var switchCheck:InputIncidentTrace.SwitchKeyCheck = considerOutside ? unfocusedKeyCheck(p.first.eventTimestamp,false):.unmeasured
-        let fromOutside = switchCheck == .matched
+        let fromOutside = switchCheck.allowsReplay
         let measure=considerOutside && focusHandoff.collectWitnessDiagnostics
         var lookup=InputIncidentTrace.DraftLookup.unmeasured
         var span=InputIncidentTrace.InsertedSpan.unmeasured
@@ -288,7 +288,7 @@ final class OnsetRecoveryEngine:NSObject {
                 // output yet. Wait without owning keys until the layout agrees.
                 let allRoman=candidate.roman.utf8.allSatisfy{$0<128}
                 switchCheck=unfocusedKeyCheck(p.first.eventTimestamp,allRoman)
-                guard switchCheck == .matched else{
+                guard switchCheck.allowsReplay else{
                     if measure{decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count,detail:outsideDetail())}
                     return true
                 }

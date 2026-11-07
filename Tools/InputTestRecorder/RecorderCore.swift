@@ -145,7 +145,7 @@ struct RecorderOnsetDetail:Codable {
     private var validOutside:Bool {
         if switchKey==nil,draftRead==nil,draftLookup==nil,insertedSpan==nil{return true}
         guard let k=switchKey,let r=draftRead,let l=draftLookup,let s=insertedSpan else{return false}
-        return (0...13).contains(k) && (0...13).contains(r) && (0...8).contains(l) && (0...6).contains(s)
+        return (0...14).contains(k) && (0...13).contains(r) && (0...8).contains(l) && (0...6).contains(s)
     }
     var valid:Bool {validOutside && (0...9).contains(discovery) && (0...13).contains(representation) && (0...12).contains(lookup) && (0...8).contains(history) && (observationAgeMicros.map{(0...60_000_000).contains($0)} ?? true)}
     static func accepts(_ raw:Any)->Bool {

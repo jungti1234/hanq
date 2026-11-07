@@ -16,6 +16,8 @@ final class SourceSwitchBarrier {
     struct Snapshot { let field:AXUIElement; let text:String; let selection:NSRange }
     static let marker:Int64 = 0x4851535749544348
     var read:()->Snapshot? = {nil}
+    struct SwitchWindow {let pid:pid_t,window:AXUIElement,stamp:CGEventTimestamp,at:Double}
+    var readForOutsideSwitch:(()->(Snapshot?,(pid_t,AXUIElement)?))?
     var readFocus:(()->AXUIElement?)?
     // Only an explicit switch can arm this guard. A layout report cannot
     // authorize an edit to text the application already owns.
@@ -33,6 +35,7 @@ final class SourceSwitchBarrier {
     private struct UnfocusedSwitch {
         let began:Double, pid:pid_t
         let window:AXUIElement?
+        var usedPrior=false
         var first:CGEventTimestamp=0
         var sampled=0
         var firstCheck=InputIncidentTrace.SwitchKeyCheck.firstNotSeen
@@ -48,9 +51,16 @@ final class SourceSwitchBarrier {
         return (raw as! AXUIElement)
     }
 
-    func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp) {
+    func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp,prior:SwitchWindow?=nil) {
+        unfocusedSwitch=nil
         guard id==KoreanKeyboardLayout.twoSetID,timestamp != 0,let pid=frontPID() else{return}
-        unfocusedSwitch=UnfocusedSwitch(began:now(),pid:pid,window:frontWindow(pid))
+        let began=now(),current=frontWindow(pid)
+        if let prior {
+            guard prior.pid==pid,prior.stamp==timestamp,
+                  current.map({CFEqual($0,prior.window)}) != false else{return}
+            if current==nil,!(0...0.15).contains(now()-prior.at){return}
+        }
+        unfocusedSwitch=UnfocusedSwitch(began:began,pid:pid,window:current ?? prior?.window,usedPrior:current==nil && prior != nil)
     }
     func cancelUnfocusedSwitch(){unfocusedSwitch=nil}
     func unfocusedKeyCheck(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->InputIncidentTrace.SwitchKeyCheck {
@@ -64,7 +74,7 @@ final class SourceSwitchBarrier {
         guard let current=frontWindow(attempt.pid) else{return .currentWindowMissing}
         guard CFEqual(original,current) else{return .windowChanged}
         guard !needsReadyLayout || initialLayout?() == .ready else{return .layoutNotReady}
-        return .matched
+        return attempt.usedPrior ? .matchedPreSwitchWindow:.matched
     }
     // Only remember the identity of a key that is passing normally. Changing
     // focus on that first key is application behavior; never hold it here.
@@ -718,7 +728,7 @@ final class SourceSwitchBarrier {
         guard queued.count<256,let copy=event.copy() else{fail("buffer_limit");return false}
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
-    @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0)->Bool {
+    @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
         cancelUnfocusedSwitch()
         if heldStart != nil{fail("initial_source_changed")}
         entry=nil;nativeBatch=nil
@@ -729,7 +739,16 @@ final class SourceSwitchBarrier {
             busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1;waitReason=nil;lastTextMatch=nil
             beginDiagnosticRequest(at:deadline-1);trace("waiting_for_editor");schedule();return true
         }
-        if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
+        if ledger == nil {
+            let snap:Snapshot?
+            if let recordWindow,let readForOutsideSwitch,id==KoreanKeyboardLayout.twoSetID,timestamp != 0,
+               !busy,isReady(),!externalEditPending,repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay {
+                let at=now(),(editor,origin)=readForOutsideSwitch()
+                snap=editor
+                if editor==nil,let (pid,window)=origin{recordWindow(SwitchWindow(pid:pid,window:window,stamp:timestamp,at:at))}
+            }else{snap=read()}
+            if let snap{field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
+        }
         guard field != nil,ledger != nil else{return false}
         if !busy { transactionField=field }
         busy=true;target=id;targetTimestamp=timestamp;deadline=now()+1.0;waitReason=nil;lastTextMatch=nil;beginDiagnosticRequest(at:deadline-1);trace("waiting_for_editor");schedule();return true

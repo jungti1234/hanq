@@ -115,11 +115,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.inputSourceEvidence.didCommit(id,at:timestamp)
             InputIncidentTrace.shared.sourceEvidence(.committed,self.inputSourceEvidence.diagnostic(selected:id))
         }
-        barrier.read = { [weak self] in
+        let read:(((pid_t,AXUIElement)->Void)?)->SourceSwitchBarrier.Snapshot? = { [weak self] observe in
             guard let self,self.permissionGranted,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
             self.mismatchRecovery.engine.followFrontmost()
-            guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true) else{return nil}
+            guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true,observeOutsideWindow:observe) else{return nil}
             return SourceSwitchBarrier.Snapshot(field:snap.element,text:snap.text,selection:snap.selection)
+        }
+        barrier.read={read(nil)}
+        barrier.readForOutsideSwitch={
+            var origin:(pid_t,AXUIElement)?
+            let editor=read{origin=($0,$1)}
+            return (editor,origin)
         }
         barrier.ready = { [weak self] in
             guard let self else{return false}
@@ -509,12 +515,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // preceding candidate alive until the barrier verifies its repair.
         inputSourceEvidence.request(target,at:timestamp)
         InputIncidentTrace.shared.sourceEvidence(.requested,inputSourceEvidence.diagnostic(selected:InputSourceAccess.currentID()))
-        if sourceSwitchBarrier.request(target,at:timestamp) { return noErr }
+        var priorWindow:SourceSwitchBarrier.SwitchWindow?
+        if sourceSwitchBarrier.request(target,at:timestamp,recordWindow:{priorWindow=$0}) { return noErr }
         mismatchRecovery.engine.noteUserSourceSwitch(at: timestamp)
         let result=selectionSourceSwitch.select(target)
         if result==noErr,!selectionSourceSwitch.isPending,InputSourceAccess.currentID()==target {
             inputSourceEvidence.didCommit(target,at:timestamp)
-            sourceSwitchBarrier.didSwitchWithoutField(target,at:timestamp)
+            sourceSwitchBarrier.didSwitchWithoutField(target,at:timestamp,prior:priorWindow)
             InputIncidentTrace.shared.sourceEvidence(.committed,inputSourceEvidence.diagnostic(selected:target))
         }
         return result

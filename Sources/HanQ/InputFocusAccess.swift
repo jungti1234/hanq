@@ -120,6 +120,36 @@ final class InputFocusAccess {
         return pid
     }
 
+    private static let outsideRoles=[kAXGroupRole,kAXButtonRole,kAXWindowRole,"AXWebArea",kAXScrollAreaRole,kAXToolbarRole]
+
+    // Called only after the ordinary four-attribute read found a non-editor.
+    // Keep the editable path intact even for applications with limited AX batches.
+    static func readOutsideWindow(pid:pid_t,element:AXUIElement,role:String,subrole:String?)->AXUIElement? {
+        guard outsideRoles.contains(role),subrole != "AXSecureTextField",
+              AXUIElementSetMessagingTimeout(element,0.01) == .success else{return nil}
+        defer {AXUIElementSetMessagingTimeout(element,0.05)} // focusedElement sets this timeout
+        let names=[kAXRoleAttribute,kAXSubroleAttribute,kAXFocusedAttribute,kAXWindowAttribute] as CFArray
+        var values:CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(element,names,[],&values) == .success,
+              let list=values as? [AnyObject],list.count==4,list[0] as? String==role else{return nil}
+        return outsideWindow(pid:pid,element:element,role:role,subrole:list[1] as? String,focused:list[2],window:list[3])
+    }
+
+    // Only an explicit switch asks for these attributes. Never derive a window
+    // from a text value, an unfocused sibling, or a different process.
+    static func outsideWindow(pid:pid_t,element:AXUIElement,role:String,subrole:String?,
+                              focused:CFTypeRef,window:CFTypeRef,
+                              owner:(AXUIElement)->pid_t? = InputFocusAccess.owner(of:))->AXUIElement? {
+        guard pid>0,subrole != "AXSecureTextField",
+              outsideRoles.contains(role),
+              CFGetTypeID(focused)==CFBooleanGetTypeID(),CFEqual(focused,kCFBooleanTrue),
+              owner(element)==pid else{return nil}
+        if role==kAXWindowRole{return element}
+        guard CFGetTypeID(window)==AXUIElementGetTypeID() else{return nil}
+        let ref=window as! AXUIElement
+        return owner(ref)==pid ? ref:nil
+    }
+
     func currentPID() -> pid_t? {
         if let element = read(system) {
             let owner=Self.owner(of:element);observeFocus?(element,owner,1);return owner

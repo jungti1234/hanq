@@ -232,7 +232,7 @@ for (keys,visible,word) in [([UInt16(15),40],"rk","가"),([15,40],"rㅏ","가"),
     for (left,right) in [("",""),("기존🙂 ",""),("앞🙂"," 뒤"),("r","")] {
         let c=Case(label:left+right,priorCaret:left.utf16.count)
         c.prefix=left;c.suffix=right
-        c.e.unfocusedKeyCheck={stamp,_ in stamp != 0 ? .matched:.timestampMissing}
+        c.e.unfocusedKeyCheck={stamp,_ in stamp == 0 ? .timestampMissing:(left.isEmpty ? .matched:.matchedPreSwitchWindow)}
         for code in keys {c.original(code,true);c.original(code,false)}
         c.visible=true;c.text=left+visible+right;c.selection=NSRange(location:left.utf16.count+visible.utf16.count,length:0)
         c.e.sample();c.spin()
@@ -246,7 +246,7 @@ for mode in ["missing_switch","restored_draft","unverified_line","changed_surrou
     let prior=mode=="restored_draft" ? "previous display":(mode=="unverified_line" ? "\n":"앞")
     let anchored = !["restored_draft","unverified_line"].contains(mode)
     let c=Case(label:prior,priorCaret:anchored ? prior.utf16.count:0)
-    c.e.unfocusedKeyCheck={_,ready in mode=="missing_switch" ? .noSwitch:(mode=="still_ABC" && ready ? .layoutNotReady:.matched)}
+    c.e.unfocusedKeyCheck={_,ready in mode=="missing_switch" ? .noSwitch:(mode=="still_ABC" && ready ? .layoutNotReady:.matchedPreSwitchWindow)}
     c.original(15,true);c.original(15,false)
     if mode != "single_key"{c.original(40,true);c.original(40,false)}
     c.changedField=mode=="different_field";c.changedWindow=mode=="moved_window"
@@ -258,25 +258,26 @@ for mode in ["missing_switch","restored_draft","unverified_line","changed_surrou
 }
 // The same visible body can result from independent failures. Have the engine
 // obtain its own pre-key record and validate the actual exported decision.
-for mode in ["matched","no_switch","other_first","unknown_visibility","old_draft","moved_caret"] {
+for mode in ["matched","matched_prior","no_switch","other_first","unknown_visibility","old_draft","moved_caret"] {
     var captures:[InputIncidentTrace.Capture]=[]
     let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
     let left="앞🙂:",right=":끝",body=left+"rㅏ"+right
     let c=Case(label:left+right,priorCaret:left.utf16.count,visibilityKnown:mode != "unknown_visibility",trace:trace)
     c.prefix=left;c.suffix=right
-    c.e.unfocusedKeyCheck={_,_ in mode=="no_switch" ? .noSwitch:mode=="other_first" ? .firstDiffers:.matched}
+    c.e.unfocusedKeyCheck={_,_ in mode=="no_switch" ? .noSwitch:mode=="other_first" ? .firstDiffers:mode=="matched_prior" ? .matchedPreSwitchWindow:.matched}
     c.original(15,true);c.original(15,false);c.original(40,true);c.original(40,false)
     c.visible=true;c.text=mode=="old_draft" ? "옛 초안 rㅏ":body
     c.selection=NSRange(location:mode=="old_draft" ? c.text.utf16.count:mode=="moved_caret" ? 0:left.utf16.count+2,length:0)
     c.e.sample();c.spin();trace.flush();trace.mark();trace.flush()
     let measured=captures.flatMap{$0.frames}.filter{$0.kind == .onsetDecision && $0.onsetEvidence?.keys==2}.compactMap{$0.onsetEvidence?.detail}.last{$0.switchKey != nil}
-    let key=mode=="no_switch" ? 2:mode=="other_first" ? 5:1
-    let lookup=key != 1 ? 0:mode=="unknown_visibility" ? 3:2
-    let span=mode=="matched" ? 6:mode=="old_draft" ? 2:mode=="moved_caret" ? 1:0
+    let success=["matched","matched_prior"].contains(mode)
+    let key=mode=="no_switch" ? 2:mode=="other_first" ? 5:mode=="matched_prior" ? 14:1
+    let lookup = ![1,14].contains(key) ? 0:mode=="unknown_visibility" ? 3:2
+    let span=success ? 6:mode=="old_draft" ? 2:mode=="moved_caret" ? 1:0
     check(measured?.switchKey==key && measured?.draftRead==(mode=="unknown_visibility" ? 7:1) && measured?.draftLookup==lookup,"independent switch, pre-key read and lookup: \(mode) (\(String(describing:measured)))")
     if mode=="old_draft"{check([2,3].contains(measured?.insertedSpan ?? -1),"restored draft never grants a span")}
     else{check(measured?.insertedSpan==span,"exact span diagnosis: \(mode)")}
-    check(c.posts.filter{$0.1}.count==(mode=="matched" ? 2:0) && c.text==(mode=="matched" ? left+"가"+right:mode=="old_draft" ? "옛 초안 rㅏ":body),"only proven text repairs: \(mode)")
+    check(c.posts.filter{$0.1}.count==(success ? 2:0) && c.text==(success ? left+"가"+right:mode=="old_draft" ? "옛 초안 rㅏ":body),"only proven text repairs: \(mode)")
     c.close();trace.stopAndFlush()
 }
 print("\(failures==0 ? "PASS":"FAIL") \(checks) two-key first-publication engine/gate checks; no OS keys posted")

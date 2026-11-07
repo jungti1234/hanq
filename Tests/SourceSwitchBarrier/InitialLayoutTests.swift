@@ -36,6 +36,46 @@ func runInitialLayoutTests(){
         _=b.receive(.keyDown,first);_=b.request(abc,at:3000)
         check(b.unfocusedKeyCheck(1000) != .matched && !b.busy,"another source switch invalidates the observation")
     }
+    // Simulate an unavailable post-switch window with three independent
+    // observation points. No OS keys, actual window focus or writes.
+    do {
+        let root=AXUIElementCreateApplication(4104),component=AXUIElementCreateApplication(4105),other=AXUIElementCreateApplication(4106)
+        let own:(AXUIElement)->pid_t?={CFEqual($0,other) ? 92:91}
+        func get(_ role:String,_ focus:CFTypeRef,_ window:CFTypeRef,_ subrole:String?=nil)->AXUIElement? {
+            InputFocusAccess.outsideWindow(pid:91,element:component,role:role,subrole:subrole,focused:focus,window:window,owner:own)
+        }
+        check(get(kAXGroupRole,kCFBooleanTrue,root).map{CFEqual($0,root)}==true,"a focused outside node attests its own window")
+        check(get(kAXWindowRole,kCFBooleanTrue,kCFNull).map{CFEqual($0,component)}==true,"focused window may attest itself")
+        for invalid in [get(kAXTextFieldRole,kCFBooleanTrue,root),get(kAXGroupRole,kCFBooleanFalse,root),get(kAXGroupRole,NSNumber(value:1),root),get(kAXGroupRole,kCFBooleanTrue,other),get(kAXGroupRole,kCFBooleanTrue,kCFNull),get(kAXGroupRole,kCFBooleanTrue,root,"AXSecureTextField")] {
+            check(invalid==nil,"unfocused, editable, secure, foreign or unavailable witnesses fail closed")
+        }
+        for mode in ["prior","direct","direct_slow","conflict","foreign","expired","wrong_request","first_missing","first_moved","last_missing","last_moved","missing_both","other_source","unknown_timestamp","busy_recovery"] {
+            let b=B();var time=10.0,pid:pid_t=91,reads=0,posts=0
+            var window:AXUIElement?=["direct","direct_slow"].contains(mode) ? root:mode=="conflict" ? other:nil
+            b.now={time};b.frontPID={pid};b.frontWindow={_ in window};b.read={nil};b.initialLayout={.ready};b.ready={mode != "busy_recovery"}
+            b.readForOutsideSwitch={reads+=1;return(nil,mode=="missing_both" ? nil:(pid,root))}
+            b.send={_ in posts+=1}
+            let id=mode=="other_source" ? abc:ko, stamp:UInt64=mode=="unknown_timestamp" ? 0:900
+            var prior:B.SwitchWindow?
+            check(!b.request(id,at:stamp,recordWindow:{prior=$0}),"outside remains a direct switch")
+            check(reads==(["other_source","unknown_timestamp","busy_recovery"].contains(mode) ? 0:1),"no extra snapshot outside explicit eligible switches")
+            time+=["expired","direct_slow"].contains(mode) ? 0.16:0.01
+            if mode=="foreign"{pid=92}
+            b.didSwitchWithoutField(id,at:mode=="wrong_request" ? 901:stamp,prior:prior)
+            window=mode=="first_missing" ? nil:mode=="first_moved" ? other:root
+            let first=key(15);first.timestamp=1000
+            check(!b.receive(.keyDown,first),"initial key is always delivered")
+            window=mode=="last_missing" ? nil:mode=="last_moved" ? other:root
+            let result=b.unfocusedKeyCheck(first.timestamp,needsReadyLayout:true)
+            if mode=="prior" {
+                check(result == .matchedPreSwitchWindow && result.allowsReplay,"same original window required at first key and before repair")
+                b.initialLayout={.conflicting}
+                check(!b.unfocusedKeyCheck(first.timestamp,needsReadyLayout:true).allowsReplay,"an unready native layout prevents replay")
+            }else if ["direct","direct_slow"].contains(mode){check(result == .matched,"original direct path retained")}
+            else{check(!result.allowsReplay,"moved, absent or stale evidence never allows editing: \(mode)")}
+            check(posts==0,"observation does not post a key")
+        }
+    }
     final class Rig {
         let b=B()
         let f=AXUIElementCreateApplication(91),w=AXUIElementCreateApplication(92),other=AXUIElementCreateApplication(93)

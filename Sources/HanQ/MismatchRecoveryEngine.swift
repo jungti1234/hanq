@@ -374,7 +374,7 @@ final class MismatchRecoveryEngine:NSObject {
     static func supportsSnapshotRole(_ role:String,includeContent:Bool,allowComboBox:Bool)->Bool {
         ["AXTextArea","AXTextField"].contains(role) || (allowComboBox && includeContent && role=="AXComboBox")
     }
-    func snapshot(includeContent:Bool=true,allowComboBox:Bool=false)->MismatchSnapshot?{
+    func snapshot(includeContent:Bool=true,allowComboBox:Bool=false,observeOutsideWindow:((pid_t,AXUIElement)->Void)?=nil)->MismatchSnapshot?{
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
         var incidentMeasured=false
         let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
@@ -417,7 +417,12 @@ final class MismatchRecoveryEngine:NSObject {
         guard result == .success,let list=values as? [AnyObject],list.count==(includeContent ? 4:2) else{unavailableReason="attribute_batch_unreadable";return nil}
         if incidentMeasured {focusRead?.observedRole(list[0] as? String)}
         guard let role=list[0] as? String else{unavailableReason="role_unreadable";return nil}
-        guard Self.supportsSnapshotRole(role,includeContent:includeContent,allowComboBox:allowComboBox) else{unavailableReason="not_supported_text_field";return nil}
+        guard Self.supportsSnapshotRole(role,includeContent:includeContent,allowComboBox:allowComboBox) else{
+            if includeContent,let observeOutsideWindow,let w=InputFocusAccess.readOutsideWindow(pid:target.processIdentifier,element:element,role:role,subrole:list[1] as? String){
+                observeOutsideWindow(target.processIdentifier,w)
+            }
+            unavailableReason="not_supported_text_field";return nil
+        }
         guard list[1] as? String != "AXSecureTextField" else{unavailableReason="secure_text_field";return nil}
         if !includeContent{return MismatchSnapshot(element:element,text:"",selection:NSRange(location:0,length:0))}
         guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{unavailableReason="text_unreadable";return nil}
