@@ -5,6 +5,7 @@ import Carbon
 final class OnsetRecoveryController: NSObject {
     var canRun: () -> Bool = { false }
     var canBeginRepair: () -> Bool = { true }
+    var permitsUnfocusedReplay:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->Bool = {_,_ in false}
     var willBeginRepair: () -> Void = {}
     var willReplay: (AXUIElement,String,Int) -> Void = {_,_,_ in}
     var didPostReplayEvent: (CGEvent) -> Void = {_ in}
@@ -29,6 +30,7 @@ final class OnsetRecoveryController: NSObject {
         next.retainedInput=(old?.retainedInput ?? [])+(old?.pending ?? [])
         old?.pending=[];old?.retainedInput=[]
         next.canBeginRepair = { [weak self] in self?.canBeginRepair() ?? false }
+        next.permitsUnfocusedReplay = { [weak self] in self?.permitsUnfocusedReplay($0,$1) ?? false }
         next.willBeginRepair = { [weak self] in self?.willBeginRepair() }
         next.willReplay = { [weak self] field,text,caret in self?.willReplay(field,text,caret) }
         next.didPostReplayEvent = { [weak self] event in self?.didPostReplayEvent(event) }

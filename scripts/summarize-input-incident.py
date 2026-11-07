@@ -294,6 +294,8 @@ def summarize(data):
     overlap_starts=0
     maxima=collections.defaultdict(int)
     boundary_stages=collections.Counter()
+    unfocused_layout_samples=[]
+    outside_layouts={39:'two_set_selected_ABC_layout_no_override',40:'two_set_layout_ready',41:'layout_unknown_or_inconsistent',42:'selected_source_changed'}
     manual_edit_stages=collections.Counter()
     wait_reasons={13:'snapshot',14:'text',15:'caret',16:'repair',17:'repair_receipt',18:'onset_receipt',19:'replay_receipt',20:'focus',21:'selection_commit',22:'source_commit'}
     boundary_waits=collections.Counter()
@@ -365,9 +367,13 @@ def summarize(data):
                 except (ValueError,TypeError):raise ValueError('invalid observation code')
                 if str(code)!=key or not 0<=code<2560 or type(n) is not int or n<=0:raise ValueError('invalid observation code/count')
                 operation,rest=divmod(code,256);lane,detail=divmod(rest,32)
-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0,31]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else range(1,32) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
-                if not valid or (group=='coalesced' and not (operation==3 or (operation==5 and ((lane==3 and detail>0) or (lane==2 and 17<=detail<=20))))):raise ValueError('invalid observation detail')
+                # Build 366 encoded appended boundary codes into the next lane.
+                # The marker producer uses the main lane, so these HID slots are identifiable.
+                legacy_boundary=(str(data.get('build'))=='366' and operation==7 and lane==0 and 0<=detail<=6)
+                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0,31]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else (range(32) if lane==7 else range(1,32)) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
+                if (not valid and not legacy_boundary) or (group=='coalesced' and not (operation==3 or (operation==5 and ((lane==3 and detail>0) or (lane==2 and 17<=detail<=20))))):raise ValueError('invalid observation detail')
                 row=dict(operation=names[operation],lane=lanes[lane+1],detail=detail,count=n)
+                if legacy_boundary:row.update(operation="source_boundary",lane="source_boundary",detail=32+detail)
                 if operation==5 and lane<3 and 8<=detail<=12:row.update(control_role=CONTROL_ROLES[detail-8])
                 if operation==0:row.update(edge={1:'down',2:'up',3:'other'}[detail%4],consumed=detail>=4)
                 if operation==9:row.update(trigger=triggers[detail%8],reason=('post_capture' if detail>=24 else 'capture') if group=='processed' else 'pending_capture' if detail<8 else 'automatic_interval' if detail<16 else 'manual_limit')
@@ -475,7 +481,7 @@ def summarize(data):
             source_evidence_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],action=source_actions[frame['edge']],**value))
         if frame['kind']==9:
             op=frame['category'];detail=frame['edge']
-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else range(1,32) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
+            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
             if not observed or not 1<=op<=10 or detail not in allowed or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False):raise ValueError('invalid observation wait frame')
         if frame['kind']==8:
             site=decision_sites.get(frame['edge'],'unknown')
@@ -496,6 +502,8 @@ def summarize(data):
             state_counts[lane][str(frame['category'])]+=1
             pending_max[lane]=max(pending_max[lane],frame.get('count',0))
         if frame['kind']==7:
+            if frame['category'] in outside_layouts:
+                unfocused_layout_samples.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],layout=outside_layouts[frame['category']]))
             if frame['category'] in [29,30,31]:manual_edit_stages[{29:'started',30:'verified',31:'unverified'}[frame['category']]]+=1
             boundary_stages[str(frame['category'])]+=1
             if frame['category'] in wait_reasons:boundary_waits[wait_reasons[frame['category']]]+=1
@@ -537,6 +545,7 @@ def summarize(data):
             'snapshot_focus_observations':focus_rows,'snapshot_read_outcomes':read_rows,'snapshot_read_outcome_counts':dict(collections.Counter(r['lane']+':'+r['outcome'] for r in read_rows)),
             'space_observations':None if preservation is None else [dict(r,reason={1:'rapid_space_downs',2:'space_consumed',3:'hanq_replay_marker',4:'repeat_flag'}[r['detail']],interpretation='observation_only_not_duplicate_text_or_root_cause') for r in preservation['requests'] if r['trigger']==7],
             'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
+            'unfocused_switch_layout_samples':unfocused_layout_samples,
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,

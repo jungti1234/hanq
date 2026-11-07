@@ -4,6 +4,7 @@ var checks=0,failures=0
 func check(_ value:Bool,_ name:String){checks+=1;if !value{failures+=1;print("FAIL",name)}}
 func key(_ code:UInt16,_ down:Bool,shift:Bool=false)->CGEvent {
     let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!
+    event.timestamp=DispatchTime.now().uptimeNanoseconds
     event.flags=shift ? .maskShift:[];return event
 }
 
@@ -18,7 +19,8 @@ final class Case {
     var commands=0,writes=0,selections=0,originals=0
     var posts:[(UInt16,Bool)]=[],replayChars=""
     var changedField=false,changedWindow=false
-    init(sourceID:String=KoreanKeyboardLayout.twoSetID,label:String="arbitrary presentation",role:String=kAXTextAreaRole){
+    var prefix="", suffix=""
+    init(sourceID:String=KoreanKeyboardLayout.twoSetID,label:String="arbitrary presentation",role:String=kAXTextAreaRole,priorCaret:Int=0){
         source=sourceID
         g=OnsetInputGate(marker:e.marker);g.beat();g.enableReentryTrace()
         e.enabled=true;e.gate=g;e.testSource={self.source};e.testTargetBundleID={self.bundle}
@@ -32,7 +34,7 @@ final class Case {
         e.testReplaceText={_,_ in self.writes+=1;return .failure}
         e.testPostCompositionCommit={_,event in
             self.commands+=1
-            if event.type == .keyUp{self.selection=NSRange(location:self.text.utf16.count-1,length:0)}
+            if event.type == .keyUp{self.selection=NSRange(location:self.selection.location-1,length:0)}
             return true
         }
         e.testPost={event in
@@ -51,7 +53,8 @@ final class Case {
                 case .threeSet:self.text=JamoComposer.composeNativeThreeSet(self.replayChars)
                 case .gongjinRoman,.hncRoman:self.text=JamoComposer.composeRomanized(self.replayChars,kind:layout.kind)
                 }
-                self.selection=NSRange(location:self.text.utf16.count,length:0)
+                self.selection=NSRange(location:self.prefix.utf16.count+self.text.utf16.count,length:0)
+                self.text=self.prefix+self.text+self.suffix
             }
         }
         let root=AXUIElementCreateApplication(91003),outside=AXUIElementCreateApplication(91004)
@@ -64,15 +67,20 @@ final class Case {
             if name==kAXWindowAttribute{return self.changedWindow ? self.other:root}
             if name==kAXValueAttribute{return label as CFString}
             if name==kAXNumberOfCharactersAttribute{return NSNumber(value:label.utf16.count)}
-            if name==kAXSelectedTextRangeAttribute{var range=CFRange(location:0,length:0);return AXValueCreate(.cfRange,&range)!}
+            if name==kAXSelectedTextRangeAttribute{var range=CFRange(location:priorCaret,length:0);return AXValueCreate(.cfRange,&range)!}
             if name==kAXEnabledAttribute{return kCFBooleanTrue}
             if name=="AXHidden"{return kCFBooleanFalse}
             return nil
         }
         h.batch={element,names in names.map{h.read(element,$0)}}
         h.advance(window:root,outside:outside)
-        check(h.candidate==nil,"nonempty presentation is not an empty/focus proof")
-        check(h.representedEntry(for:field,before:ProcessInfo.processInfo.systemUptime) != nil,"read-only prior representation captured")
+        if !label.isEmpty && priorCaret==0 {
+            check(h.candidate==nil,"nonempty presentation is not an empty/focus proof")
+            check(h.representedEntry(for:field,before:ProcessInfo.processInfo.systemUptime) != nil,"read-only prior representation captured")
+        }
+        e.outsideObservation.read=h.read
+        h.observeSnapshot={ [weak self] snap in self?.e.outsideObservation.remember(snap,window:root) }
+        if priorCaret>0{e.outsideObservation.remember(.init(element:field,text:label,selection:NSRange(location:priorCaret,length:0)),window:root)}
         e.sample()
     }
     func original(_ code:UInt16,_ down:Bool,shift:Bool=false){
@@ -214,6 +222,38 @@ for firstBeforeSecond in [false,true] {
     check(c.writes==0 && !c.e.recovering && c.e.pending.isEmpty && c.e.retainedInput.isEmpty && c.g.held.isEmpty,"following composition drains without text write or retained input")
     c.close()
 }
+}
+// Two original downs can reach a group before focus moves to the editor.
+// The prior field contents and both ends of the inserted span must survive.
+for (keys,visible,word) in [([UInt16(15),40],"rk","가"),([15,40],"rㅏ","가"),
+                          ([15,46,0],"rma","금"),([15,46,0],"rmㅁ","금"),
+                          ([15,46,0],"rㅡㅁ","금"),([14,40],"eㅏ","다")] {
+    for (left,right) in [("",""),("기존🙂 ",""),("앞🙂"," 뒤"),("r","")] {
+        let c=Case(label:left+right,priorCaret:left.utf16.count)
+        c.prefix=left;c.suffix=right
+        c.e.permitsUnfocusedReplay={ stamp,_ in stamp != 0 }
+        for code in keys {c.original(code,true);c.original(code,false)}
+        c.visible=true;c.text=left+visible+right;c.selection=NSRange(location:left.utf16.count+visible.utf16.count,length:0)
+        c.e.sample();c.spin()
+        check(c.text==left+word+right && c.selection.location==left.utf16.count+word.utf16.count,"outside focus corrects the full insertion and preserves draft [\(visible), \(left), \(right)]")
+        check(c.posts.map{$0.0}==keys.flatMap{[$0,$0]} && c.commands==2 && c.writes==0,"every original position replays once")
+        check(c.e.retainedInput.isEmpty && !c.e.recovering,"outside replay completes")
+        c.close()
+    }
+}
+for mode in ["missing_switch","restored_draft","unverified_line","changed_surroundings","different_field","moved_window","wrong_caret","already_korean","single_key","still_ABC"] {
+    let prior=mode=="restored_draft" ? "previous display":(mode=="unverified_line" ? "\n":"앞")
+    let anchored = !["restored_draft","unverified_line"].contains(mode)
+    let c=Case(label:prior,priorCaret:anchored ? prior.utf16.count:0)
+    c.e.permitsUnfocusedReplay={ _,ready in mode != "missing_switch" && !(mode=="still_ABC" && ready) }
+    c.original(15,true);c.original(15,false)
+    if mode != "single_key"{c.original(40,true);c.original(40,false)}
+    c.changedField=mode=="different_field";c.changedWindow=mode=="moved_window"
+    let body=(anchored ? (mode=="changed_surroundings" ? "뒤":prior):"")+(mode=="already_korean" ? "가":(mode=="single_key" ? "r":(mode=="still_ABC" ? "rk":"rㅏ")))
+    c.visible=true;c.text=body;c.selection=NSRange(location:mode=="wrong_caret" ? 0:body.utf16.count,length:0)
+    c.e.sample();c.spin()
+    check(c.commands==0 && c.posts.isEmpty && c.selections==0 && c.text==body && c.e.retainedInput.isEmpty,"outside ambiguous context passes originals without editing: \(mode)")
+    c.close()
 }
 print("\(failures==0 ? "PASS":"FAIL") \(checks) two-key first-publication engine/gate checks; no OS keys posted")
 exit(failures==0 ? 0:1)

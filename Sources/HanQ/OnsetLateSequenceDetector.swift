@@ -7,6 +7,7 @@ enum OnsetLateSequenceDetector {
     enum Rejection:Int {case unmeasured=0,keyCount,selectionOrRange,layoutUnavailable,initialUnsupported,shiftedSpace,unmappedKey,missingMedial,bodyMismatch}
     static func inspect(keys:[(UInt16,Bool)],before:String,caret:Int,text:String,selection:NSRange,
                         sourceID:String=KoreanKeyboardLayout.twoSetID,allowObservedReplay:Bool=false,
+                        romanBaseline:(text:String,caret:Int)?=nil,
                         onRejected:((Rejection)->Void)?=nil)->Result {
         func reject(_ reason:Rejection)->Result{onRejected?(reason);return .rejected}
         guard (2...16).contains(keys.count) else{return reject(.keyCount)}
@@ -46,6 +47,34 @@ enum OnsetLateSequenceDetector {
         let split=render(chars.prefix(1))+render(chars.dropFirst())
         let joined=render(chars[...])
         if view(joined){return .complete}
+        // This option requires a pre-key editor baseline. A disappearing
+        // display and a matching word alone cannot prove who inserted it.
+        if let anchor=romanBaseline,sourceID==KoreanKeyboardLayout.twoSetID,
+           !keys.contains(where:{$0.0==49}),anchor.caret>=0,anchor.caret<=anchor.text.utf16.count,
+           selection.location>anchor.caret,selection.location<=text.utf16.count {
+            let body=text as NSString
+            let range=NSRange(location:anchor.caret,length:selection.location-anchor.caret)
+            let inserted=body.substring(with:range)
+            if inserted.utf8.first.map({(65...90).contains($0) || (97...122).contains($0)})==true,
+               body.replacingCharacters(in:range,with:"").utf16.elementsEqual(anchor.text.utf16) {
+                var roman=""
+                var pending=false
+                for (index,key) in keys.enumerated() {
+                    guard let letter=PhysicalLetterKeys.letters[key.0] else{break}
+                    roman += key.1 ? letter.uppercased():letter
+                    guard inserted.hasPrefix(roman) else{break}
+                    for end in (index+1)...keys.count {
+                        let candidate=roman+render(chars[(index+1)..<end])
+                        guard inserted.utf16.elementsEqual(candidate.utf16) else{continue}
+                        if end==keys.count {
+                            return .candidate(OnsetRecoveryPlan(before:anchor.text,caret:anchor.caret,roman:inserted,codes:keys,observedReplayText:joined,literalBody:true))
+                        }
+                        pending=true
+                    }
+                }
+                if pending{return .waiting}
+            }
+        }
         if view(split),split != joined {
             // Only the caller with an independently observed pre-key baseline
             // may request this IME replay. Normal composition is already complete.

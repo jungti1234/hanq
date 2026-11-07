@@ -10,6 +10,10 @@ struct OnsetRecoveryPlan {
     var onsetVariants:[String] = []
     var replayedText:String?
     var observedReplayText:String?
+    var literalBody=false
+    func bodyMatches(_ value:String,_ expected:String)->Bool {
+        literalBody ? value.utf16.elementsEqual(expected.utf16):value==expected
+    }
     var isObservedReplay:Bool {observedReplayText != nil && replayedText==nil && (2...16).contains(codes.count)}
     var supportsReplay:Bool {codes.count==1 || isObservedReplay}
     var isCommittedLate:Bool {replayedText != nil && (2...16).contains(codes.count) && codes.last?.0==49 && codes.last?.1==false}
@@ -19,6 +23,7 @@ struct OnsetRecoveryPlan {
         return ns.replacingCharacters(in:NSRange(location:caret,length:0),with:roman)
     }
     func matches(text:String,selection:NSRange)->Bool {
-        (codes.count>=2 || (allowSingle && codes.count==1)) && text==expected && selection==NSRange(location:caret+roman.utf16.count,length:0)
+        guard let expected else{return false}
+        return (codes.count>=2 || (allowSingle && codes.count==1)) && bodyMatches(text,expected) && selection==NSRange(location:caret+roman.utf16.count,length:0)
     }
 }

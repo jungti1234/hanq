@@ -459,6 +459,7 @@ final class InputIncidentTrace {
         case inputResumed,editorStyleMatched,terminalLFMatched,terminalLFStyleMatched,pendingTextPrefix,sourceInitialBodyRemoved
         case manualEditStarted,manualEditVerified,manualEditUnverified
         case initialLayoutWait,initialLayoutReady,initialLayoutDeadline,initialContextChanged,initialSourceChanged,initialNativeBatchObserved,initialOriginalResumed
+        case unfocusedLayoutConflict,unfocusedLayoutReady,unfocusedLayoutUnknown,unfocusedSourceChanged
         static func event(_ stage:String)->BoundaryStage? {
             switch stage {
             case "initial_original_resumed":return .initialOriginalResumed
@@ -1458,7 +1459,10 @@ final class InputIncidentTrace {
     }
     func sourceBoundary(_ stage:BoundaryStage,queued:Int,awaitingOnset:Int){
         guard enabled else{return};let time=clock()
-        _ = submit(.boundary,.sourceBoundary,stage.rawValue,observedAt:time){[self] timing in
+        // Accounting has 32 detail slots per lane. Keep each full stage on
+        // the frame and use the reserved aggregate slot for appended stages.
+        let detail=stage.rawValue<32 ? stage.rawValue:0
+        _ = submit(.boundary,.sourceBoundary,detail,observedAt:time){[self] timing in
             append(.sourceBoundary,.sourceBoundary,observedAt:time,observationTiming:timing,event:awaitingOnset,category:stage.rawValue,count:queued)
         }
         if stage == .retained || stage == .deadline || stage == .focusChanged || stage == .failed || stage == .manualEditUnverified || stage == .inputResumed {requestCapture(.boundaryInterrupted,lane:.sourceBoundary,detail:stage.rawValue)}

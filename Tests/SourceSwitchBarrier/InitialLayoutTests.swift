@@ -9,6 +9,33 @@ func runInitialLayoutTests(){
     check(B.classifyInitialLayout(first:ko,layout:layout,override:layout,last:ko) == .ready,"actual Korean layout")
     check(B.classifyInitialLayout(first:ko,layout:abc,override:nil,last:abc) == .unknown,"torn read")
     check(B.classifyInitialLayout(first:abc,layout:abc,override:nil,last:abc) == .sourceChanged,"explicit switch away")
+    // A direct switch with no editor never captures originals. The two taps
+    // must agree on the first event before any later editor may use its history.
+    do {
+        let b=B();var t=0.0,pid:pid_t=91
+        var window=AXUIElementCreateApplication(4101)
+        let originalWindow=window
+        b.now={t};b.frontPID={pid};b.frontWindow={_ in window};b.read={nil}
+        let first=key(15),second=key(40);first.timestamp=1000;second.timestamp=2000
+        check(!b.request(ko,at:900),"outside switch uses direct selection")
+        b.didSwitchWithoutField(ko,at:900);t=0.123
+        check(!b.receive(.keyDown,first) && b.isFirstUnfocusedSwitchKey(1000),"first outside key stays native and has a matching identity")
+        b.initialLayout={.conflicting}
+        check(!b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"entirely ASCII output waits without owning input")
+        b.initialLayout={.ready}
+        check(b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"two-set layout allows the verified native replay")
+        t=0.211
+        check(!b.receive(.keyDown,second) && !b.isFirstUnfocusedSwitchKey(2000),"later keys cannot claim the first identity")
+        pid=92;check(!b.isFirstUnfocusedSwitchKey(1000),"a different application cannot use the history");pid=91
+        window=AXUIElementCreateApplication(4102);check(!b.isFirstUnfocusedSwitchKey(1000),"different window in the same application");window=originalWindow
+        let click=CGEvent(mouseEventSource:nil,mouseType:.leftMouseDown,mouseCursorPosition:.zero,mouseButton:.left)!
+        check(!b.receive(.leftMouseDown,click) && !b.isFirstUnfocusedSwitchKey(1000),"pointer invalidation")
+        b.didSwitchWithoutField(ko,at:901);t+=0.51
+        check(!b.receive(.keyDown,first) && !b.isFirstUnfocusedSwitchKey(1000),"first key outside the switch deadline")
+        b.didSwitchWithoutField(ko,at:902)
+        _=b.receive(.keyDown,first);_=b.request(abc,at:3000)
+        check(!b.isFirstUnfocusedSwitchKey(1000) && !b.busy,"another source switch invalidates the observation")
+    }
     final class Rig {
         let b=B()
         let f=AXUIElementCreateApplication(91),w=AXUIElementCreateApplication(92),other=AXUIElementCreateApplication(93)

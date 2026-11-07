@@ -7,7 +7,10 @@ final class OnsetInputGate {
     static func isRecoveryMarker(_ value:Int64)->Bool {
         UInt64(bitPattern:value) >> 32 == 0x48414E51
     }
-    struct Reservation { let code:UInt16;let shift:Bool;let time:Double;let sourceID:String }
+    struct Reservation {
+        let code:UInt16;let shift:Bool;let time:Double;let sourceID:String
+        var eventTimestamp:CGEventTimestamp=0
+    }
     struct PassedInput {
         let first:Reservation
         var baselineRevision:Int?
@@ -292,13 +295,13 @@ final class OnsetInputGate {
            event.getIntegerValueField(.keyboardEventAutorepeat)==0,
            event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskAlphaShift,.maskSecondaryFn]).isEmpty,
            (event.flags.contains(.maskShift) ? hintShifted:hintNormal).contains(code),now>=hintUntil {
-            passedInput=PassedInput(first:Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:passedBaselineSource),keys:[(code,event.flags.contains(.maskShift))],pressed:[code])
+            passedInput=PassedInput(first:Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:passedBaselineSource,eventTimestamp:event.timestamp),keys:[(code,event.flags.contains(.maskShift))],pressed:[code])
             passedInput?.baselineRevision=revision;observedPassed=true
         }
         if type == .keyDown,now<hintUntil,event.getIntegerValueField(.keyboardEventAutorepeat)==0,
            (event.flags.contains(.maskShift) ? hintShifted:hintNormal).contains(code) {
             // Observe the first key. Only an atomic claim after AX validation may hold later input.
-            early=Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:hintSourceID)
+            early=Reservation(code:code,shift:event.flags.contains(.maskShift),time:now,sourceID:hintSourceID,eventTimestamp:event.timestamp)
             if !hintSourceID.isEmpty,let first=early {
                 passedInput=PassedInput(first:first,keys:[(code,event.flags.contains(.maskShift))],pressed:[code])
             }else{passedInput=nil}

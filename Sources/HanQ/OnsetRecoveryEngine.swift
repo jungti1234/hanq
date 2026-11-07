@@ -16,6 +16,7 @@ final class OnsetRecoveryEngine:NSObject {
     }
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
     var canBeginRepair: () -> Bool = { true }
+    var permitsUnfocusedReplay:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->Bool = {_,_ in false}
     var willBeginRepair: () -> Void = {}
     var willReplay: (AXUIElement,String,Int) -> Void = {_,_,_ in}
     var didPostReplayEvent: (CGEvent) -> Void = {_ in}
@@ -225,7 +226,8 @@ final class OnsetRecoveryEngine:NSObject {
         }
         if let field=passedField,!CFEqual(field,snap.element){decisionTrace.onsetDecision(.history,.fieldChanged,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_field_changed",hasSnapshot:true);gate.discardPassed(reason:.field_changed);return false}
         passedField=snap.element
-        if let observed=observedEmptyEntry(snap,before:p.first.time) ?? observedDraftEntry(snap,before:p.first.time) {
+        let observed=observedEmptyEntry(snap,before:p.first.time) ?? observedDraftEntry(snap,before:p.first.time)
+        if let observed {
             passedBaseline=observed
         }
         if observeFirstPublication(p,snap){return true}
@@ -234,6 +236,18 @@ final class OnsetRecoveryEngine:NSObject {
         guard p.keys.count>=2 else{return false}
         let publicationMatches=firstPublication?.matches(p,snap) == true
         if firstPublication != nil{decisionTrace.onsetDecision(.history,publicationMatches ? .proofCurrent:.proofUnavailable,firstTime:p.first.time,keys:p.keys.count)}
+        // A display that disappeared on focus can witness the old jamo-only
+        // path. Roman text needs an actual pre-key baseline plus the exact
+        // first original event from the explicit unfocused switch.
+        let fromOutside = !publicationMatches && p.first.sourceID==onsetKoreanID
+            && permitsUnfocusedReplay(p.first.eventTimestamp,false)
+        // The scan can also witness an insertion in the middle of a real
+        // draft. An empty field needs the independent empty-editor checks.
+        let draft = fromOutside && observed==nil ? outsideObservation.baseline(for:snap.element,before:p.first.time):nil
+        let romanBaseline = fromOutside ? (observed ?? draft.flatMap{
+            !$0.text.isEmpty && $0.selection.length==0 && $0.selection.location>=0
+                && $0.selection.location<=$0.text.utf16.count ? $0:nil
+        }):nil
         let baseline=publicationMatches ? nil:
             passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
         // A terminal plain Space selects the committed-word strategy even
@@ -243,7 +257,7 @@ final class OnsetRecoveryEngine:NSObject {
             || firstPublication?.matches(p,snap) == true)
         if allowObservedReplay,Self.awaitingEmptyEntryPublication(baseline,current:snap){return true}
         var rejection=OnsetLateSequenceDetector.Rejection.unmeasured
-        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
+        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,romanBaseline:romanBaseline.map{($0.text,$0.selection.location)},onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
         case .waiting:decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_wait",hasSnapshot:true);return true
         case .complete:decisionTrace.onsetDecision(.history,.historyComplete,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
         case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count,detail:focusHandoff.witnessDetail(for:snap.element,history:rejection.rawValue));traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
@@ -252,6 +266,12 @@ final class OnsetRecoveryEngine:NSObject {
             traceReentryObservation("history_candidate",hasSnapshot:true)
             if candidate.isObservedReplay {guard p.pressed.isEmpty else{decisionTrace.onsetDecision(.claim,.keysStillDown,firstTime:p.first.time,keys:p.keys.count);return true}}
             else {guard p.pressed.isEmpty || p.onlyFinalPlainSpaceDown else{decisionTrace.onsetDecision(.claim,.keysStillDown,firstTime:p.first.time,keys:p.keys.count);return true}}
+            if candidate.literalBody {
+                // For an entirely Roman result the editor has shown no Korean
+                // output yet. Wait without owning keys until the layout agrees.
+                let allRoman=candidate.roman.utf8.allSatisfy{$0<128}
+                guard permitsUnfocusedReplay(p.first.eventTimestamp,allRoman) else{return true}
+            }
             planElement=snap.element;repairSourceID=p.first.sourceID
             beginRecovery(candidate,snap,passed:p);return true
         }
@@ -873,8 +893,8 @@ final class OnsetRecoveryEngine:NSObject {
         let added=actual.length-original.length
         guard end>=0,end<=original.length,added>0,
               snap.selection==NSRange(location:end+added,length:0),
-              actual.substring(to:end)==original.substring(to:end),
-              actual.substring(from:end+added)==original.substring(from:end) else{return false}
+              candidate.bodyMatches(actual.substring(to:end),original.substring(to:end)),
+              candidate.bodyMatches(actual.substring(from:end+added),original.substring(from:end)) else{return false}
         onset.cancel()
         log("repair_skipped_following_input",["addedUTF16":added])
         drain([])
@@ -896,7 +916,7 @@ final class OnsetRecoveryEngine:NSObject {
             log("selection_context_failed",["reason":unavailableReason]);abort("selection_context_changed");return
         }
         guard CFEqual(selected.element,before.element) else{abort("selection_field_changed");return}
-        if selected.text != before.text {
+        if !candidate.bodyMatches(selected.text,before.text) {
             log("selection_text_changed",["expected":before.text,"actual":selected.text,"selection":[selected.selection.location,selected.selection.length]])
             if skipSupersededRepair(candidate,selected){return}
             abort("selection_context_changed");return
@@ -981,7 +1001,7 @@ final class OnsetRecoveryEngine:NSObject {
         let acceptable=(joined.map{[$0]} ?? ([candidate.roman]+candidate.onsetVariants)).map{
             (candidate.before as NSString).replacingCharacters(in:NSRange(location:candidate.caret,length:0),with:$0)
         }
-        if acceptable.contains(snap.text) && replacementReady {
+        if acceptable.contains(where:{candidate.bodyMatches(snap.text,$0)}) && replacementReady {
             log("prefix_visible",["text":snap.text]);deliveryPrefixConfirmed=true
             drain([],rollback:rollback)
             return
@@ -1069,7 +1089,7 @@ final class OnsetRecoveryEngine:NSObject {
     }
     func attemptRollback(remaining:Int,requested:Bool){
         guard recovering,rollingBack else{return}
-        guard let candidate=currentPlan,let field=planElement,let snap=snapshot(),CFEqual(snap.element,field),snap.text==candidate.expected,!replayStarted else{park("rollback_context_not_intact");return}
+        guard let candidate=currentPlan,let field=planElement,let snap=snapshot(),CFEqual(snap.element,field),let expected=candidate.expected,candidate.bodyMatches(snap.text,expected),!replayStarted else{park("rollback_context_not_intact");return}
         let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
         let repairRange=NSRange(location:candidate.caret,length:candidate.roman.utf16.count)
         let committedCaret=candidate.isObservedReplay && gate?.healthy()==true && replayCommitCaret==snap.selection

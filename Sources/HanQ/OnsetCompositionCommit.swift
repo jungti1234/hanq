@@ -55,7 +55,7 @@ extension OnsetRecoveryEngine {
         collectHeld()
         guard currentSource()==repairSourceID else{park("composition_commit_source_changed");return}
         if let current=snapshot() {
-            guard CFEqual(current.element,before.element),current.text==before.text else {
+            guard CFEqual(current.element,before.element),candidate.bodyMatches(current.text,before.text) else {
                 park("composition_commit_context_changed");return
             }
             let expectedCaret=NSRange(location:(candidate.isObservedReplay || candidate.isCommittedLate) ? before.selection.location-1:candidate.caret,length:0)

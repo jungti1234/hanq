@@ -30,6 +30,70 @@ final class SourceSwitchBarrier {
     private struct Entry {let field:AXUIElement;let at:Double}
     private struct HeldStart {let snapshot:Snapshot;let window:AXUIElement;let until:Double}
     private var entry:Entry?
+    private struct UnfocusedSwitch {
+        let began:Double, pid:pid_t
+        let window:AXUIElement?
+        var first:CGEventTimestamp=0
+        var sampled=0
+    }
+    private var unfocusedSwitch:UnfocusedSwitch?
+    var frontPID:()->pid_t? = {NSWorkspace.shared.frontmostApplication?.processIdentifier}
+    var frontWindow:(pid_t)->AXUIElement? = { pid in
+        let app=AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app,0.003)
+        var raw:CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app,kAXFocusedWindowAttribute as CFString,&raw) == .success,
+              let raw,CFGetTypeID(raw)==AXUIElementGetTypeID() else{return nil}
+        return (raw as! AXUIElement)
+    }
+
+    func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp) {
+        guard id==KoreanKeyboardLayout.twoSetID,timestamp != 0,let pid=frontPID() else{return}
+        unfocusedSwitch=UnfocusedSwitch(began:now(),pid:pid,window:frontWindow(pid))
+    }
+    func cancelUnfocusedSwitch(){unfocusedSwitch=nil}
+    func isFirstUnfocusedSwitchKey(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->Bool {
+        guard let attempt=unfocusedSwitch,timestamp != 0,attempt.first==timestamp,
+              now()-attempt.began<=2.5 else{return false}
+        guard frontPID()==attempt.pid,let original=attempt.window,let current=frontWindow(attempt.pid),
+              CFEqual(original,current) else{return false}
+        return !needsReadyLayout || initialLayout?() == .ready
+    }
+    // Only remember the identity of a key that is passing normally. Changing
+    // focus on that first key is application behavior; never hold it here.
+    private func observeUnfocusedInput(_ type:CGEventType,_ event:CGEvent) {
+        guard var attempt=unfocusedSwitch else{return}
+        let elapsed=now()-attempt.began
+        guard elapsed>=0,elapsed<=2.5 else{unfocusedSwitch=nil;return}
+        if type == .keyUp{return}
+        if type == .flagsChanged {
+            let code=event.getIntegerValueField(.keyboardEventKeycode)
+            if [54,56,60].contains(code),event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{return}
+        }
+        guard isInitialLetter(event) else{unfocusedSwitch=nil;return}
+        if attempt.sampled==0 {
+            guard elapsed<=MismatchSourceEvidence.confirmationSeconds,event.timestamp != 0,
+                  frontPID()==attempt.pid else{unfocusedSwitch=nil;return}
+            // A window change can keep the same process and the same layout.
+            if let original=attempt.window,let current=frontWindow(attempt.pid),CFEqual(original,current) {
+                attempt.first=event.timestamp
+            }
+        }
+        if attempt.sampled<2,elapsed<=MismatchSourceEvidence.confirmationSeconds {
+            attempt.sampled+=1
+            unfocusedSwitch=attempt
+            guard incidentTrace.enabled,let initialLayout else{return}
+            let stage:InputIncidentTrace.BoundaryStage
+            switch initialLayout() {
+            case .conflicting:stage = .unfocusedLayoutConflict
+            case .ready:stage = .unfocusedLayoutReady
+            case .unknown:stage = .unfocusedLayoutUnknown
+            case .sourceChanged:stage = .unfocusedSourceChanged
+            }
+            incidentTrace.sourceBoundary(stage,queued:0,awaitingOnset:0)
+        }
+        unfocusedSwitch=attempt
+    }
     private var heldStart:HeldStart?
     private struct NativeBatch {
         let field:AXUIElement,window:AXUIElement
@@ -601,6 +665,7 @@ final class SourceSwitchBarrier {
             awaitingReplay=false;schedule();return false
         }
         beginRepairBoundary(type,event)
+        if unfocusedSwitch != nil{observeUnfocusedInput(type,event)}
         if !busy,entry != nil { _=holdFirstIfNeeded(event,alreadyQueued:false) }
         guard busy else{return false}
         if heldStart != nil,type == .flagsChanged,
@@ -644,6 +709,7 @@ final class SourceSwitchBarrier {
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0)->Bool {
+        cancelUnfocusedSwitch()
         if heldStart != nil{fail("initial_source_changed")}
         entry=nil;nativeBatch=nil
         discardInvalidDeferredHistory()

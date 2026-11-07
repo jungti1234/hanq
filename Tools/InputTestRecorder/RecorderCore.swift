@@ -204,25 +204,26 @@ struct RecorderObservationDelivery: Codable {
     let capacity,readCapacity:Int
     let processed,overflow,omitted,coalesced:[String:Int]
     let waits:[String:RecorderDecisionWaitStats]?
-    static func validCode(_ key:String)->Bool {
+    static func validCode(_ key:String,legacyBoundary:Bool=false)->Bool {
         guard let code=Int(key),String(code)==key,(0..<2560).contains(code) else{return false}
         let operation=code/256+1,detail=code%32
         switch operation {
         case 1:return [1,2,3,5,6,7].contains(detail)
         case 5:return (1...8).contains(detail)
         case 6:return detail==0 || (code/32%8==3 && ((1...7).contains(detail) || detail==31)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail)) || (code/32%8==2 && (17...20).contains(detail))
-        case 7:return (1...31).contains(detail)
+        case 7:return (1...31).contains(detail) || (detail==0 && code/32%8==7)
+        case 8:return detail==0 || (legacyBoundary && code/32%8==0 && detail<=6)
         case 10:return (1...7).contains(detail) || (9...15).contains(detail) || detail==17 || (25...31).contains(detail)
         default:return detail==0
         }
     }
-    var valid:Bool {
+    func valid(legacyBoundary:Bool)->Bool {
         (4...16384).contains(capacity) && (1...128).contains(readCapacity) &&
-        [processed,overflow,omitted,coalesced].allSatisfy{$0.count<=2560 && $0.allSatisfy{Self.validCode($0.key) && $0.value>0}} &&
+        [processed,overflow,omitted,coalesced].allSatisfy{$0.count<=2560 && $0.allSatisfy{Self.validCode($0.key,legacyBoundary:legacyBoundary) && $0.value>0}} &&
         coalesced.keys.allSatisfy{let code=Int($0)!;return code/256+1==4 || (code/256+1==6 && ((code/32%8==3 && code%32>0) || (code/32%8==2 && (17...20).contains(code%32))))} &&
         (waits.map{ stats in
             Set(stats.keys)==Set(processed.keys) && stats.allSatisfy { key,value in
-                Self.validCode(key) && value.valid && processed[key]==value.processed &&
+                Self.validCode(key,legacyBoundary:legacyBoundary) && value.valid && processed[key]==value.processed &&
                 (Int(key)!/256+1 != 10 || (1...7).contains(Int(key)!%32) || (25...31).contains(Int(key)!%32))
             }
         } ?? true)
@@ -334,7 +335,7 @@ struct RecorderTrace: Codable {
     let trigger, incident, phase, discardedOldFrames: Int
     let frames: [RecorderFrame]
 
-    private static func validFrame(_ row:RecorderFrame)->Bool {
+    private static func validFrame(_ row:RecorderFrame,legacyBoundary:Bool)->Bool {
                   guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...14).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
                   if row.kind==14 {
                       return row.boundaryEvidence.map{RecorderBoundaryEvidence.valid($0)}==true && row.lane==8 && row.event==0 && row.edge==0 && row.category==0 && row.inputOrigin==0 && !row.consumed && row.durationMicros==0 && row.count==0 && !row.selected && row.field==0 && row.observationTiming?.valid==true && row.decisionTiming==nil && row.sourceEvidence==nil && row.shapeEvidence==nil && row.controlEvidence==nil && row.eventEvidence==nil && row.workEvidence==nil && row.readOutcome==nil && row.focusEvidence==nil && row.onsetEvidence==nil
@@ -379,11 +380,11 @@ struct RecorderTrace: Codable {
                   }
                   guard row.sourceEvidence==nil else{return false}
                   if row.kind==9 {
-                      guard row.observationTiming != nil,(1...10).contains(row.category),(0...31).contains(row.edge) else{return false}
+                      guard row.observationTiming != nil,(1...10).contains(row.category),((0...31).contains(row.edge) || (legacyBoundary && row.category==7 && row.lane==8 && (32...38).contains(row.edge))) else{return false}
                       guard row.event==0,row.inputOrigin==0,!row.consumed,row.durationMicros==0,row.count==0,!row.selected,row.field==0 else{return false}
                       if row.category==10 {guard (1...7).contains(row.edge) || (25...31).contains(row.edge) else{return false}}
                       let code=((row.category-1)*8+row.lane-1)*32+row.edge
-                      return RecorderObservationDelivery.validCode(String(code))
+                      return RecorderObservationDelivery.validCode(String(code),legacyBoundary:legacyBoundary)
                   }
                   guard row.kind==8 else{return true}
                   return row.lane==4 && (1...5).contains(row.edge) && (1...31).contains(row.category) && row.event>=0 &&
@@ -490,7 +491,7 @@ struct RecorderTrace: Codable {
               [value.skippedEvents, value.skippedAuxiliary].allSatisfy({ dict in
                   dict.count <= 8 && dict.allSatisfy { Int($0.key).map { (1...8).contains($0) } == true && $0.value >= 0 }
               }),
-              value.frames.allSatisfy(Self.validFrame) else { throw RecorderError.invalidTrace }
+              value.frames.allSatisfy({Self.validFrame($0,legacyBoundary:value.build=="366")}) else { throw RecorderError.invalidTrace }
         if let baselines=value.shapeBaselines {
             guard baselines.count<=8,Set(baselines.map{$0.lane}).count==baselines.count,baselines.allSatisfy({$0.valid}) else{throw RecorderError.invalidTrace}
         }
@@ -504,7 +505,7 @@ struct RecorderTrace: Codable {
                 guard waits.count<=310,waits.allSatisfy({ entry in Int(entry.key).map{(0..<310).contains($0) && String($0)==entry.key} == true && entry.value.valid }) else{throw RecorderError.invalidTrace}
             }
         }
-        if let delivery=value.observationDelivery {guard delivery.valid else{throw RecorderError.invalidTrace}}
+        if let delivery=value.observationDelivery {guard delivery.valid(legacyBoundary:value.build=="366") else{throw RecorderError.invalidTrace}}
         if let timing=value.captureTiming {guard timing.valid else{throw RecorderError.invalidTrace}}
         if let storage=value.storageBeforeWrite {guard storage.valid else{throw RecorderError.invalidTrace}}
         if let preserved=value.capturePreservation{guard preserved.valid else{throw RecorderError.invalidTrace}}

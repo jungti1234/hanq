@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let jamoRepair = JamoRepair()
     lazy var onsetRecovery: OnsetRecoveryController = {
         let controller = OnsetRecoveryController()
+        controller.permitsUnfocusedReplay = { [weak self] in self?.sourceSwitchBarrier.isFirstUnfocusedSwitchKey($0,needsReadyLayout:$1) ?? false }
         controller.canRun = { [weak self] in
             guard let self else { return false }
             return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
@@ -326,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         inputSource.onObservation = { [weak self] snapshot in
             guard let self,!self.mismatchRecovery.engine.recovering else{return}
             let id=snapshot?.id ?? "unknown"
+            if id != KoreanKeyboardLayout.twoSetID {self.sourceSwitchBarrier.cancelUnfocusedSwitch()}
             if self.inputSourceEvidence.observe(id) {
                 InputIncidentTrace.shared.sourceEvidence(.observed,self.inputSourceEvidence.diagnostic(selected:id))
             }
@@ -512,6 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let result=selectionSourceSwitch.select(target)
         if result==noErr,!selectionSourceSwitch.isPending,InputSourceAccess.currentID()==target {
             inputSourceEvidence.didCommit(target,at:timestamp)
+            sourceSwitchBarrier.didSwitchWithoutField(target,at:timestamp)
             InputIncidentTrace.shared.sourceEvidence(.committed,inputSourceEvidence.diagnostic(selected:target))
         }
         return result
