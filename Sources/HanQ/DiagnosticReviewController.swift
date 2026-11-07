@@ -37,6 +37,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     private var selected = Set<String>()
     private var archive: DiagnosticReviewArchive?
     private var generation = 0
+    private var loadRequest: DiagnosticSnapshotRequest?
+    private var selectionRequest: DiagnosticSnapshotRequest?
     private var closed = false
     private var saving = false
     private var savedURL: URL?
@@ -74,8 +76,20 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         guard !closed else { return }
         generation += 1
         let request = generation
+        loadRequest?.cancel()
+        let operation=DiagnosticSnapshotRequest { [weak self] phase,completed,total in
+            DispatchQueue.main.async {
+                guard let self,!self.closed,self.generation==request else{return}
+                switch phase {
+                case .waiting:self.statusLabel.stringValue="저장 중인 후속 기록 \(completed)건을 기다리고 있습니다…"
+                case .copying:self.statusLabel.stringValue="기록 사본을 준비하고 있습니다… \(completed)/\(total)개"
+                case .listing:self.statusLabel.stringValue="기록 목록을 읽고 있습니다… \(completed)/\(total)개"
+                }
+            }
+        }
+        loadRequest=operation
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("HanQ-Review-" + UUID().uuidString)
-        Self.loadSnapshot(from: trace, directory: directory) { [weak self] result in
+        Self.loadSnapshot(from: trace, directory: directory, request:operation) { [weak self] result in
             guard let self, !self.closed, self.generation == request else { return }
             self.installLoadResult(result)
         }
@@ -85,11 +99,12 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     /// Pending post-captures finish before this decides whether logs exist.
     static func loadSnapshot(from trace: InputIncidentTrace,
                              directory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("HanQ-Review-" + UUID().uuidString),
+                             request: DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),
                              completion: @escaping (Result<DiagnosticReviewSnapshot, Error>) -> Void) {
-        trace.prepareExport(to: directory, reviewMetadata: true) { result in
+        trace.prepareExport(to: directory, reviewMetadata: true, request:request) { result in
             worker.async {
                 let loaded: Result<DiagnosticReviewSnapshot, Error>
-                do { try result.get(); loaded = .success(try DiagnosticReviewSnapshot(directory: directory)) }
+                do { try result.get(); loaded = .success(try DiagnosticReviewSnapshot(directory: directory,request:request)) }
                 catch { try? FileManager.default.removeItem(at: directory); loaded = .failure(error) }
                 DispatchQueue.main.async { completion(loaded) }
             }
@@ -99,9 +114,9 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         guard !closed else { return }
         switch result {
         case .success(let snapshot): install(snapshot)
-        case .failure:
+        case .failure(let error):
             countLabel.stringValue = "기록을 불러오지 못했습니다."
-            statusLabel.stringValue = "기록을 안전하게 읽을 수 없습니다. 원본은 유지됩니다. 창을 닫고 다시 시도해 주세요."
+            statusLabel.stringValue = (error as? DiagnosticLogExport.Failure)?.localizedDescription ?? "기록을 안전하게 읽을 수 없습니다. 원본은 유지됩니다. 창을 닫고 다시 시도해 주세요."
         }
     }
     /// Also used by an isolated UI fixture; no app singleton is needed.
@@ -292,6 +307,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         prepareSelection()
     }
     private func prepareSelection() {
+        selectionRequest?.cancel()
+        let operation=DiagnosticSnapshotRequest();selectionRequest=operation
         generation += 1
         let request = generation
         selectionLabel.stringValue = "선택한 기록 \(selected.count)/\(DiagnosticReviewSnapshot.selectionLimit)건"
@@ -307,7 +324,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         let selection = selected, environment = environment
         statusLabel.stringValue = "선택한 기록의 ZIP을 준비하고 있습니다…"
         Self.worker.async { [weak self] in
-            let result = Result { try DiagnosticReviewArchive(files: snapshot.files(selected: selection, environment: environment)) }
+            let result = Result { try DiagnosticReviewArchive(files: snapshot.files(selected: selection, environment: environment,request:operation),request:operation) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == request else { return }
                 switch result {
@@ -318,8 +335,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
                     self.showFile()
                     self.saveButton.isEnabled = true
                     self.statusLabel.stringValue = "ZIP · \(ByteCountFormatter.string(fromByteCount: Int64(archive.bytes), countStyle: .file))"
-                case .failure:
-                    self.statusLabel.stringValue = "ZIP을 준비하지 못했습니다. 선택을 바꾸거나 창을 다시 열어 주세요."
+                case .failure(let error):
+                    self.statusLabel.stringValue = (error as? DiagnosticLogExport.Failure)?.localizedDescription ?? "ZIP을 준비하지 못했습니다. 선택을 바꾸거나 창을 다시 열어 주세요."
                 }
             }
         }
@@ -373,6 +390,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     func windowShouldClose(_ sender: NSWindow) -> Bool { !saving }
     func windowWillClose(_ notification: Notification) {
         closed = true
+        loadRequest?.cancel();loadRequest=nil
+        selectionRequest?.cancel();selectionRequest=nil
         generation += 1; archive = nil; snapshot = nil; onClose?()
     }
 }

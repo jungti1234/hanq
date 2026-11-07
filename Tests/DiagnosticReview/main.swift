@@ -238,7 +238,7 @@ try JSONEncoder().encode(spaceDates).write(to:spaceDirectory.appendingPathCompon
 try fm.setAttributes([.posixPermissions:0o600],ofItemAtPath:spaceDirectory.appendingPathComponent("review-dates.json").path)
 let spacePreview=try DiagnosticReviewSnapshot(directory:spaceDirectory)
 check(spacePreview.incidents[0].title=="공백 처리 관측" && !spacePreview.incidents[0].manual,"space observation has a distinct automatic review title")
-let spaceText=spacePreview.incidents[0].documents[0]!.readableText
+let spaceText=try spacePreview.incidents[0].documents[0]!.readableText
 check(spaceText.contains("공백 소비·보관 단서") && spaceText.contains("원인을 확정하지 않습니다"),"review distinguishes intervention evidence from root cause")
 print("PASS: diagnostic review \(checks) checks (selection, original bytes, parsed preview, ZIP integrity, failure preservation)")
 

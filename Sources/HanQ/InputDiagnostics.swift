@@ -463,6 +463,22 @@ final class InputIncidentTrace {
     struct DecisionTiming:Codable {
         let queueMicros:Int;let lockWaitMicros:Int;let contended:Bool;let clipped:Bool
     }
+    // Fixed lifecycle values, independent of input text and process identifiers.
+    struct MonitorSample:Codable,Equatable {
+        var observedAtMilliseconds=0
+        var stage=0,reason=0,tapState=0
+        var active=false,enabled=false,suspended=false,recovering=false,rollingBack=false,restartAllowed=false
+        var pending=0,retained=0,attempts=0,failures=0,failureKind=0,stopReason=0,receivedEvents=0
+        var lastEventAgeMicros:Int?=nil
+        func sameState(as other:Self)->Bool {
+            var left=self,right=other
+            left.observedAtMilliseconds=0;right.observedAtMilliseconds=0
+            left.lastEventAgeMicros=nil;right.lastEventAgeMicros=nil
+            left.receivedEvents=0;right.receivedEvents=0
+            return left==right
+        }
+    }
+    struct MonitorStatus:Codable {var current:MonitorSample;var transitions:[MonitorSample];var discardedTransitions=0}
     struct DecisionWaitStats:Codable {
         var processed=0,contended=0,totalLockWaitMicros=0,maxLockWaitMicros=0,maxQueueMicros=0,clipped=0
     }
@@ -581,6 +597,7 @@ final class InputIncidentTrace {
         var capturePreservation:CapturePreservation?=nil
         var captureBacklog:CaptureBacklog?=nil
         var clockOriginMicros:Int?=nil
+        var monitorStatus:MonitorStatus?=nil
     }
     private struct Identity:Hashable {let token:UInt64;let type:UInt32;let domain:Int}
     // Scalar reference only: never retain/read a mutable CGEvent asynchronously.
@@ -602,6 +619,7 @@ final class InputIncidentTrace {
         return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive)
     }()
     private let runID=UUID().uuidString
+    private var monitorStatus:MonitorStatus?
     private let gate:DiagnosticCollectionGate
     private let configured:Bool
     let destinationDirectory:URL?
@@ -739,6 +757,7 @@ final class InputIncidentTrace {
                 reads.removeAll();shapes.removeAll();identities.removeAll();lastDecisions.removeAll();lastOnsetDecisions.removeAll();lastSourceEvidence.removeAll()
                 fields.removeAll();lastEdit = -Double.infinity;lastTrigger = -Double.infinity
                 lastSpaceDown.removeAll();lastSpaceCapture.removeAll()
+                monitorStatus=nil
                 if active,configured{captures=max(captures,last);_ = gate.activate(paused)}
                 lock.unlock()
                 DispatchQueue.main.async{[weak self] in self?.start();completion?()}
@@ -767,7 +786,23 @@ final class InputIncidentTrace {
         let start=(position-stored+capacity)%capacity
         var value=Capture(runID:runID,skippedEvents:skippedEvents,skippedAuxiliary:skippedAuxiliary,decisionDelivery:DecisionDelivery(capacity:decisionCapacity,overflow:decisionOverflow,waits:decisionWaits,coalesced:decisionCoalesced),observationDelivery:observationSnapshot(),captureTiming:timing,trigger:reason,incident:incident,phase:phase,discardedOldFrames:overwritten,frames:frames ?? (0..<stored).compactMap{ring[(start+$0)%capacity]},shapeBaselines:shapeSnapshot(),captureBacklog:backlogSnapshot())
         value.clockOriginMicros=Int(max(0,min(origin*1_000_000,9_000_000_000_000_000)))
+        value.monitorStatus=monitorStatus
         return value
+    }
+    func monitor(_ sample:MonitorSample){
+        guard enabled else{return}
+        let time=clock()
+        _ = submit(.context,.mismatch,31,observedAt:time){[self] _ in
+            var current=sample
+            current.observedAtMilliseconds=Int(max(0,min((time-origin)*1000,9_000_000_000_000_000)))
+            var changes=monitorStatus?.transitions ?? []
+            var discarded=monitorStatus?.discardedTransitions ?? 0
+            if monitorStatus?.current.sameState(as:current) != true {
+                changes.append(current)
+                if changes.count>16{discarded+=changes.count-16;changes.removeFirst(changes.count-16)}
+            }
+            monitorStatus=MonitorStatus(current:current,transitions:changes,discardedTransitions:discarded)
+        }
     }
     private func backlogSnapshot()->CaptureBacklog {
         CaptureBacklog(automaticCapacity:16,manualCapacity:4,requestCapacityPerTrigger:16,requestsPerWindow:32,
@@ -1378,23 +1413,25 @@ final class InputIncidentTrace {
     }
     // Freeze the export's event boundary on the decision queue. New incidents
     // do not extend this wait; already requested post-captures finish first.
-    func prepareExport(to directory:URL,reviewMetadata:Bool=false,completion:@escaping(Result<Void,Error>)->Void){
+    func prepareExport(to directory:URL,reviewMetadata:Bool=false,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),completion:@escaping(Result<Void,Error>)->Void){
         decisionQueue.async{[self] in
             let incidents=Set(windows.keys)
-            finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,deadline:DispatchTime.now()+15,completion:completion)
+            finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,request:request,deadline:DispatchTime.now()+15,completion:completion)
         }
     }
-    private func finishExport(incidents:Set<Int>,to directory:URL,reviewMetadata:Bool,deadline:DispatchTime,completion:@escaping(Result<Void,Error>)->Void){
+    private func finishExport(incidents:Set<Int>,to directory:URL,reviewMetadata:Bool,request:DiagnosticSnapshotRequest,deadline:DispatchTime,completion:@escaping(Result<Void,Error>)->Void){
+        do{try request.check()}catch{completion(.failure(error));return}
         let pending=windows.values.filter{incidents.contains($0.before.incident) && !$0.submitted}
         if !pending.isEmpty {
+            request.report(.waiting,pending.count,incidents.count)
             guard DispatchTime.now()<deadline else{completion(.failure(DiagnosticLogExport.Failure.busy));return}
-            decisionQueue.asyncAfter(deadline:.now()+0.05){[self] in finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,deadline:deadline,completion:completion)}
+            decisionQueue.asyncAfter(deadline:.now()+0.05){[self] in finishExport(incidents:incidents,to:directory,reviewMetadata:reviewMetadata,request:request,deadline:deadline,completion:completion)}
             return
         }
         queue.async{[self] in
             do {
                 guard let storage else{throw DiagnosticLogExport.Failure.noLogs}
-                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata)
+                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request)
                 completion(.success(()))
             }catch{completion(.failure(error))}
         }
@@ -1428,23 +1465,34 @@ final class InputIncidentTrace {
 }
 enum DiagnosticLogExport {
     enum Failure:LocalizedError {
-        case noLogs,unavailable,busy,compression
+        case noLogs,unavailable,busy,compression,cancelled,timedOut,insufficientSpace
         var errorDescription:String? {
             switch self {
             case .noLogs:return "내보낼 진단 로그가 없습니다."
             case .unavailable:return "진단 로그를 안전하게 읽을 수 없습니다. 기존 파일은 유지됩니다."
             case .busy:return "요청한 진단 기록의 저장이 아직 끝나지 않았습니다. 잠시 후 다시 시도해 주세요."
             case .compression:return "진단 로그를 압축하지 못했습니다."
+            case .cancelled:return "진단 기록 준비를 취소했습니다. 원본은 유지됩니다."
+            case .timedOut:return "진단 기록 준비 시간이 초과되었습니다. 원본은 유지됩니다. 창을 다시 열어 주세요."
+            case .insufficientSpace:return "진단 기록을 준비할 여유 공간이 부족합니다. 원본은 유지됩니다. 공간을 확보한 후 다시 시도해 주세요."
             }
         }
     }
     private static let worker=DispatchQueue(label:"hanq.diagnostics.export",qos:.utility)
-    static func compress(_ directory:URL,to archive:URL)throws {
+    static func compress(_ directory:URL,to archive:URL,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest())throws {
+        try request.check()
         let process=Process()
         process.executableURL=URL(fileURLWithPath:"/usr/bin/ditto")
         process.arguments=["-c","-k","--keepParent","--norsrc",directory.path,archive.path]
         process.standardOutput=FileHandle.nullDevice;process.standardError=FileHandle.nullDevice
-        try process.run();process.waitUntilExit()
+        try process.run()
+        do {
+            while process.isRunning{try request.check();Thread.sleep(forTimeInterval:0.05)}
+            process.waitUntilExit()
+        }catch{
+            if process.isRunning{kill(process.processIdentifier,SIGKILL)}
+            process.waitUntilExit();throw error
+        }
         guard process.terminationStatus==0 else{throw Failure.compression}
     }
     static func export(_ trace:InputIncidentTrace,to desktop:URL,date:Date=Date(),completion:@escaping(Result<URL,Error>)->Void){
@@ -1484,6 +1532,50 @@ enum DiagnosticLogExport {
 // The caller supplies privacy-screened data and serializes all calls off input
 // callbacks. Automatic and manual byte budgets rotate independently. Only
 // verified managed files may be removed; investigation archives never rotate.
+/// One review request owns its cancellation and bounded preparation time.
+/// Progress runs on a worker queue; callers marshal it onto the UI queue.
+final class DiagnosticSnapshotRequest {
+    enum Phase:Int {case waiting,copying,listing}
+    private let lock=NSLock()
+    private var cancelled=false
+    private let deadline:DispatchTime
+    private let progress:(Phase,Int,Int)->Void
+    private var lastProgress:(Int,Int,Int)?
+    init(timeout:Double=45,progress:@escaping(Phase,Int,Int)->Void={_,_,_ in}){
+        deadline = .now()+timeout;self.progress=progress
+    }
+    func cancel(){lock.lock();cancelled=true;lock.unlock()}
+    func check()throws {
+        lock.lock();let stopped=cancelled;lock.unlock()
+        if stopped{throw DiagnosticLogExport.Failure.cancelled}
+        if DispatchTime.now()>=deadline{throw DiagnosticLogExport.Failure.timedOut}
+    }
+    func report(_ phase:Phase,_ completed:Int,_ total:Int){
+        if phase != .waiting && completed != 0 && completed != total && completed%64 != 0{return}
+        lock.lock()
+        let same=lastProgress.map{$0.0==phase.rawValue && $0.1==completed && $0.2==total} ?? false
+        lastProgress=(phase.rawValue,completed,total);lock.unlock()
+        if !same{progress(phase,completed,total)}
+    }
+}
+
+/// Review-only catalog, built while the writer already has the capture bytes.
+/// Original diagnostic JSON is never replaced with a serialization of this model.
+struct DiagnosticReviewCaptureHeader:Codable,Equatable {
+    let schema:Int,trigger:Int,incident:Int,phase:Int
+    let runID:String?
+    var valid:Bool{schema==1 && (1...7).contains(trigger) && incident>0 && (0...1).contains(phase) && (runID==nil || UUID(uuidString:runID!) != nil)}
+    static func read(_ data:Data)->Self? {
+        guard let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
+        return value
+    }
+}
+struct DiagnosticReviewCatalog:Codable {
+    struct Entry:Codable {let bytes:Int,digest:String,header:DiagnosticReviewCaptureHeader}
+    var schema=1
+    let files:[String:Entry]
+}
+
 struct DiagnosticLogRetentionPolicy {
     let maximumAutomaticFiles:Int
     let maximumAutomaticBytes:Int
@@ -1518,8 +1610,9 @@ final class DiagnosticLogStore {
     private struct File {
         let name:String;let phase:Int;let identity:stat
         let digest:String?
-        init(name:String,phase:Int,identity:stat,digest:String?=nil){
-            self.name=name;self.phase=phase;self.identity=identity;self.digest=digest
+        let header:DiagnosticReviewCaptureHeader?
+        init(name:String,phase:Int,identity:stat,digest:String?=nil,header:DiagnosticReviewCaptureHeader?=nil){
+            self.name=name;self.phase=phase;self.identity=identity;self.digest=digest;self.header=header
         }
         var bytes:Int{Int(identity.st_size)}
     }
@@ -1673,7 +1766,7 @@ final class DiagnosticLogStore {
               data.count==before.st_size,fstat(fd,&after)==0,matches(before,after) else{return nil}
         let digest=Self.digest(data)
         guard schema != 3 || entry.digest==digest else{return nil}
-        return File(name:entry.name,phase:entry.phase,identity:after,digest:digest)
+        return File(name:entry.name,phase:entry.phase,identity:after,digest:digest,header:DiagnosticReviewCaptureHeader.read(data))
     }
     private static func digest(_ data:Data)->String {SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()}
     private(set) var lastCaptureIncident=0
@@ -1838,7 +1931,7 @@ final class DiagnosticLogStore {
               UUID(uuidString:header.runID) != nil,header.incident>0,validCaptureName(name,incident:header.incident,phase:header.phase) else{return nil}
         var after=stat()
         guard fstat(fd,&after)==0,matches(info,after) else{return nil}
-        return (header.runID+":\(header.incident)",header.incident,File(name:name,phase:header.phase,identity:info,digest:Self.digest(data)))
+        return (header.runID+":\(header.incident)",header.incident,File(name:name,phase:header.phase,identity:info,digest:Self.digest(data),header:DiagnosticReviewCaptureHeader.read(data)))
     }
     private func updateUsage(){
         status.automaticFiles=usage.files;status.automaticBytes=usage.bytes
@@ -2052,25 +2145,53 @@ final class DiagnosticLogStore {
         var info=stat()
         return fstatat(fd,file.name,&info,AT_SYMLINK_NOFOLLOW)==0 && matches(file.identity,info)
     }
-    func copyExportSnapshot(to destination:URL,reviewMetadata:Bool=false)throws {
+    func copyExportSnapshot(to destination:URL,reviewMetadata:Bool=false,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),availableBytes:(()->UInt64?)?=nil)throws {
+        try request.check()
         prepareOwnership()
         guard ownershipHealthy,let dir=openDirectory() else{throw DiagnosticLogExport.Failure.unavailable}
         defer{close(dir)}
         let captures=(groups+manualGroups).flatMap{$0.files}
         guard !captures.isEmpty else{throw DiagnosticLogExport.Failure.noLogs}
         try FileManager.default.createDirectory(at:destination,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
-        for file in captures {
+        var completed=false
+        defer{if !completed{try? FileManager.default.removeItem(at:destination)}}
+        let output=open(destination.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard output>=0 else{throw DiagnosticLogExport.Failure.unavailable}
+        defer{close(output)}
+        func checkSpace(_ bytes:Int)throws {
+            var volume=statfs()
+            let free:UInt64?
+            if let availableBytes{free=availableBytes()}
+            else if fstatfs(output,&volume)==0{free=UInt64(volume.f_bavail)*UInt64(volume.f_bsize)}
+            else{free=nil}
+            guard let free else{throw DiagnosticLogExport.Failure.unavailable}
+            guard free>=UInt64(bytes)+256*1024*1024 else{throw DiagnosticLogExport.Failure.insufficientSpace}
+        }
+        request.report(.copying,0,captures.count)
+        for (index,file) in captures.enumerated() {
+            try request.check();try checkSpace(0)
             guard owned(file,dir) else{throw DiagnosticLogExport.Failure.unavailable}
             let fd=openat(dir,file.name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
             guard fd>=0 else{throw DiagnosticLogExport.Failure.unavailable}
             defer{close(fd)}
             var info=stat()
-            guard fstat(fd,&info)==0,matches(file.identity,info),
-                  let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:file.bytes+1),data.count==file.bytes,
-                  fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
+            guard fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
             let path=destination.appendingPathComponent(file.name)
-            try data.write(to:path,options:.withoutOverwriting)
+            // APFS clones preserve an immutable byte snapshot without allocating
+            // another full copy of a potentially large investigation store.
+            if fclonefileat(fd,output,file.name,UInt32(CLONE_NOFOLLOW)) != 0 {
+                let code=errno
+                guard [ENOTSUP,EXDEV,EINVAL,ENOSYS].contains(code) else{
+                    throw code==ENOSPC ? DiagnosticLogExport.Failure.insufficientSpace:DiagnosticLogExport.Failure.unavailable
+                }
+                try checkSpace(file.bytes)
+                guard let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:file.bytes+1),data.count==file.bytes else{throw DiagnosticLogExport.Failure.unavailable}
+                try request.check()
+                try data.write(to:path,options:.withoutOverwriting)
+            }
+            guard fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+            request.report(.copying,index+1,captures.count)
         }
         if let data=try? JSONEncoder().encode(StatusDocument(status:status)) {
             let path=destination.appendingPathComponent("storage-status.json")
@@ -2084,7 +2205,16 @@ final class DiagnosticLogStore {
             let path=destination.appendingPathComponent("review-dates.json")
             try JSONEncoder().encode(dates).write(to:path,options:.withoutOverwriting)
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+            if captures.allSatisfy({$0.header != nil && $0.digest != nil}) {
+                let catalog=DiagnosticReviewCatalog(files:Dictionary(uniqueKeysWithValues:captures.map{
+                    ($0.name,.init(bytes:$0.bytes,digest:$0.digest!,header:$0.header!))
+                }))
+                let catalogPath=destination.appendingPathComponent("review-catalog.json")
+                try JSONEncoder().encode(catalog).write(to:catalogPath,options:.withoutOverwriting)
+                try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:catalogPath.path)
+            }
         }
+        try request.check();completed=true
     }
     private func publish(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
         prepareOwnership()
@@ -2124,7 +2254,7 @@ final class DiagnosticLogStore {
         guard writeAll(data,fd),linkat(dir,temporary,dir,filename,0)==0 else{return failed(4,errno)}
         var info=stat()
         guard unlinkat(dir,temporary,0)==0,fstat(fd,&info)==0 else{unlinkat(dir,filename,0);return failed(4,errno)}
-        let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data))
+        let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data),header:DiagnosticReviewCaptureHeader.read(data))
         for group in evictions {
             guard removeGroup(group,manual:!automatic,dir:dir) else{
                 if owned(published,dir){unlinkat(dir,filename,0)}

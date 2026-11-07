@@ -9,6 +9,20 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_monitor_lifecycle_is_bounded_typed_and_optional(self):
+        sample=dict(observedAtMilliseconds=10,stage=1,reason=9,tapState=0,active=True,enabled=False,
+                    suspended=True,recovering=False,rollingBack=False,restartAllowed=False,
+                    pending=0,retained=1,attempts=2,failures=2,failureKind=2,stopReason=6,receivedEvents=4,lastEventAgeMicros=60000000)
+        status=dict(current=sample,transitions=[sample],discardedTransitions=3)
+        result=summary.summarize(dict(schema=1,trigger=1,frames=[],monitorStatus=status))['monitor_status']
+        self.assertEqual(result['current_reason'],'safe_restart_refused')
+        self.assertEqual(result['discardedTransitions'],3)
+        self.assertIsNone(summary.summarize(dict(schema=1,trigger=1,frames=[]))['monitor_status'])
+        for change in [dict(reason=99),dict(enabled=1),dict(receivedEvents=True),dict(text='PRIVATE'),dict(lastEventAgeMicros=-1)]:
+            with self.assertRaises(ValueError):summary.monitor_status(dict(status,current=dict(sample,**change)))
+        for change in [dict(transitions=[sample]*17),dict(discardedTransitions=-1),dict(transitions=[dict(sample,observedAtMilliseconds=11)])]:
+            with self.assertRaises(ValueError):summary.monitor_status(dict(status,**change))
+
     def test_onset_decisions_are_fixed_and_scoped(self):
         timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
         row=dict(sequence=1,milliseconds=80,lane=3,kind=13,event=0,edge=2,category=12,inputOrigin=0,consumed=False,durationMicros=0,count=0,selected=False,field=0,observationTiming=timing,onsetEvidence=dict(keys=1,firstKeyAgeMicros=80000))

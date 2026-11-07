@@ -51,6 +51,7 @@ DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { trace.finishCaptureW
 let firstURL = root.appendingPathComponent("first")
 try snapshot(trace, to: firstURL)
 let first = try DiagnosticReviewSnapshot(directory: firstURL)
+check(fm.fileExists(atPath:firstURL.appendingPathComponent("review-catalog.json").path),"writer supplies a lightweight review catalog")
 check(first.incidents.count == 1 && first.incidents[0].complete, "review waits for the pending real pre/post pair")
 check(trace.enabled, "review does not disable collection")
 let original = try manifest(directory)
@@ -65,6 +66,44 @@ let env = DiagnosticReviewEnvironment(
     appVersion: "0.3.1-beta.1", build: "306", macOSVersion: "15.7.9", modelIdentifier: "Mac14,7", keyboardLayout: .twoSet,
     koreanKeyEnabled: true, hanjaKeyEnabled: true, hudEnabled: true, capsLockSwitchEnabled: true, loginItemState: .enabled,
     diagnosticsEnabled: true, inputMonitoringEnabled: true, cachedAccessibilityPermission: true, updateRestricted: false)
+// Cloned bytes are isolated from their source. The catalog lists records without
+// parsing full bodies, while selecting a changed body fails its original digest.
+let lazyURL=root.appendingPathComponent("lazy")
+try snapshot(trace,to:lazyURL)
+let lazyBefore=try manifest(directory)
+let damagedName=(try fm.contentsOfDirectory(atPath:lazyURL.path)).first{$0.hasPrefix("incident-")}!
+let damagedPath=lazyURL.appendingPathComponent(damagedName)
+var damaged=try Data(contentsOf:damagedPath);damaged[damaged.count-1] ^= 1
+try damaged.write(to:damagedPath)
+let lazyReview=try DiagnosticReviewSnapshot(directory:lazyURL)
+check(lazyReview.incidents.count==1,"catalog listing does not load or parse every capture body")
+do{_=try lazyReview.files(selected:Set(lazyReview.incidents.map(\.id)),environment:env);check(false,"changed selected body rejected")}
+catch{check(true,"selected body is verified before preview or export")}
+check(try manifest(directory)==lazyBefore,"changing a cloned review file cannot change the live original")
+let failureSource=root.appendingPathComponent("failure-source")
+let failureStore=DiagnosticLogStore(directory:failureSource,policy:policy)
+let failureData=try JSONSerialization.data(withJSONObject:["schema":1,"trigger":1,"incident":1,"phase":0,"runID":UUID().uuidString,"frames":[]] as [String:Any])
+check(failureStore.save(failureData,incident:1,phase:0,automatic:false) == .saved,"failure tests own a separate store")
+let failureBefore=try manifest(failureSource),liveBeforeFailures=try manifest(directory)
+let cancelled=DiagnosticSnapshotRequest();cancelled.cancel()
+let cancelledURL=root.appendingPathComponent("cancelled")
+do{try failureStore.copyExportSnapshot(to:cancelledURL,request:cancelled);check(false,"cancelled preparation rejected")}
+catch DiagnosticLogExport.Failure.cancelled{check(true,"cancelled request reports cancellation")}
+check(!fm.fileExists(atPath:cancelledURL.path),"cancelled request creates no snapshot")
+let noSpace=root.appendingPathComponent("no-space")
+do{try failureStore.copyExportSnapshot(to:noSpace,availableBytes:{0});check(false,"low space rejected")}
+catch DiagnosticLogExport.Failure.insufficientSpace{check(true,"low space reports its own failure")}
+check(!fm.fileExists(atPath:noSpace.path),"low-space failure removes its partial snapshot")
+var mid:DiagnosticSnapshotRequest!
+mid=DiagnosticSnapshotRequest{phase,_,_ in if phase == .copying{mid.cancel()}}
+let midURL=root.appendingPathComponent("mid-cancel")
+do{try failureStore.copyExportSnapshot(to:midURL,request:mid);check(false,"in-progress cancellation rejected")}
+catch DiagnosticLogExport.Failure.cancelled{check(true,"in-progress cancellation is observed between files")}
+check(!fm.fileExists(atPath:midURL.path),"in-progress cancellation removes its partial snapshot")
+let timed=root.appendingPathComponent("timed-out")
+do{try failureStore.copyExportSnapshot(to:timed,request:DiagnosticSnapshotRequest(timeout:0));check(false,"expired request rejected")}
+catch DiagnosticLogExport.Failure.timedOut{check(true,"expired request reports a time bound")}
+check(try manifest(failureSource)==failureBefore && manifest(directory)==liveBeforeFailures && trace.enabled,"space, cancellation and timeout failures preserve source and collection")
 let selected = Set(first.incidents.map(\.id))
 let archive = try DiagnosticReviewArchive(files: first.files(selected: selected, environment: env))
 for file in archive.files where file.path.hasPrefix("incident-") || file.path == "storage-status.json" {

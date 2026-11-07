@@ -126,6 +126,28 @@ do {
 let f=Fixture();f.press();f.text="d";f.settle()
 trace.mark();trace.flush()
 let capture=captures.last!,data=try JSONEncoder().encode(capture),decoded=try RecorderTrace.decode(data)
+// Lifecycle status survives ring rotation, remains bounded and contains no
+// arbitrary strings. Receiving another event updates current status, not history.
+do {
+    var captured:[InputIncidentTrace.Capture]=[],instant=100.0
+    let t=InputIncidentTrace(destination:nil,capacity:8,clock:{instant},writer:{captured.append($0)})
+    var sample=InputIncidentTrace.MonitorSample();sample.active=true;sample.enabled=true;sample.tapState=1;sample.stage=1
+    t.monitor(sample);t.flush()
+    for value in 1...20{instant+=0.01;sample.attempts=value;t.monitor(sample);t.flush()}
+    for value in 1...40{instant+=0.01;sample.receivedEvents=value;sample.lastEventAgeMicros=value;t.monitor(sample);t.flush();t.context()}
+    t.flush();t.mark();t.flush()
+    let bytes=try JSONEncoder().encode(captured[0]),read=try RecorderTrace.decode(bytes)
+    check(read.monitorStatus?.transitions.count==16 && read.monitorStatus?.discardedTransitions==5,"monitor history reports its bounded truncation")
+    check(read.monitorStatus?.current.receivedEvents==40 && read.monitorStatus?.transitions.last?.receivedEvents==0,"event counters update without erasing lifecycle history")
+    check(read.monitorStatus?.current.tapState==1,"current monitor status survives ordinary frame rotation")
+    var object=try JSONSerialization.jsonObject(with:bytes) as! [String:Any]
+    var status=object["monitorStatus"] as! [String:Any],current=status["current"] as! [String:Any]
+    for (key,value) in [("reason",99),("text","SECRET"),("enabled",1)] as [(String,Any)] {
+        var bad=current;bad[key]=value;status["current"]=bad;object["monitorStatus"]=status
+        do{_=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:object));check(false,"malformed monitor sample rejected")}
+        catch{check(true,"malformed monitor sample rejected")}
+    }
+}
 let evidenceFrames=decoded.frames.filter{$0.kind==10}
 check(!evidenceFrames.isEmpty && evidenceFrames.contains{$0.event>0 && $0.sourceEvidence?.historyPreserved==true},"new evidence correlates to the physical key")
 check(evidenceFrames.contains{$0.edge==5 && $0.sourceEvidence?.historyPreserved==true},"history restoration is recorded")

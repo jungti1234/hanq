@@ -5,8 +5,13 @@ extension MismatchRecoveryEngine {
     /// monitor may be rebuilt; an interrupted edit or retained input stays parked.
     func monitorTapFailed(_ kind:Int) {
         guard enabled else{return}
-        monitorRestartAllowed = !suspended && !recovering && !rollingBack &&
-            pending.isEmpty && retained.isEmpty && switchGate?.filter.consuming != true
+        monitorFailureCount+=1;monitorFailureKind=kind
+        // Both taps can report the same interruption before queued teardown.
+        // Keep the first decision until teardown and the guarded restart consume it.
+        if !suspended {
+            monitorRestartAllowed = !recovering && !rollingBack &&
+                pending.isEmpty && retained.isEmpty && switchGate?.filter.consuming != true
+        }
         suspended=true
         NSLog("입력 불일치 감시 중단: kind=%d recovering=%d retained=%d restart=%d",
               kind,recovering ? 1:0,retained.count+pending.count,monitorRestartAllowed ? 1:0)

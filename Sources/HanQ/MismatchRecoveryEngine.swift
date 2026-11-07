@@ -515,6 +515,7 @@ final class MismatchRecoveryEngine:NSObject {
         detectionRevision+=1
         if recovering{observeRecoverySource(currentSource(),at:event.timestamp)}
         let handlerStart=ProcessInfo.processInfo.systemUptime
+        if incidentTrace.enabled{monitorReceivedEvents+=1;monitorLastEventAt=handlerStart}
         let beganRecovering=recovering
         defer{if traceLatency{log("event_handler_finished",["eventType":type.rawValue,"code":event.getIntegerValueField(.keyboardEventKeycode),"beganRecovering":beganRecovering,"isProbeEvent":event.getIntegerValueField(.eventSourceUserData)==marker,"durationMs":(ProcessInfo.processInfo.systemUptime-handlerStart)*1000])}}
         if !OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)),event.getIntegerValueField(.eventSourceUserData) != SyntheticInputMarker.manualEdit {
@@ -1292,6 +1293,7 @@ final class MismatchRecoveryEngine:NSObject {
     }
     func park(_ reason:String){
         monitorRestartAllowed=false
+        monitorStopReason=6
         failureDiagnostic("park",reason)
         clearSourceInteraction()
         // Focus/text changes cannot be undone safely. Keep the queue in memory and
@@ -1331,6 +1333,8 @@ final class MismatchRecoveryEngine:NSObject {
     var didVerifyReplay:(MismatchReplayLedger,MismatchSnapshot)->Void = {_,_ in}
     var didRetainInput:()->Void = {}
     var suspended=false
+    var monitorFailureCount=0,monitorFailureKind=0,monitorStopReason=0,monitorReceivedEvents=0
+    var monitorLastEventAt:Double?
     var monitorRestartAllowed=false
     static func supports(_ app:NSRunningApplication?)->Bool {
         guard let app,app.processIdentifier != ProcessInfo.processInfo.processIdentifier else{return false}
@@ -1409,6 +1413,7 @@ final class MismatchRecoveryEngine:NSObject {
         followFrontmost();didStart()
     }
     func suspend(_ reason:String){
+        monitorStopReason=["tap_disabled","switch_gate_disabled","input_unavailable","hanq_input_stopped"].firstIndex(of:reason).map{$0+1} ?? 5
         if reason != "tap_disabled" {monitorRestartAllowed=false}
         let reasons=["tap_disabled","switch_gate_disabled","input_unavailable","hanq_input_stopped"]
         InputDiagnostics.shared.record("mismatch.suspend reasonCode=\(reasons.firstIndex(of:reason).map{$0+1} ?? 0)")
