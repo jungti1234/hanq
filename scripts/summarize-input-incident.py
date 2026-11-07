@@ -77,11 +77,18 @@ ONSET_REPRESENTATION=['unmeasured','recorded','batch_unavailable','role_or_secur
 ONSET_LOOKUP=['unmeasured','available','no_same_field_record','no_pre_key_record','pre_key_sample_too_old','clock_invalid','cache_expired','not_ready','front_or_owner_changed','window_unavailable','window_changed','not_ready_after_read','front_changed_after_read']
 ONSET_HISTORY=['unmeasured','key_count','selection_or_range','layout_unavailable','initial_unsupported','shifted_space','unmapped_key','missing_medial','body_mismatch']
 
+ONSET_OUTSIDE_NAMES={
+    'switchKey':'unmeasured matched no_switch timestamp_missing first_not_seen first_differs expired app_changed original_window_missing current_window_missing window_changed layout_not_ready first_window_missing first_window_changed'.split(),
+    'draftRead':'unmeasured recorded attributes_unavailable role_unavailable text_unavailable too_large not_enabled visibility_unproven window_unproven selection_unreadable context_unproven caret_unproven deadline observer_missing'.split(),
+    'draftLookup':'not_checked verified_entry verified_draft no_field_record no_pre_key_record expired window_unavailable window_changed unusable'.split(),
+    'insertedSpan':'not_checked range_invalid first_not_roman surroundings_changed keys_differ partial matched'.split(),
+}
 def onset_detail(value):
     limits={'discovery':9,'representation':13,'lookup':12,'history':8}
+    if isinstance(value,dict) and set(value)&set(ONSET_OUTSIDE_NAMES):limits.update({k:len(names)-1 for k,names in ONSET_OUTSIDE_NAMES.items()})
     if not isinstance(value,dict) or set(value)-{'observationAgeMicros'}!=set(limits) or any(type(value.get(k)) is not int or not 0<=value[k]<=limit for k,limit in limits.items()):raise ValueError('invalid onset detail')
     if 'observationAgeMicros' in value and (type(value['observationAgeMicros']) is not int or not 0<=value['observationAgeMicros']<=60_000_000):raise ValueError('invalid onset detail age')
-    return dict(discovery=ONSET_DISCOVERY[value['discovery']],representation=ONSET_REPRESENTATION[value['representation']],lookup=ONSET_LOOKUP[value['lookup']],history=ONSET_HISTORY[value['history']],interpretation='last_evaluated_branch_only_age_capped_60s_not_IME_root_cause')
+    return dict(**{k:names[value[k]] for k,names in ONSET_OUTSIDE_NAMES.items() if k in value},discovery=ONSET_DISCOVERY[value['discovery']],representation=ONSET_REPRESENTATION[value['representation']],lookup=ONSET_LOOKUP[value['lookup']],history=ONSET_HISTORY[value['history']],interpretation='last_evaluated_branch_only_age_capped_60s_not_IME_root_cause')
 
 SELECTION_MOTIONS={0:'unknown',1:'unchanged',2:'backward',3:'forward',4:'selection_started',5:'selection_collapsed',6:'selection_changed',7:'invalid_range'}
 

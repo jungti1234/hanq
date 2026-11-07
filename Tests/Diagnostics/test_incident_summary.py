@@ -54,6 +54,12 @@ class IncidentSummaryTests(unittest.TestCase):
         self.assertEqual(parsed['detail_names']['representation'],'count_unavailable')
         self.assertEqual(parsed['detail_names']['lookup'],'no_same_field_record')
         self.assertEqual(parsed['detail_names']['history'],'body_mismatch')
+        outside=dict(switchKey=1,draftRead=7,draftLookup=3,insertedSpan=0)
+        extended=dict(row,onsetEvidence=dict(keys=2,detail=dict(detail,**outside)))
+        named=summary.summarize(dict(schema=1,trigger=1,frames=[extended]))['onset_decisions'][0]['detail_names']
+        self.assertEqual([named[k] for k in outside],['matched','visibility_unproven','no_field_record','not_checked'])
+        for invalid_group in [dict(switchKey=1),dict(outside,insertedSpan=7),dict(outside,draftRead=True),dict(outside,cursor=5)]:
+            with self.assertRaises(ValueError):summary.onset_detail(dict(detail,**invalid_group))
         for update in [dict(discovery=10),dict(representation=14),dict(lookup=13),dict(history=9),dict(history=True),dict(text='secret'),dict(observationAgeMicros=-1),dict(observationAgeMicros=60000001),dict(observationAgeMicros=True)]:
             invalid=dict(row,onsetEvidence=dict(keys=1,detail=dict(detail,**update)))
             with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[invalid]))

@@ -16,7 +16,7 @@ final class OnsetRecoveryEngine:NSObject {
     }
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
     var canBeginRepair: () -> Bool = { true }
-    var permitsUnfocusedReplay:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->Bool = {_,_ in false}
+    var unfocusedKeyCheck:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->InputIncidentTrace.SwitchKeyCheck = {_,_ in .noSwitch}
     var willBeginRepair: () -> Void = {}
     var willReplay: (AXUIElement,String,Int) -> Void = {_,_,_ in}
     var didPostReplayEvent: (CGEvent) -> Void = {_ in}
@@ -239,15 +239,32 @@ final class OnsetRecoveryEngine:NSObject {
         // A display that disappeared on focus can witness the old jamo-only
         // path. Roman text needs an actual pre-key baseline plus the exact
         // first original event from the explicit unfocused switch.
-        let fromOutside = !publicationMatches && p.first.sourceID==onsetKoreanID
-            && permitsUnfocusedReplay(p.first.eventTimestamp,false)
+        let considerOutside = !publicationMatches && p.first.sourceID==onsetKoreanID
+        var switchCheck:InputIncidentTrace.SwitchKeyCheck = considerOutside ? unfocusedKeyCheck(p.first.eventTimestamp,false):.unmeasured
+        let fromOutside = switchCheck == .matched
+        let measure=considerOutside && focusHandoff.collectWitnessDiagnostics
+        var lookup=InputIncidentTrace.DraftLookup.unmeasured
+        var span=InputIncidentTrace.InsertedSpan.unmeasured
         // The scan can also witness an insertion in the middle of a real
         // draft. An empty field needs the independent empty-editor checks.
-        let draft = fromOutside && observed==nil ? outsideObservation.baseline(for:snap.element,before:p.first.time):nil
+        let draft = fromOutside && observed==nil ? outsideObservation.baseline(for:snap.element,before:p.first.time,report:measure ? {lookup=$0}:nil):nil
         let romanBaseline = fromOutside ? (observed ?? draft.flatMap{
             !$0.text.isEmpty && $0.selection.length==0 && $0.selection.location>=0
                 && $0.selection.location<=$0.text.utf16.count ? $0:nil
         }):nil
+        if measure,fromOutside {
+            if observed != nil{lookup = .entry}
+            else if draft != nil && romanBaseline==nil{lookup = .unusable}
+        }
+        func outsideDetail(_ history:Int=0)->InputIncidentTrace.OnsetDetail? {
+            guard var detail=focusHandoff.witnessDetail(for:snap.element,history:history) else{return nil}
+            if measure {
+                detail.switchKey=switchCheck.rawValue
+                detail.draftRead=focusHandoff.preKeyDraftRead(snap.element,before:p.first.time).rawValue
+                detail.draftLookup=lookup.rawValue;detail.insertedSpan=span.rawValue
+            }
+            return detail
+        }
         let baseline=publicationMatches ? nil:
             passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
         // A terminal plain Space selects the committed-word strategy even
@@ -257,12 +274,12 @@ final class OnsetRecoveryEngine:NSObject {
             || firstPublication?.matches(p,snap) == true)
         if allowObservedReplay,Self.awaitingEmptyEntryPublication(baseline,current:snap){return true}
         var rejection=OnsetLateSequenceDetector.Rejection.unmeasured
-        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,romanBaseline:romanBaseline.map{($0.text,$0.selection.location)},onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
-        case .waiting:decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_wait",hasSnapshot:true);return true
-        case .complete:decisionTrace.onsetDecision(.history,.historyComplete,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
-        case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count,detail:focusHandoff.witnessDetail(for:snap.element,history:rejection.rawValue));traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
+        switch OnsetLateSequenceDetector.inspect(keys:p.keys,before:baseline?.text ?? "",caret:baseline?.selection.location ?? 0,text:snap.text,selection:snap.selection,sourceID:p.first.sourceID,allowObservedReplay:allowObservedReplay,romanBaseline:romanBaseline.map{($0.text,$0.selection.location)},onSpan:measure ? {span=$0}:nil,onRejected:decisionTrace.enabled ? {rejection=$0}:nil) {
+        case .waiting:decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count,detail:measure ? outsideDetail():nil);traceReentryObservation("history_wait",hasSnapshot:true);return true
+        case .complete:decisionTrace.onsetDecision(.history,.historyComplete,firstTime:p.first.time,keys:p.keys.count,detail:measure ? outsideDetail():nil);traceReentryObservation("history_complete",hasSnapshot:true);gate.discardPassed(reason:.already_composed);return false
+        case .rejected:decisionTrace.onsetDecision(.history,.historyRejected,firstTime:p.first.time,keys:p.keys.count,detail:outsideDetail(rejection.rawValue));traceReentryObservation("history_rejected",hasSnapshot:true);gate.discardPassed(reason:.detector_rejected);return false
         case .candidate(let candidate):
-            decisionTrace.onsetDecision(.history,.historyCandidate,firstTime:p.first.time,keys:p.keys.count)
+            decisionTrace.onsetDecision(.history,.historyCandidate,firstTime:p.first.time,keys:p.keys.count,detail:measure ? outsideDetail():nil)
             traceReentryObservation("history_candidate",hasSnapshot:true)
             if candidate.isObservedReplay {guard p.pressed.isEmpty else{decisionTrace.onsetDecision(.claim,.keysStillDown,firstTime:p.first.time,keys:p.keys.count);return true}}
             else {guard p.pressed.isEmpty || p.onlyFinalPlainSpaceDown else{decisionTrace.onsetDecision(.claim,.keysStillDown,firstTime:p.first.time,keys:p.keys.count);return true}}
@@ -270,7 +287,11 @@ final class OnsetRecoveryEngine:NSObject {
                 // For an entirely Roman result the editor has shown no Korean
                 // output yet. Wait without owning keys until the layout agrees.
                 let allRoman=candidate.roman.utf8.allSatisfy{$0<128}
-                guard permitsUnfocusedReplay(p.first.eventTimestamp,allRoman) else{return true}
+                switchCheck=unfocusedKeyCheck(p.first.eventTimestamp,allRoman)
+                guard switchCheck == .matched else{
+                    if measure{decisionTrace.onsetDecision(.history,.historyWaiting,firstTime:p.first.time,keys:p.keys.count,detail:outsideDetail())}
+                    return true
+                }
             }
             planElement=snap.element;repairSourceID=p.first.sourceID
             beginRecovery(candidate,snap,passed:p);return true

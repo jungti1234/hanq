@@ -405,11 +405,22 @@ final class InputIncidentTrace {
         case proofCurrent,proofUnavailable,historyWaiting,historyComplete,historyRejected,historyCandidate,keysStillDown
         case claimRejected,claimAccepted,guardFailed,fieldChanged,reservationReleased,selectionNotWritable
     }
+    // Branch outcomes only; no identifiers, event timestamps, text or cursor positions.
+    enum SwitchKeyCheck:Int {case unmeasured, matched, noSwitch, timestampMissing, firstNotSeen, firstDiffers, expired, appChanged, originalWindowMissing, currentWindowMissing, windowChanged, layoutNotReady, firstWindowMissing, firstWindowChanged}
+    enum DraftRead:Int {case unmeasured, recorded, attributesUnavailable, roleUnavailable, textUnavailable, textTooLarge, notEnabled, visibilityUnproven, windowUnproven, selectionUnreadable, contextUnproven, caretUnproven, deadline, observerMissing}
+    enum DraftLookup:Int {case unmeasured, entry, outside, noFieldRecord, noPreKeyRecord, expired, windowUnavailable, windowChanged, unusable}
+    enum InsertedSpan:Int {case unmeasured, anchorOrRangeInvalid, notRomanFirst, surroundingsChanged, keysDiffer, partial, matched}
     struct OnsetDetail:Codable {
         // Fixed branch outcomes only. Observation age is capped at 60s.
         let discovery,representation,lookup,history:Int
         let observationAgeMicros:Int?
-        var signature:Int {(((discovery*14+representation)*13+lookup)*9+history)+1}
+        // All four are omitted in older captures / unrelated decisions.
+        var switchKey:Int?,draftRead:Int?,draftLookup:Int?,insertedSpan:Int?
+        var signature:Int {
+            let base=(((discovery*14+representation)*13+lookup)*9+history)+1
+            guard let key=switchKey,let read=draftRead,let stored=draftLookup,let span=insertedSpan else{return base}
+            return 65536+(((base*14+key)*14+read)*9+stored)*7+span
+        }
     }
     struct OnsetEvidence:Codable {
         // 0 keys = unmeasured. nil age = no first-key clock or out of range.

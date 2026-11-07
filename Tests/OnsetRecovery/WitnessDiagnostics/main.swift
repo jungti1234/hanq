@@ -127,12 +127,20 @@ let first=ProcessInfo.processInfo.systemUptime
 func detail(_ lookup:Int,_ age:Int)->InputIncidentTrace.OnsetDetail{.init(discovery:8,representation:1,lookup:lookup,history:0,observationAgeMicros:age)}
 for i in 0..<50{trace.onsetDecision(.publication,.representationMissing,firstTime:first,keys:1,detail:detail(2,i))}
 trace.onsetDecision(.publication,.representationMissing,firstTime:first,keys:1,detail:detail(4,100))
+var independent=detail(4,100)
+independent.switchKey=1;independent.draftRead=7;independent.draftLookup=3;independent.insertedSpan=0
+for _ in 0..<20{trace.onsetDecision(.history,.historyRejected,firstTime:first,keys:2,detail:independent)}
+independent.switchKey=5
+trace.onsetDecision(.history,.historyRejected,firstTime:first,keys:2,detail:independent)
 trace.flush();trace.mark();trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
 check(captures.allSatisfy{(try? RecorderTrace.decode(JSONEncoder().encode($0))) != nil},"strict optional detail")
 let frames=captures.flatMap{$0.frames}.filter{$0.kind == .onsetDecision}
-check(frames.count==2,"state changes survive coalescing but age-only changes do not flood")
+check(frames.count==4,"state changes survive coalescing but age-only changes do not flood")
 let object=try! JSONSerialization.jsonObject(with:JSONEncoder().encode(captures[0])) as! [String:Any]
 for bad:[String:Any] in [
+    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":1],
+    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":14,"draftRead":0,"draftLookup":0,"insertedSpan":0],
+    ["discovery":1,"representation":1,"lookup":2,"history":0,"switchKey":true,"draftRead":0,"draftLookup":0,"insertedSpan":0],
     ["discovery":10,"representation":1,"lookup":2,"history":0],
     ["discovery":1,"representation":14,"lookup":2,"history":0],
     ["discovery":1,"representation":1,"lookup":13,"history":0],

@@ -8,6 +8,7 @@ enum OnsetLateSequenceDetector {
     static func inspect(keys:[(UInt16,Bool)],before:String,caret:Int,text:String,selection:NSRange,
                         sourceID:String=KoreanKeyboardLayout.twoSetID,allowObservedReplay:Bool=false,
                         romanBaseline:(text:String,caret:Int)?=nil,
+                        onSpan:((InputIncidentTrace.InsertedSpan)->Void)?=nil,
                         onRejected:((Rejection)->Void)?=nil)->Result {
         func reject(_ reason:Rejection)->Result{onRejected?(reason);return .rejected}
         guard (2...16).contains(keys.count) else{return reject(.keyCount)}
@@ -49,14 +50,17 @@ enum OnsetLateSequenceDetector {
         if view(joined){return .complete}
         // This option requires a pre-key editor baseline. A disappearing
         // display and a matching word alone cannot prove who inserted it.
+        if romanBaseline != nil{onSpan?(.anchorOrRangeInvalid)}
         if let anchor=romanBaseline,sourceID==KoreanKeyboardLayout.twoSetID,
            !keys.contains(where:{$0.0==49}),anchor.caret>=0,anchor.caret<=anchor.text.utf16.count,
            selection.location>anchor.caret,selection.location<=text.utf16.count {
             let body=text as NSString
             let range=NSRange(location:anchor.caret,length:selection.location-anchor.caret)
             let inserted=body.substring(with:range)
-            if inserted.utf8.first.map({(65...90).contains($0) || (97...122).contains($0)})==true,
-               body.replacingCharacters(in:range,with:"").utf16.elementsEqual(anchor.text.utf16) {
+            if inserted.utf8.first.map({(65...90).contains($0) || (97...122).contains($0)}) != true {onSpan?(.notRomanFirst)}
+            else if !body.replacingCharacters(in:range,with:"").utf16.elementsEqual(anchor.text.utf16){onSpan?(.surroundingsChanged)}
+            else {
+                onSpan?(.keysDiffer)
                 var roman=""
                 var pending=false
                 for (index,key) in keys.enumerated() {
@@ -67,12 +71,13 @@ enum OnsetLateSequenceDetector {
                         let candidate=roman+render(chars[(index+1)..<end])
                         guard inserted.utf16.elementsEqual(candidate.utf16) else{continue}
                         if end==keys.count {
+                            onSpan?(.matched)
                             return .candidate(OnsetRecoveryPlan(before:anchor.text,caret:anchor.caret,roman:inserted,codes:keys,observedReplayText:joined,literalBody:true))
                         }
                         pending=true
                     }
                 }
-                if pending{return .waiting}
+                if pending{onSpan?(.partial);return .waiting}
             }
         }
         if view(split),split != joined {

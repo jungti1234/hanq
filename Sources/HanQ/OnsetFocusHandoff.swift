@@ -26,8 +26,14 @@ final class OnsetFocusHandoff {
         didSet {if oldValue != collectWitnessDiagnostics && !collectWitnessDiagnostics {resetWitnessDiagnostics()}}
     }
     private var representationObservations:[(field:AXUIElement,reason:Int,time:Double)]=[]
+    // Bounded numeric outcomes of existing reads. Select by completion before the
+    // first key so a later focus/read cannot masquerade as a pre-key proof.
+    private var draftReads:[(field:AXUIElement,at:Double,result:InputIncidentTrace.DraftRead)]=[]
+    func preKeyDraftRead(_ field:AXUIElement,before first:Double)->InputIncidentTrace.DraftRead {
+        draftReads.last{$0.at<first && first-$0.at<=0.75 && CFEqual($0.field,field)}?.result ?? .unmeasured
+    }
     private var lastDiscovery=0,lastWitnessLookup=0,lastContextDiagnostic=0
-    func resetWitnessDiagnostics(){representationObservations=[];lastDiscovery=0;lastWitnessLookup=0;lastContextDiagnostic=0}
+    func resetWitnessDiagnostics(){representationObservations=[];draftReads=[];lastDiscovery=0;lastWitnessLookup=0;lastContextDiagnostic=0}
     func noteDiscovery(_ reason:Int){if collectWitnessDiagnostics{lastDiscovery=reason}}
     private func noteRepresentation(_ field:AXUIElement,_ reason:Int,at time:Double){
         guard collectWitnessDiagnostics else{return}
@@ -137,12 +143,21 @@ final class OnsetFocusHandoff {
     private func emptyEditor(_ field:AXUIElement,window:AXUIElement,observing:Bool=false,recording:Bool=true,readDraft:((OnsetSnapshot)->Void)?=nil)->Bool {
         let began=now()
         var representationReason=2
-        defer{if observing{noteRepresentation(field,representationReason,at:began)}}
+        var draftRead=InputIncidentTrace.DraftRead.attributesUnavailable
+        defer{
+            if observing {
+                noteRepresentation(field,representationReason,at:began)
+                if collectWitnessDiagnostics {
+                    if draftReads.count>=16{draftReads.removeFirst()}
+                    draftReads.append((field,now(),draftRead))
+                }
+            }
+        }
         let values=batch(field,Self.details)
         lastFieldCheck=1
         guard values.count==Self.details.count else{return false}
         lastFieldCheck=2
-        guard let role=values[0] as? String,OnsetEditableRole.supports(role),values[1] as? String != kAXSecureTextFieldSubrole else{representationReason=3;return false}
+        guard let role=values[0] as? String,OnsetEditableRole.supports(role),values[1] as? String != kAXSecureTextFieldSubrole else{representationReason=3;draftRead = .roleUnavailable;return false}
         let text:String?,valueKind:Int
         if let raw=values[2],CFGetTypeID(raw) != CFNullGetTypeID() {
             if let string=raw as? String{text=string;valueKind=1}
@@ -154,17 +169,23 @@ final class OnsetFocusHandoff {
                   number.doubleValue.isFinite,number.doubleValue>=0 else{return nil}
             return number.doubleValue
         }()
-        if observing,let text,text.utf16.count<=16384,
-           values[4] as? Bool==true,values[5] as? Bool==false,
-           let windowValue=values[6],CFGetTypeID(windowValue)==AXUIElementGetTypeID(),CFEqual(windowValue,window),
-           let rawRange=values[3],CFGetTypeID(rawRange)==AXValueGetTypeID(),
-           ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid {
+        func captureDraft()->InputIncidentTrace.DraftRead {
+            guard let text else{return .textUnavailable}
+            guard text.utf16.count<=16384 else{return .textTooLarge}
+            guard values[4] as? Bool==true else{return .notEnabled}
+            guard values[5] as? Bool==false else{return .visibilityUnproven}
+            guard let w=values[6],CFGetTypeID(w)==AXUIElementGetTypeID(),CFEqual(w,window) else{return .windowUnproven}
+            guard let raw=values[3],CFGetTypeID(raw)==AXValueGetTypeID() else{return .selectionUnreadable}
+            guard ready(),let pid=frontPID(),owner(window)==pid,owner(field)==pid else{return .contextUnproven}
             var range=CFRange()
-            if AXValueGetValue(rawRange as! AXValue,.cfRange,&range),range.length==0,
-               range.location>=0,range.location<=text.utf16.count,now()>=began,now()-began<0.012 {
-                observeSnapshot?(.init(element:field,text:text,selection:NSRange(location:range.location,length:0)))
-            }
+            guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.length==0,
+                  range.location>=0,range.location<=text.utf16.count else{return .caretUnproven}
+            guard now()>=began,now()-began<0.012 else{return .deadline}
+            guard let observeSnapshot else{return .observerMissing}
+            observeSnapshot(.init(element:field,text:text,selection:NSRange(location:range.location,length:0)))
+            return .recorded
         }
+        if observing{draftRead=captureDraft()}
         func observeRepresentation(){
             guard let text else{representationReason=4;return}
             guard !text.isEmpty,text.utf16.count<=4096 else{representationReason=5;return}

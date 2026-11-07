@@ -35,6 +35,7 @@ final class SourceSwitchBarrier {
         let window:AXUIElement?
         var first:CGEventTimestamp=0
         var sampled=0
+        var firstCheck=InputIncidentTrace.SwitchKeyCheck.firstNotSeen
     }
     private var unfocusedSwitch:UnfocusedSwitch?
     var frontPID:()->pid_t? = {NSWorkspace.shared.frontmostApplication?.processIdentifier}
@@ -52,12 +53,18 @@ final class SourceSwitchBarrier {
         unfocusedSwitch=UnfocusedSwitch(began:now(),pid:pid,window:frontWindow(pid))
     }
     func cancelUnfocusedSwitch(){unfocusedSwitch=nil}
-    func isFirstUnfocusedSwitchKey(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->Bool {
-        guard let attempt=unfocusedSwitch,timestamp != 0,attempt.first==timestamp,
-              now()-attempt.began<=2.5 else{return false}
-        guard frontPID()==attempt.pid,let original=attempt.window,let current=frontWindow(attempt.pid),
-              CFEqual(original,current) else{return false}
-        return !needsReadyLayout || initialLayout?() == .ready
+    func unfocusedKeyCheck(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->InputIncidentTrace.SwitchKeyCheck {
+        guard let attempt=unfocusedSwitch else{return .noSwitch}
+        guard timestamp != 0 else{return .timestampMissing}
+        guard attempt.first != 0 else{return attempt.firstCheck}
+        guard attempt.first==timestamp else{return .firstDiffers}
+        guard now()-attempt.began<=2.5 else{return .expired}
+        guard frontPID()==attempt.pid else{return .appChanged}
+        guard let original=attempt.window else{return .originalWindowMissing}
+        guard let current=frontWindow(attempt.pid) else{return .currentWindowMissing}
+        guard CFEqual(original,current) else{return .windowChanged}
+        guard !needsReadyLayout || initialLayout?() == .ready else{return .layoutNotReady}
+        return .matched
     }
     // Only remember the identity of a key that is passing normally. Changing
     // focus on that first key is application behavior; never hold it here.
@@ -75,9 +82,12 @@ final class SourceSwitchBarrier {
             guard elapsed<=MismatchSourceEvidence.confirmationSeconds,event.timestamp != 0,
                   frontPID()==attempt.pid else{unfocusedSwitch=nil;return}
             // A window change can keep the same process and the same layout.
-            if let original=attempt.window,let current=frontWindow(attempt.pid),CFEqual(original,current) {
-                attempt.first=event.timestamp
-            }
+            if let original=attempt.window {
+                if let current=frontWindow(attempt.pid) {
+                    if CFEqual(original,current){attempt.first=event.timestamp}
+                    else{attempt.firstCheck = .firstWindowChanged}
+                }else{attempt.firstCheck = .firstWindowMissing}
+            }else{attempt.firstCheck = .originalWindowMissing}
         }
         if attempt.sampled<2,elapsed<=MismatchSourceEvidence.confirmationSeconds {
             attempt.sampled+=1

@@ -17,12 +17,18 @@ final class OnsetOutsideObservation {
         return value
     }
     func reset(){entries=[];root=nil;queue=[];visited=[];nextCycle=0}
-    func baseline(for field:AXUIElement,before time:Double)->OnsetSnapshot? {
-        guard let entry=entries.last(where:{CFEqual($0.snapshot.element,field) && $0.completed<time && time-$0.completed<=0.75}) else{return nil}
-        if let window=entry.window {
-            guard let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID(),CFEqual(actual,window) else{return nil}
+    func baseline(for field:AXUIElement,before time:Double,report:((InputIncidentTrace.DraftLookup)->Void)?=nil)->OnsetSnapshot? {
+        var missing=InputIncidentTrace.DraftLookup.noFieldRecord
+        for entry in entries.reversed() where CFEqual(entry.snapshot.element,field) {
+            guard entry.completed<time else{if missing == .noFieldRecord{missing = .noPreKeyRecord};continue}
+            guard time-entry.completed<=0.75 else{missing = .expired;continue}
+            if let window=entry.window {
+                guard let actual=read(field,kAXWindowAttribute),CFGetTypeID(actual)==AXUIElementGetTypeID() else{report?(.windowUnavailable);return nil}
+                guard CFEqual(actual,window) else{report?(.windowChanged);return nil}
+            }
+            report?(.outside);return entry.snapshot
         }
-        return entry.snapshot
+        report?(missing);return nil
     }
     func remember(_ snapshot:OnsetSnapshot,window:AXUIElement){
         let completed=clock()

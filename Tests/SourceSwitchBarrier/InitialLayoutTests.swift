@@ -19,22 +19,22 @@ func runInitialLayoutTests(){
         let first=key(15),second=key(40);first.timestamp=1000;second.timestamp=2000
         check(!b.request(ko,at:900),"outside switch uses direct selection")
         b.didSwitchWithoutField(ko,at:900);t=0.123
-        check(!b.receive(.keyDown,first) && b.isFirstUnfocusedSwitchKey(1000),"first outside key stays native and has a matching identity")
+        check(!b.receive(.keyDown,first) && b.unfocusedKeyCheck(1000) == .matched,"first outside key stays native and has a matching identity")
         b.initialLayout={.conflicting}
-        check(!b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"entirely ASCII output waits without owning input")
+        check(b.unfocusedKeyCheck(1000,needsReadyLayout:true) == .layoutNotReady,"entirely ASCII output waits without owning input")
         b.initialLayout={.ready}
-        check(b.isFirstUnfocusedSwitchKey(1000,needsReadyLayout:true),"two-set layout allows the verified native replay")
+        check(b.unfocusedKeyCheck(1000,needsReadyLayout:true) == .matched,"two-set layout allows the verified native replay")
         t=0.211
-        check(!b.receive(.keyDown,second) && !b.isFirstUnfocusedSwitchKey(2000),"later keys cannot claim the first identity")
-        pid=92;check(!b.isFirstUnfocusedSwitchKey(1000),"a different application cannot use the history");pid=91
-        window=AXUIElementCreateApplication(4102);check(!b.isFirstUnfocusedSwitchKey(1000),"different window in the same application");window=originalWindow
+        check(!b.receive(.keyDown,second) && b.unfocusedKeyCheck(2000) == .firstDiffers,"later keys cannot claim the first identity")
+        pid=92;check(b.unfocusedKeyCheck(1000) == .appChanged,"a different application cannot use the history");pid=91
+        window=AXUIElementCreateApplication(4102);check(b.unfocusedKeyCheck(1000) == .windowChanged,"different window in the same application");window=originalWindow
         let click=CGEvent(mouseEventSource:nil,mouseType:.leftMouseDown,mouseCursorPosition:.zero,mouseButton:.left)!
-        check(!b.receive(.leftMouseDown,click) && !b.isFirstUnfocusedSwitchKey(1000),"pointer invalidation")
+        check(!b.receive(.leftMouseDown,click) && b.unfocusedKeyCheck(1000) != .matched,"pointer invalidation")
         b.didSwitchWithoutField(ko,at:901);t+=0.51
-        check(!b.receive(.keyDown,first) && !b.isFirstUnfocusedSwitchKey(1000),"first key outside the switch deadline")
+        check(!b.receive(.keyDown,first) && b.unfocusedKeyCheck(1000) != .matched,"first key outside the switch deadline")
         b.didSwitchWithoutField(ko,at:902)
         _=b.receive(.keyDown,first);_=b.request(abc,at:3000)
-        check(!b.isFirstUnfocusedSwitchKey(1000) && !b.busy,"another source switch invalidates the observation")
+        check(b.unfocusedKeyCheck(1000) != .matched && !b.busy,"another source switch invalidates the observation")
     }
     final class Rig {
         let b=B()

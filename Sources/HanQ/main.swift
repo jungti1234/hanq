@@ -9,7 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let jamoRepair = JamoRepair()
     lazy var onsetRecovery: OnsetRecoveryController = {
         let controller = OnsetRecoveryController()
-        controller.permitsUnfocusedReplay = { [weak self] in self?.sourceSwitchBarrier.isFirstUnfocusedSwitchKey($0,needsReadyLayout:$1) ?? false }
+        controller.unfocusedKeyCheck = { [weak self] in self?.sourceSwitchBarrier.unfocusedKeyCheck($0,needsReadyLayout:$1) ?? .noSwitch }
         controller.canRun = { [weak self] in
             guard let self else { return false }
             return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
