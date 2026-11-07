@@ -5,14 +5,17 @@ let onsetKoreanID="com.apple.inputmethod.Korean.2SetKorean"
 struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange }
 final class OnsetRecoveryEngine:NSObject {
     var decisionTrace=InputIncidentTrace.shared
+    let diagnosticHistory=OnsetDiagnosticHistory()
     private var witnessTraceID:ObjectIdentifier?
     private var witnessDiagnosticGeneration:Int32=0
     func synchronizeWitnessDiagnostics(){
         let generation=decisionTrace.collectionGeneration,traceID=ObjectIdentifier(decisionTrace)
         if witnessTraceID != traceID || witnessDiagnosticGeneration != generation {
             focusHandoff.resetWitnessDiagnostics();witnessTraceID=traceID;witnessDiagnosticGeneration=generation
+            diagnosticHistory.reset()
         }
         focusHandoff.collectWitnessDiagnostics=generation>0
+        diagnosticHistory.emit={ [weak self] value,capture in self?.decisionTrace.onsetObservation(value,capture:capture) }
     }
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
     var canBeginRepair: () -> Bool = { true }
@@ -473,6 +476,9 @@ final class OnsetRecoveryEngine:NSObject {
         }
         focusHandoff.observeSnapshot={ [weak self] snapshot in
             self?.outsideObservation.remember(snapshot,window:window)
+            if let self,self.focusHandoff.collectWitnessDiagnostics,!IsSecureEventInputEnabled(){
+                self.diagnosticHistory.remember(snapshot,at:ProcessInfo.processInfo.systemUptime)
+            }
         }
         focusHandoff.advance(window:window,outside:outside)
     }
@@ -821,6 +827,12 @@ final class OnsetRecoveryEngine:NSObject {
         let observerResult=AXObserverCreate(target.processIdentifier,{_,_,notification,ref in
             guard let ref else{return}
             let engine=Unmanaged<OnsetRecoveryEngine>.fromOpaque(ref).takeUnretainedValue()
+            if engine.decisionTrace.enabled,!IsSecureEventInputEnabled(){
+                let reason=CFEqual(notification,kAXValueChangedNotification as CFString) ? 1:
+                    (CFEqual(notification,kAXSelectedTextChangedNotification as CFString) ? 2:
+                    (CFEqual(notification,kAXLayoutChangedNotification as CFString) ? 3:4))
+                engine.diagnosticHistory.notification(reason,at:ProcessInfo.processInfo.systemUptime)
+            }
             if CFEqual(notification,kAXLayoutChangedNotification as CFString){engine.focusHandoff.reset()}
             engine.requestImmediateObservation()
         },&observer)
@@ -842,6 +854,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard enabled,!recovering else{return}
         synchronizeWitnessDiagnostics()
         if currentLayout() == nil,gate?.reservation() == nil {
+            diagnosticHistory.finish(2,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
             cancelDeferredObservation()
             gate?.configurePassedBaseline(nil)
             gate?.configureEarly(false);onset.cancel();planElement=nil
@@ -849,6 +862,9 @@ final class OnsetRecoveryEngine:NSObject {
             return
         }
         let observed=snapshot();traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
+        if decisionTrace.enabled,!IsSecureEventInputEnabled(){
+            diagnosticHistory.observe(observed,passed:gate?.passedObservation(),source:cachedLayoutID,at:ProcessInfo.processInfo.systemUptime)
+        }else if !decisionTrace.enabled || IsSecureEventInputEnabled(){diagnosticHistory.reset()}
         sampleEarly(observed)
     }
 
@@ -869,6 +885,7 @@ final class OnsetRecoveryEngine:NSObject {
         let claimed=passed.map{gate?.claimPassed($0) ?? false} ?? deferred.map{gate?.claimDeferred($0) ?? false} ?? (gate?.claimEarly() ?? true)
         decisionTrace.onsetDecision(.claim,claimed ? .claimAccepted:.claimRejected,firstTime:passed?.first.time ?? deferred?.time,keys:passed?.keys.count ?? 0)
         guard claimed else{return}
+        diagnosticHistory.finish(4,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         if deferred != nil{log("deferred_candidate")}
         if passed != nil{log("passed_sequence_candidate")}
         willBeginRepair()
@@ -1135,6 +1152,7 @@ final class OnsetRecoveryEngine:NSObject {
         parkTerminal(reason)
     }
     func parkTerminal(_ reason:String){
+        diagnosticHistory.finish(5,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         traceSafety(.parked,reason:reason)
         retainPrefixRemainder()
         gate?.stop();collectHeld()
@@ -1150,6 +1168,7 @@ final class OnsetRecoveryEngine:NSObject {
         closeSession()
     }
     func closeSession(){
+        diagnosticHistory.finish(5,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         traceSafety(.sessionEnd)
         recoveryEpoch+=1;waitingForContext=false;firstPublication=nil
         if let axObserver {

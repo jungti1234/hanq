@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+
+ONSET_RELATIONS=['unmeasured','first_exact','split_pair_exact','composed_pair_exact','first_prefix','split_pair_prefix','composed_pair_prefix','different']
+def onset_observation(value):
+    bounds={'episode':(1,1_000_000_000),'phase':(1,3),'reason':(0,6),'keys':(1,2),'baseline':(0,4),'history':(1,2),'whole':(0,7),'draft':(0,3),'insertion':(0,7),'selection':(0,5),'unicode':(0,6),'samples':(1,1_000_000),'coalesced':(0,1_000_000),'firstKeyAgeMicros':(0,60_000_000),'firstEventTimestampMicros':(0,9_000_000_000_000_000)}
+    if not isinstance(value,dict) or set(value)-{'baselineAgeMicros'}!=set(bounds):raise ValueError('invalid onset observation fields')
+    if any(type(value[k]) is not int or not lo<=value[k]<=hi for k,(lo,hi) in bounds.items()):raise ValueError('invalid onset observation code')
+    if 'baselineAgeMicros' in value and (type(value['baselineAgeMicros']) is not int or not 0<=value['baselineAgeMicros']<=60_000_000):raise ValueError('invalid onset baseline age')
+    if (value['baseline'] in [2,3])!=('baselineAgeMicros' in value) or value['coalesced']>value['samples'] or (value['draft']!=2 and value['insertion']!=0):raise ValueError('invalid onset observation relation')
+    if not (value['reason']==0 if value['phase']==1 else 1<=value['reason']<=(4 if value['phase']==2 else 6)):raise ValueError('invalid onset observation phase')
+    return dict(value,whole_name=ONSET_RELATIONS[value['whole']],insertion_name=ONSET_RELATIONS[value['insertion']],
+        baseline_name=['field_unknown','missing','pre_key_fresh','pre_key_old','post_key_only'][value['baseline']],
+        draft_name=['unmeasured','equal','surroundings_preserved','surroundings_differ'][value['draft']],
+        history_name=['','gate_present','retained_after_gate_end'][value['history']],
+        unicode_name=['unmeasured','compatibility_jamo','modern_initial','modern_medial','modern_final','hangul_syllable','other'][value['unicode']],
+        interpretation='external_comparisons_only_not_insertion_provenance_or_recovery_permission')
+
 """Summarize local incident metadata. Never declares an unmatched event lost."""
 import argparse
 import collections
@@ -232,9 +248,10 @@ def capture_preservation(value):
     requests=value['requests']
     if not isinstance(requests,list) or not 1<=len(requests)<=32:raise ValueError('invalid capture requests')
     for row in requests:
-        if not isinstance(row,dict) or set(row)!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for n in row.values()) or not 1<=row['trigger']<=7 or not 1<=row['lane']<=8 or not 0<=row['detail']<=31 or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
+        if not isinstance(row,dict) or set(row)!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for n in row.values()) or not 1<=row['trigger']<=8 or not 1<=row['lane']<=8 or not 0<=row['detail']<=31 or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
         if row['trigger']==6 and not (row['event']==0 and row['inputOrigin']==0 and ((row['lane']==4 and row['detail'] in [1,2,3,4,5,6,10]) or (row['lane']==3 and row['detail'] in [7,8,9]))):raise ValueError('invalid recovery detection')
         if row['trigger']==7 and not (1<=row['lane']<=5 and 1<=row['detail']<=4 and row['event']>0 and 1<=row['inputOrigin']<=3):raise ValueError('invalid space observation')
+        if row['trigger']==8 and not (row['lane']==3 and row['detail']==0 and row['event']==0 and row['inputOrigin']==0):raise ValueError('invalid onset observation request')
     return value
 
 def capture_backlog(value):
@@ -244,7 +261,7 @@ def capture_backlog(value):
     if any(type(value[k]) is not int or value[k]<0 for k in keys-set(groups)) or (value['automaticCapacity'],value['manualCapacity'],value['requestCapacityPerTrigger'],value['requestsPerWindow'])!=(16,4,16,32) or value['pendingAutomatic']>16 or value['pendingManual']>4 or value['completedWindows']>value['submittedWindows']:raise ValueError('invalid capture backlog bounds')
     for key in groups:
         d=value[key]
-        if not isinstance(d,dict) or len(d)>7 or any(k not in ['1','2','3','4','5','6','7'] or type(v) is not int or v<=0 for k,v in d.items()):raise ValueError('invalid capture backlog counters')
+        if not isinstance(d,dict) or len(d)>8 or any(k not in ['1','2','3','4','5','6','7','8'] or type(v) is not int or v<=0 for k,v in d.items()):raise ValueError('invalid capture backlog counters')
     return value
 
 def monitor_status(value):
@@ -289,7 +306,7 @@ def summarize(data):
     if 'runID' in data and (not isinstance(run_id,str) or not re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}',run_id)):
         raise ValueError('invalid diagnostic run ID')
     lanes={1:'hid',2:'main',3:'onset',4:'mismatch',5:'annotated_boundary',6:'onset_ax',7:'mismatch_ax',8:'source_boundary'}
-    triggers={1:'manual',2:'callback_delay',3:'ax_delay',4:'possible_length_shrink',5:'source_boundary_interrupted',6:'recovery_started',7:'space_observation'}
+    triggers={1:'manual',2:'callback_delay',3:'ax_delay',4:'possible_length_shrink',5:'source_boundary_interrupted',6:'recovery_started',7:'space_observation',8:'onset_observation'}
     counts=collections.defaultdict(collections.Counter)
     active={}
     completed=[]
@@ -377,13 +394,20 @@ def summarize(data):
                 # Build 366 encoded appended boundary codes into the next lane.
                 # The marker producer uses the main lane, so these HID slots are identifiable.
                 legacy_boundary=(str(data.get('build'))=='366' and operation==7 and lane==0 and 0<=detail<=6)
-                valid=detail in ([1,2,3,5,6,7] if operation==0 else range(1,9) if operation==4 else ([0,31]+list(range(1,8)) if lane==3 else ([0]+list(range(8,13))+list(range(17,22)) if lane==1 else [0]+list(range(8,13))+list(range(17,21)) if lane==2 else [0]+list(range(8,13)) if lane<3 else [0])) if operation==5 else (range(32) if lane==7 else range(1,32)) if operation==6 else [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,25,26,27,28,29,30,31] if operation==9 else [0])
+                if operation==0:allowed=[1,2,3,5,6,7]
+                elif operation==4:allowed=range(1,9)
+                elif operation==5:
+                    allowed=([0,31]+list(range(1,8))) if lane==3 else ([0]+list(range(8,13))+list(range(17,22))) if lane==1 else ([0]+list(range(8,13))+list(range(17,21))+[22]) if lane==2 else ([0]+list(range(8,13))) if lane==0 else [0]
+                elif operation==6:allowed=range(32) if lane==7 else range(1,32)
+                elif operation==9:allowed=list(range(0,16))+[17]+list(range(24,32))
+                else:allowed=[0]
+                valid=detail in allowed
                 if (not valid and not legacy_boundary) or (group=='coalesced' and not (operation==3 or (operation==5 and ((lane==3 and detail>0) or (lane==2 and 17<=detail<=20))))):raise ValueError('invalid observation detail')
                 row=dict(operation=names[operation],lane=lanes[lane+1],detail=detail,count=n)
                 if legacy_boundary:row.update(operation="source_boundary",lane="source_boundary",detail=32+detail)
                 if operation==5 and lane<3 and 8<=detail<=12:row.update(control_role=CONTROL_ROLES[detail-8])
                 if operation==0:row.update(edge={1:'down',2:'up',3:'other'}[detail%4],consumed=detail>=4)
-                if operation==9:row.update(trigger=triggers[detail%8],reason=('post_capture' if detail>=24 else 'capture') if group=='processed' else 'pending_capture' if detail<8 else 'automatic_interval' if detail<16 else 'manual_limit')
+                if operation==9:row.update(trigger=triggers[detail%8 or 8],reason=('post_capture' if detail>=24 else 'capture') if group=='processed' else 'pending_capture' if detail<8 else 'automatic_interval' if detail<16 else 'manual_limit')
                 result.append(row)
             observation_summary[group]=result
     def valid_timing(timing):
@@ -398,7 +422,7 @@ def summarize(data):
             fields={'processed','contended','totalLockWaitMicros','maxLockWaitMicros','maxQueueMicros','clipped'}
             if not isinstance(value,dict) or set(value)!=fields or any(type(n) is not int or n<0 for n in value.values()):raise ValueError('invalid observation wait stats')
             if value['processed']!=observations['processed'][key] or value['contended']>value['processed'] or value['clipped']>value['processed'] or value['maxLockWaitMicros']>60_000_000 or value['maxQueueMicros']>60_000_000 or value['maxLockWaitMicros']>value['totalLockWaitMicros'] or (value['contended']==0 and value['totalLockWaitMicros']!=0):raise ValueError('inconsistent observation waits')
-            if row['operation']=='capture' and row['detail'] not in [1,2,3,4,5,6,7,25,26,27,28,29,30,31]:raise ValueError('invalid capture wait code')
+            if row['operation']=='capture' and row['detail'] not in list(range(0,8))+list(range(24,32)):raise ValueError('invalid capture wait code')
             observation_totals.append(dict(row,**value))
     capture_timing=data.get('captureTiming')
     if 'captureTiming' in data and not valid_timing(capture_timing):raise ValueError('invalid capture timing')
@@ -414,6 +438,7 @@ def summarize(data):
     key_rows=[]
     hud_rows=[]
     onset_rows=[]
+    onset_observation_rows=[]
     work_rows=[]
     read_rows=[]
     focus_rows=[]
@@ -426,6 +451,10 @@ def summarize(data):
     boundary_rows=[]
     for frame in data['frames']:
         lane=lanes.get(frame['lane'],'unknown')
+        if frame['kind']==15 or 'onsetObservation' in frame:
+            required={'sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','consumed','durationMicros','count','selected','field','observationTiming','onsetObservation'}
+            if set(frame)!=required or any(type(frame.get(k)) is not int for k in ['sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','durationMicros','count','field']) or frame['sequence']<=0 or frame['milliseconds']<0 or frame['kind']!=15 or frame['lane']!=3 or any(frame[k]!=0 for k in ['event','edge','category','inputOrigin','durationMicros','count','field']) or frame['consumed'] is not False or frame['selected'] is not False or not valid_timing(frame['observationTiming']):raise ValueError('invalid onset observation frame')
+            onset_observation_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],**onset_observation(frame['onsetObservation'])))
         if frame['kind']==14 or 'boundaryEvidence' in frame:
             required={'sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','consumed','durationMicros','count','selected','field','observationTiming','boundaryEvidence'}
             if set(frame)!=required or any(type(frame.get(k)) is not int for k in ['sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','durationMicros','count','field']) or frame['sequence']<=0 or frame['milliseconds']<0 or frame['kind']!=14 or frame['lane']!=8 or any(frame[k]!=0 for k in ['event','edge','category','inputOrigin','durationMicros','count','field']) or frame['consumed'] is not False or frame['selected'] is not False or not valid_timing(frame['observationTiming']):raise ValueError('invalid boundary comparison frame')
@@ -488,7 +517,7 @@ def summarize(data):
             source_evidence_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],action=source_actions[frame['edge']],**value))
         if frame['kind']==9:
             op=frame['category'];detail=frame['edge']
-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13)) if frame['lane'] in [1,2,3] else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else [1,2,3,4,5,6,7,25,26,27,28,29,30,31] if op==10 else [0]
+            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13))+list(range(17,21))+[22] if frame['lane']==3 else [0]+list(range(8,13)) if frame['lane']==1 else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else list(range(0,8))+list(range(24,32)) if op==10 else [0]
             if not observed or not 1<=op<=10 or detail not in allowed or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False):raise ValueError('invalid observation wait frame')
         if frame['kind']==8:
             site=decision_sites.get(frame['edge'],'unknown')
@@ -551,7 +580,7 @@ def summarize(data):
             'callback_work_timelines':work_timelines(work_rows,shape_rows),'work_interval_evidence':work_rows,
             'snapshot_focus_observations':focus_rows,'snapshot_read_outcomes':read_rows,'snapshot_read_outcome_counts':dict(collections.Counter(r['lane']+':'+r['outcome'] for r in read_rows)),
             'space_observations':None if preservation is None else [dict(r,reason={1:'rapid_space_downs',2:'space_consumed',3:'hanq_replay_marker',4:'repeat_flag'}[r['detail']],interpretation='observation_only_not_duplicate_text_or_root_cause') for r in preservation['requests'] if r['trigger']==7],
-            'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
+            'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'onset_observations':onset_observation_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'unfocused_switch_layout_samples':unfocused_layout_samples,
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,

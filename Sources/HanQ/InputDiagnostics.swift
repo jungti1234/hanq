@@ -368,7 +368,46 @@ struct InputIncidentShapeProbe {
 final class InputIncidentTrace {
     let fieldRegistry=InputIncidentFieldRegistry()
     enum Lane:Int,Codable {case hid=1,main,onset,mismatch,boundary,onsetAX,mismatchAX,sourceBoundary}
-    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison}
+    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison,onsetObservation}
+    struct OnsetObservation:Codable,Equatable {
+        // Fixed comparisons, not insertion provenance. No text, key values,
+        // positions, hashes, application names or editor transaction payloads.
+        var episode,phase,reason,keys,baseline,history,whole,draft,insertion,selection,unicode,samples,coalesced:Int
+        var firstKeyAgeMicros:Int
+        var firstEventTimestampMicros:Int
+        var baselineAgeMicros:Int?
+        static let required=Set(["episode","phase","reason","keys","baseline","history","whole","draft","insertion","selection","unicode","samples","coalesced","firstKeyAgeMicros","firstEventTimestampMicros"])
+        var valid:Bool {
+            (1...1_000_000_000).contains(episode) && (1...3).contains(phase) &&
+            (phase==1 ? reason==0:(phase==2 ? (1...4).contains(reason):(1...6).contains(reason))) &&
+            (1...2).contains(keys) && (0...4).contains(baseline) && (1...2).contains(history) &&
+            (0...7).contains(whole) && (0...3).contains(draft) && (0...7).contains(insertion) &&
+            (0...5).contains(selection) && (0...6).contains(unicode) &&
+            (1...1_000_000).contains(samples) && (0...samples).contains(coalesced) &&
+            (0...60_000_000).contains(firstKeyAgeMicros) && (0...9_000_000_000_000_000).contains(firstEventTimestampMicros) &&
+            (baselineAgeMicros.map{(0...60_000_000).contains($0)} ?? true) &&
+            ((baseline==2 || baseline==3) == (baselineAgeMicros != nil)) &&
+            (draft==2 || insertion==0)
+        }
+        func sameState(_ other:Self)->Bool {
+            var a=self,b=other
+            a.samples=0;b.samples=0;a.coalesced=0;b.coalesced=0
+            a.firstKeyAgeMicros=0;b.firstKeyAgeMicros=0
+            return a==b
+        }
+        static func parse(_ object:[String:Any])->Self? {
+            guard Set(object.keys).subtracting(["baselineAgeMicros"])==required,object.values.allSatisfy({value in
+                guard let n=value as? NSNumber else{return false}
+                return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
+            }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
+            return value
+        }
+        var summary:String {
+            let relation=["미측정","첫 키와 전체 일치","분리된 첫 두 키와 전체 일치","조합된 첫 두 키와 전체 일치","첫 키와 앞부분 일치","분리된 첫 두 키와 앞부분 일치","조합된 첫 두 키와 앞부분 일치","불일치"]
+            let prior=["미확인","기록 없음","입력 전 기록 있음","입력 전 기록 오래됨","입력 후 기록만 있음"]
+            return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion]) · 삽입 주체 미확인"
+        }
+    }
     struct BoundaryEvidence:Codable,Equatable {
         // Fixed relations only: never positions, selection lengths, body, keys or hashes.
         // phase: request/comparison/end; reason: none/success/deadline/context/other.
@@ -465,7 +504,7 @@ final class InputIncidentTrace {
         case manualEdit,keyboardCapture,onsetRepair,onsetReservation
         case handoffUninitialized,observationAllowed
     }
-    enum Trigger:Int,Codable,CaseIterable {case manual=1,callbackDelay,axDelay,possibleShrink,boundaryInterrupted,recoveryStarted,spaceObservation}
+    enum Trigger:Int,Codable,CaseIterable {case manual=1,callbackDelay,axDelay,possibleShrink,boundaryInterrupted,recoveryStarted,spaceObservation,onsetObservation}
     enum BoundaryStage:Int {
         case waiting=1,queued,onsetWaiting,onsetConfirmed,onsetRetimed,retained,finished,deadline,focusChanged,failed,selection,sourceCommitted
         case snapshotWait,textWait,caretWait,repairWait,repairReceiptWait,onsetReceiptWait,replayReceiptWait,focusWait,selectionCommitWait,sourceCommitWait
@@ -632,6 +671,7 @@ final class InputIncidentTrace {
         var focusEvidence:InputIncidentFocusEvidence?=nil
         var onsetEvidence:OnsetEvidence?=nil
         var boundaryEvidence:BoundaryEvidence?=nil
+        var onsetObservation:OnsetObservation?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -994,7 +1034,7 @@ final class InputIncidentTrace {
             defer{captureCredits[reason.rawValue-1].signal()}
             guard gate.generation==generation else{return}
             collectDecisionOverflow();collectCaptureOverflow();let counters=collectObservationCounters()
-            withObservation(.capture,.main,reason.rawValue,observedAt:time,enqueuedAt:enqueued){timing in
+            withObservation(.capture,.main,reason.rawValue%8,observedAt:time,enqueuedAt:enqueued){timing in
                 guard gate.generation==generation else{return}
                 mergeObservationCounters(counters)
                 let (identifier,origin)=reference.map{eventIdentity($0)} ?? (0,0)
@@ -1002,7 +1042,7 @@ final class InputIncidentTrace {
                 captureRequested[reason.rawValue,default:0]+=1
                 if reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
                     window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
-                    let code=reason == window.before.trigger ? reason.rawValue:reason.rawValue+8
+                    let code=reason == window.before.trigger ? reason.rawValue%8:reason.rawValue%8+8
                     observationOmitted[observationCode(.capture,.main,code),default:0]+=1
                     scheduleClose(window);return
                 }
@@ -1017,7 +1057,7 @@ final class InputIncidentTrace {
                 let deferred=reason != .manual && (intervalBlocked || orderBlocked)
                 if deferred{
                     captureDeferred[reason.rawValue,default:0]+=1
-                    observationOmitted[observationCode(.capture,.main,reason.rawValue+8),default:0]+=1
+                    observationOmitted[observationCode(.capture,.main,reason.rawValue%8+8),default:0]+=1
                 }else if reason != .manual{lastTrigger=clock()}
                 captures+=1
                 let before=snapshot(reason,timing:timing,incident:captures)
@@ -1045,7 +1085,7 @@ final class InputIncidentTrace {
     private func closeWindow(_ window:CaptureWindow){
         collectDecisionOverflow();collectCaptureOverflow();let counters=collectObservationCounters()
         let time=clock(),enqueued=observationClock()
-        withObservation(.capture,.main,window.before.trigger.rawValue+24,observedAt:time,enqueuedAt:enqueued){timing in
+        withObservation(.capture,.main,window.before.trigger.rawValue%8+24,observedAt:time,enqueuedAt:enqueued){timing in
             guard gate.generation==window.generation,windows[window.before.incident] === window else{return}
             mergeObservationCounters(counters);window.closed=true;window.closedMilliseconds=Int(max(0,clock()-origin)*1000)
             window.after=snapshot(window.before.trigger,timing:timing,incident:window.before.incident,phase:1,frames:window.post)
@@ -1431,6 +1471,16 @@ final class InputIncidentTrace {
             updatePreservedLastFrame()
         }
     }
+    func onsetObservation(_ value:OnsetObservation,capture:Bool=false){
+        guard enabled,!IsSecureEventInputEnabled(),value.valid else{return}
+        let time=clock()
+        _ = submit(.context,.onset,22,observedAt:time){[self] timing in
+            append(.onset,.onsetObservation,observedAt:time,observationTiming:timing)
+            ring[(position-1+capacity)%capacity]?.onsetObservation=value
+            updatePreservedLastFrame()
+            if capture{requestCapture(.onsetObservation,lane:.onset)}
+        }
+    }
     func sourceEvidence(_ action:SourceEvidenceAction,_ value:SourceEvidence,event:CGEvent?=nil){
         guard enabled,!IsSecureEventInputEnabled() else{return}
         let time=clock(),reference=event.map{EventReference($0,$0.type)}
@@ -1656,7 +1706,7 @@ final class DiagnosticSnapshotRequest {
 struct DiagnosticReviewCaptureHeader:Codable,Equatable {
     let schema:Int,trigger:Int,incident:Int,phase:Int
     let runID:String?
-    var valid:Bool{schema==1 && (1...7).contains(trigger) && incident>0 && (0...1).contains(phase) && (runID==nil || UUID(uuidString:runID!) != nil)}
+    var valid:Bool{schema==1 && (1...8).contains(trigger) && incident>0 && (0...1).contains(phase) && (runID==nil || UUID(uuidString:runID!) != nil)}
     static func read(_ data:Data)->Self? {
         guard let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
         return value

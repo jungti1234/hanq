@@ -159,6 +159,46 @@ struct RecorderOnsetDetail:Codable {
         }
     }
 }
+struct RecorderOnsetObservation:Codable,Equatable {
+    // Fixed comparisons, not insertion provenance. No text, key values,
+    // positions, hashes, application names or editor transaction payloads.
+    var episode,phase,reason,keys,baseline,history,whole,draft,insertion,selection,unicode,samples,coalesced:Int
+    var firstKeyAgeMicros:Int
+    var firstEventTimestampMicros:Int
+    var baselineAgeMicros:Int?
+    static let required=Set(["episode","phase","reason","keys","baseline","history","whole","draft","insertion","selection","unicode","samples","coalesced","firstKeyAgeMicros","firstEventTimestampMicros"])
+    var valid:Bool {
+        (1...1_000_000_000).contains(episode) && (1...3).contains(phase) &&
+        (phase==1 ? reason==0:(phase==2 ? (1...4).contains(reason):(1...6).contains(reason))) &&
+        (1...2).contains(keys) && (0...4).contains(baseline) && (1...2).contains(history) &&
+        (0...7).contains(whole) && (0...3).contains(draft) && (0...7).contains(insertion) &&
+        (0...5).contains(selection) && (0...6).contains(unicode) &&
+        (1...1_000_000).contains(samples) && (0...samples).contains(coalesced) &&
+        (0...60_000_000).contains(firstKeyAgeMicros) && (0...9_000_000_000_000_000).contains(firstEventTimestampMicros) &&
+        (baselineAgeMicros.map{(0...60_000_000).contains($0)} ?? true) &&
+        ((baseline==2 || baseline==3) == (baselineAgeMicros != nil)) &&
+        (draft==2 || insertion==0)
+    }
+    func sameState(_ other:Self)->Bool {
+        var a=self,b=other
+        a.samples=0;b.samples=0;a.coalesced=0;b.coalesced=0
+        a.firstKeyAgeMicros=0;b.firstKeyAgeMicros=0
+        return a==b
+    }
+    static func parse(_ object:[String:Any])->Self? {
+        guard Set(object.keys).subtracting(["baselineAgeMicros"])==required,object.values.allSatisfy({value in
+            guard let n=value as? NSNumber else{return false}
+            return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
+        }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
+        return value
+    }
+    var summary:String {
+        let relation=["미측정","첫 키와 전체 일치","분리된 첫 두 키와 전체 일치","조합된 첫 두 키와 전체 일치","첫 키와 앞부분 일치","분리된 첫 두 키와 앞부분 일치","조합된 첫 두 키와 앞부분 일치","불일치"]
+        let prior=["미확인","기록 없음","입력 전 기록 있음","입력 전 기록 오래됨","입력 후 기록만 있음"]
+        return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion]) · 삽입 주체 미확인"
+    }
+}
+
 struct RecorderOnsetEvidence:Codable {
     let keys:Int
     let firstKeyAgeMicros:Int?
@@ -201,6 +241,7 @@ struct RecorderFrame: Codable {
     var focusEvidence:RecorderFocusEvidence?=nil
     var onsetEvidence:RecorderOnsetEvidence?=nil
     var boundaryEvidence:[String:Int]?=nil
+    var onsetObservation:RecorderOnsetObservation?=nil
 }
 
 struct RecorderDecisionDelivery: Codable {
@@ -220,10 +261,10 @@ struct RecorderObservationDelivery: Codable {
         switch operation {
         case 1:return [1,2,3,5,6,7].contains(detail)
         case 5:return (1...8).contains(detail)
-        case 6:return detail==0 || (code/32%8==3 && ((1...7).contains(detail) || detail==31)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail)) || (code/32%8==2 && (17...20).contains(detail))
+        case 6:return detail==0 || (code/32%8==3 && ((1...7).contains(detail) || detail==31)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail)) || (code/32%8==2 && ((17...20).contains(detail) || detail==22))
         case 7:return (1...31).contains(detail) || (detail==0 && code/32%8==7)
         case 8:return detail==0 || (legacyBoundary && code/32%8==0 && detail<=6)
-        case 10:return (1...7).contains(detail) || (9...15).contains(detail) || detail==17 || (25...31).contains(detail)
+        case 10:return (0...15).contains(detail) || detail==17 || (24...31).contains(detail)
         default:return detail==0
         }
     }
@@ -234,7 +275,7 @@ struct RecorderObservationDelivery: Codable {
         (waits.map{ stats in
             Set(stats.keys)==Set(processed.keys) && stats.allSatisfy { key,value in
                 Self.validCode(key,legacyBoundary:legacyBoundary) && value.valid && processed[key]==value.processed &&
-                (Int(key)!/256+1 != 10 || (1...7).contains(Int(key)!%32) || (25...31).contains(Int(key)!%32))
+                (Int(key)!/256+1 != 10 || (0...7).contains(Int(key)!%32) || (24...31).contains(Int(key)!%32))
             }
         } ?? true)
     }
@@ -287,8 +328,8 @@ struct RecorderStorageDocument:Codable {
 struct RecorderCaptureRequest:Codable {
     let trigger:Int;let milliseconds:Int;let afterSequence:Int;let lane:Int;let detail:Int;let event:Int;let inputOrigin:Int
     var valid:Bool{
-        (1...7).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...31).contains(detail) && event>=0 && (0...3).contains(inputOrigin) &&
-        (trigger != 6 || (event==0 && inputOrigin==0 && ((lane==4 && ((1...6).contains(detail) || detail==10)) || (lane==3 && (7...9).contains(detail))))) && (trigger != 7 || ((1...5).contains(lane) && (1...4).contains(detail) && event>0 && (1...3).contains(inputOrigin)))
+        (1...8).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...31).contains(detail) && event>=0 && (0...3).contains(inputOrigin) &&
+        (trigger != 6 || (event==0 && inputOrigin==0 && ((lane==4 && ((1...6).contains(detail) || detail==10)) || (lane==3 && (7...9).contains(detail))))) && (trigger != 7 || ((1...5).contains(lane) && (1...4).contains(detail) && event>0 && (1...3).contains(inputOrigin))) && (trigger != 8 || (lane==3 && detail==0 && event==0 && inputOrigin==0))
     }
 }
 struct RecorderCapturePreservation:Codable {
@@ -303,7 +344,7 @@ struct RecorderCaptureBacklog:Codable {
     let postOverflow:[String:Int];let discardedOnDisable:[String:Int];let submittedWindows:Int;let completedWindows:Int
     static let keys:Set<String>=["automaticCapacity","manualCapacity","requestCapacityPerTrigger","requestsPerWindow","pendingAutomatic","pendingManual","requested","merged","deferred","requestOverflow","windowOverflow","postOverflow","discardedOnDisable","submittedWindows","completedWindows"]
     var valid:Bool{
-        automaticCapacity==16 && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...16).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable].allSatisfy{d in d.count<=7 && d.allSatisfy{e in Int(e.key).map{(1...7).contains($0) && String($0)==e.key} == true && e.value>0}}
+        automaticCapacity==16 && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...16).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable].allSatisfy{d in d.count<=8 && d.allSatisfy{e in Int(e.key).map{(1...8).contains($0) && String($0)==e.key} == true && e.value>0}}
     }
 }
 struct RecorderMonitorSample:Codable {
@@ -346,7 +387,11 @@ struct RecorderTrace: Codable {
     let frames: [RecorderFrame]
 
     private static func validFrame(_ row:RecorderFrame,legacyBoundary:Bool)->Bool {
-                  guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...14).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
+                  guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...15).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
+                  if row.kind==15 {
+                      return row.onsetObservation?.valid==true && row.lane==3 && row.event==0 && row.edge==0 && row.category==0 && row.inputOrigin==0 && !row.consumed && row.durationMicros==0 && row.count==0 && !row.selected && row.field==0 && row.observationTiming?.valid==true && row.decisionTiming==nil && row.sourceEvidence==nil && row.shapeEvidence==nil && row.controlEvidence==nil && row.eventEvidence==nil && row.workEvidence==nil && row.readOutcome==nil && row.focusEvidence==nil && row.onsetEvidence==nil && row.boundaryEvidence==nil
+                  }
+                  guard row.onsetObservation==nil else{return false}
                   if row.kind==14 {
                       return row.boundaryEvidence.map{RecorderBoundaryEvidence.valid($0)}==true && row.lane==8 && row.event==0 && row.edge==0 && row.category==0 && row.inputOrigin==0 && !row.consumed && row.durationMicros==0 && row.count==0 && !row.selected && row.field==0 && row.observationTiming?.valid==true && row.decisionTiming==nil && row.sourceEvidence==nil && row.shapeEvidence==nil && row.controlEvidence==nil && row.eventEvidence==nil && row.workEvidence==nil && row.readOutcome==nil && row.focusEvidence==nil && row.onsetEvidence==nil
                   }
@@ -392,7 +437,7 @@ struct RecorderTrace: Codable {
                   if row.kind==9 {
                       guard row.observationTiming != nil,(1...10).contains(row.category),((0...31).contains(row.edge) || (legacyBoundary && row.category==7 && row.lane==8 && (32...38).contains(row.edge))) else{return false}
                       guard row.event==0,row.inputOrigin==0,!row.consumed,row.durationMicros==0,row.count==0,!row.selected,row.field==0 else{return false}
-                      if row.category==10 {guard (1...7).contains(row.edge) || (25...31).contains(row.edge) else{return false}}
+                      if row.category==10 {guard (0...7).contains(row.edge) || (24...31).contains(row.edge) else{return false}}
                       let code=((row.category-1)*8+row.lane-1)*32+row.edge
                       return RecorderObservationDelivery.validCode(String(code),legacyBoundary:legacyBoundary)
                   }
@@ -440,7 +485,10 @@ struct RecorderTrace: Codable {
         }
         let keys = Set(["sequence", "milliseconds", "lane", "kind", "event", "edge", "category", "inputOrigin", "consumed", "durationMicros", "count", "selected", "field"])
         guard rows.allSatisfy({ row in
-            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence","boundaryEvidence"])==keys else{return false}
+            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence","boundaryEvidence","onsetObservation"])==keys else{return false}
+            if row.keys.contains("onsetObservation") {
+                guard let value=row["onsetObservation"] as? [String:Any],RecorderOnsetObservation.parse(value) != nil else{return false}
+            }
             if row.keys.contains("boundaryEvidence"),!RecorderBoundaryEvidence.accepts(row["boundaryEvidence"]!){return false}
             if row.keys.contains("onsetEvidence") {
                 guard let value=row["onsetEvidence"] as? [String:Any],Set(value.keys).subtracting(["firstKeyAgeMicros","detail"])==Set(["keys"]),value.filter({$0.key != "detail"}).values.allSatisfy({raw in
@@ -496,7 +544,7 @@ struct RecorderTrace: Codable {
         let value = try JSONDecoder().decode(RecorderTrace.self, from: data)
         guard value.monitorStatus?.valid ?? true else{throw RecorderError.invalidTrace}
         guard value.schema == 1, value.build.range(of: "^(?:[0-9]{1,9}|test)$", options: .regularExpression) != nil,
-              (1...7).contains(value.trigger), value.incident > 0, (0...1).contains(value.phase),
+              (1...8).contains(value.trigger), value.incident > 0, (0...1).contains(value.phase),
               value.discardedOldFrames >= 0,
               [value.skippedEvents, value.skippedAuxiliary].allSatisfy({ dict in
                   dict.count <= 8 && dict.allSatisfy { Int($0.key).map { (1...8).contains($0) } == true && $0.value >= 0 }

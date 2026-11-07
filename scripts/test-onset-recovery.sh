@@ -124,3 +124,4 @@ done
 bash scripts/test-first-publication.sh
 bash scripts/test-witness-refresh.sh
 bash scripts/test-witness-diagnostics.sh
+bash scripts/test-onset-diagnostic-history.sh

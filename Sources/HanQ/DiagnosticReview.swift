@@ -263,7 +263,7 @@ final class DiagnosticReviewSnapshot {
     }
     static func triggerTitle(_ trigger: Int) -> String {
         [1: "방금 발생한 문제 기록", 2: "입력 처리 지연 관측", 3: "접근성 조회 지연 관측",
-         4: "본문 길이 감소 관측", 5: "전환 대기 중단", 6: "자동 보정 시작", 7: "공백 처리 관측"][trigger] ?? "알 수 없는 기록"
+         4: "본문 길이 감소 관측", 5: "전환 대기 중단", 6: "자동 보정 시작", 7: "공백 처리 관측", 8: "첫 입력 상세 관측"][trigger] ?? "알 수 없는 기록"
     }
     fileprivate static func capture(_ object: [String: Any], phase: Int) throws -> DiagnosticReviewDocument {
         let frames = object["frames"] as! [[String: Any]]
@@ -343,6 +343,9 @@ final class DiagnosticReviewSnapshot {
             // frames, times, links, classifications and other diagnostic evidence.
             if kind == 6 { counts[states[code] ?? "해석하지 못한 처리 상태", default: 0] += 1 }
             if kind == 7 { counts[boundaries[code] ?? "해석하지 못한 경계 상태", default: 0] += 1 }
+            if kind == 15,let raw=frame["onsetObservation"] as? [String:Any],let evidence=InputIncidentTrace.OnsetObservation.parse(raw) {
+                counts[evidence.summary,default:0]+=1
+            }
             if kind == 14,let raw=frame["boundaryEvidence"] as? [String:Any],let evidence=InputIncidentTrace.BoundaryEvidence.parse(raw) {
                 counts["전환 범위 비교: "+evidence.resolutionLabel,default:0]+=1
                 if evidence.suppressed>0 {counts["전환 비교 변화 기록 상한 도달",default:0]+=1}
