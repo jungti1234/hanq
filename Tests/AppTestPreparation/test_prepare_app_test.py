@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import plistlib
 import shutil
@@ -114,6 +115,43 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(preflight.PreflightError):
             self.prepare()
         self.assertEqual(self.ops.calls, [])
+
+    def test_probe_results_ignore_environment_temp_and_stay_private(self):
+        paths=[]
+        with mock.patch.dict(os.environ, {'TMPDIR': str(self.root)}):
+            for prefix in ('hanq-permission-', 'hanq-storage-'):
+                with preflight.private_probe_directory(prefix) as value:
+                    path=pathlib.Path(value);paths.append(path)
+                    self.assertEqual(path.parent, pathlib.Path('/private/tmp'))
+                    self.assertEqual(path.resolve(), path)
+                    self.assertEqual(path.stat().st_uid, os.getuid())
+                    self.assertEqual(path.stat().st_mode & 0o7777, 0o700)
+        self.assertNotEqual(paths[0], paths[1])
+        self.assertTrue(all(not path.exists() for path in paths))
+        self.assertEqual(self.ops.calls, [])
+
+    def test_probe_directory_rejects_unknown_kind(self):
+        with self.assertRaises(preflight.PreflightError):
+            with preflight.private_probe_directory('arbitrary-'):
+                self.fail('invalid prefix accepted')
+
+    def test_real_probe_launcher_uses_private_response_paths(self):
+        seen=[]
+        logs=str(self.root/'fixture-logs')
+        def fake_launch(command):
+            self.assertEqual(command[:4], ['/usr/bin/open', '-n', '-g', 'fixture.app'])
+            flag=command[5];directory=pathlib.Path(command[6]);seen.append(directory)
+            self.assertEqual(directory.parent, pathlib.Path('/private/tmp'))
+            result={'token':directory.name, 'pid':201, 'ax':True, 'post':True}
+            if flag=='--diagnostic-storage-probe':
+                result.update(directory=logs,readiness={'ready':True})
+            path=directory/'result.json';path.write_text(json.dumps(result));path.chmod(0o600)
+        self.runner.side_effect=fake_launch
+        ops=object.__new__(preflight.MacOS)
+        self.assertIs(ops.probe('fixture.app')['post'],True)
+        self.assertIs(ops.diagnostic_probe('fixture.app',logs)['readiness']['ready'],True)
+        self.assertEqual(len(seen),2)
+        self.assertTrue(all(not path.exists() for path in seen))
 
     def test_invalid_signature_never_stops_or_resets(self):
         self.runner.side_effect = preflight.PreflightError('signature rejected')
@@ -243,11 +281,10 @@ class PreparationTests(unittest.TestCase):
     def test_fresh_probe_accepts_omitted_ax_when_post_is_denied(self):
         operations = preflight.MacOS.__new__(preflight.MacOS)
         def command(command):
-            if command[0] == '/usr/bin/getconf':
-                return subprocess.CompletedProcess(command, 0, str(self.root), '')
             directory = pathlib.Path(command[-1])
             result = {'token': directory.name, 'pid': 201, 'post': False}
             (directory / 'result.json').write_text(json.dumps(result))
+            (directory / 'result.json').chmod(0o600)
             return subprocess.CompletedProcess(command, 0, '', '')
         with mock.patch.object(preflight, 'run', side_effect=command):
             result = operations.probe(str(self.app))
@@ -257,11 +294,10 @@ class PreparationTests(unittest.TestCase):
     def test_probe_rejects_wrong_token(self):
         operations = preflight.MacOS.__new__(preflight.MacOS)
         def command(command):
-            if command[0] == '/usr/bin/getconf':
-                return subprocess.CompletedProcess(command, 0, str(self.root), '')
             directory = pathlib.Path(command[-1])
             (directory / 'result.json').write_text(json.dumps(
                 {'token': 'another-probe', 'pid': 201, 'post': True, 'ax': True}))
+            (directory / 'result.json').chmod(0o600)
             return subprocess.CompletedProcess(command, 0, '', '')
         with mock.patch.object(preflight, 'run', side_effect=command):
             with self.assertRaises(preflight.PreflightError):

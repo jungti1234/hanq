@@ -97,11 +97,15 @@ final class FreshPermissionMonitor {
             return
         }
         guard now >= nextCheck else { return }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hanq-permission-" + UUID().uuidString)
+        let directory = PrivateProbeDirectory.root.appendingPathComponent("hanq-permission-" + UUID().uuidString)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                     attributes: [.posixPermissions: 0o700])
         } catch { fail("probe-directory"); return }
+        guard PrivateProbeDirectory.open(directory, prefix: "hanq-permission-") != nil else {
+            try? FileManager.default.removeItem(at: directory)
+            fail("probe-directory"); return
+        }
         pending = (directory, now)
         InputDiagnostics.shared.record("fresh.launch token=\(directory.lastPathComponent)")
         launchQueue.async { [weak self] in
@@ -144,10 +148,9 @@ enum PermissionProbe {
         let arguments = ProcessInfo.processInfo.arguments
         guard let index = arguments.firstIndex(of: "--permission-probe") else { return }
         guard index + 1 < arguments.count else { _exit(64) }
-        let directory = URL(fileURLWithPath: arguments[index + 1]).standardizedFileURL
-        let root = FileManager.default.temporaryDirectory.standardizedFileURL
-        guard directory.deletingLastPathComponent() == root,
-              directory.lastPathComponent.hasPrefix("hanq-permission-") else { _exit(64) }
+        let directory = URL(fileURLWithPath: arguments[index + 1])
+        guard let workspace = PrivateProbeDirectory.open(directory, prefix: "hanq-permission-"),
+              workspace.enter() else { _exit(64) }
         // A probe never creates a tap, shows permission prompts, or edits settings.
         DispatchQueue.global().asyncAfter(deadline: .now() + 2) { _exit(71) }
         // Avoid an AX request when event posting is already denied. On this OS,
@@ -157,7 +160,7 @@ enum PermissionProbe {
                                           ax: post ? AXIsProcessTrusted() : nil, post: post)
         do {
             let data = try JSONEncoder().encode(result)
-            try data.write(to: directory.appendingPathComponent("result.json"), options: .atomic)
+            guard workspace.publish(data) else { _exit(74) }
             _exit(0)
         } catch { _exit(74) }
     }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare one HanQ build for input tests; Accessibility approval stays manual."""
 import argparse
+import contextlib
 import ctypes
 import datetime
 import hashlib
@@ -68,6 +69,20 @@ def app_identity(app):
                 'plist_sha256': hashlib.sha256(plist_bytes).hexdigest()}
     except (OSError, plistlib.InvalidFileException, ValueError) as error:
         raise PreflightError(f'앱 확인 실패: {error}') from error
+
+
+@contextlib.contextmanager
+def private_probe_directory(prefix):
+    root = pathlib.Path('/private/tmp')
+    if root.resolve() != root or prefix not in ('hanq-permission-', 'hanq-storage-'):
+        raise PreflightError('검사 임시 폴더의 경로가 유효하지 않습니다.')
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=root) as directory:
+        path = pathlib.Path(directory)
+        info = path.lstat()
+        if (path.resolve() != path or not stat.S_ISDIR(info.st_mode) or
+                info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+            raise PreflightError('검사 임시 폴더는 본인 소유의 700 디렉터리여야 합니다.')
+        yield directory
 
 
 class MacOS:
@@ -165,8 +180,7 @@ class MacOS:
         raise PreflightError('지정한 새 한Q의 실행을 확인할 수 없습니다.')
 
     def diagnostic_probe(self, app, directory, mode='preserve'):
-        temporary_root = run(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).stdout.strip()
-        with tempfile.TemporaryDirectory(prefix='hanq-storage-', dir=temporary_root) as temporary:
+        with private_probe_directory('hanq-storage-') as temporary:
             run(['/usr/bin/open', '-n', '-g', app, '--args', '--diagnostic-storage-probe', temporary,
                  diagnostic_flag(mode), directory])
             path = pathlib.Path(temporary) / 'result.json'
@@ -176,7 +190,9 @@ class MacOS:
                     result = read_private_json(path)
                     if (result.get('token') != pathlib.Path(temporary).name or
                             type(result.get('pid')) is not int or result['pid'] <= 1 or
-                            result.get('directory') != directory or
+                            not isinstance(result.get('directory'), str) or
+                            not pathlib.Path(result['directory']).is_absolute() or
+                            pathlib.Path(result['directory']).resolve() != pathlib.Path(directory).resolve() or
                             type(result.get('readiness', {}).get('ready')) is not bool):
                         raise PreflightError('진단 저장 검사 응답이 유효하지 않습니다.')
                     return result
@@ -187,16 +203,13 @@ class MacOS:
         run(['/usr/bin/open', SETTINGS_URL])
 
     def probe(self, app):
-        # Use the OS temp path without resolving /var symlinks: the app validates
-        # this directory against FileManager.default.temporaryDirectory.
-        temporary_root = run(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).stdout.strip()
-        with tempfile.TemporaryDirectory(prefix='hanq-permission-', dir=temporary_root) as directory:
+        with private_probe_directory('hanq-permission-') as directory:
             run(['/usr/bin/open', '-n', '-g', app, '--args', '--permission-probe', directory])
             result_path = pathlib.Path(directory) / 'result.json'
             end = time.monotonic() + 5
             while time.monotonic() < end:
                 if result_path.exists():
-                    result = json.loads(result_path.read_text())
+                    result = read_private_json(result_path)
                     if (result.get('token') != pathlib.Path(directory).name or
                             type(result.get('pid')) is not int or result['pid'] <= 1 or
                             type(result.get('post')) is not bool or

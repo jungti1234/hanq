@@ -2510,21 +2510,76 @@ enum DiagnosticStorageStartup {
         let args=ProcessInfo.processInfo.arguments
         guard let i=args.firstIndex(of:"--diagnostic-storage-probe") else{return}
         guard i+1<args.count,explicit else{_exit(64)}
-        let directory=URL(fileURLWithPath:args[i+1]).standardizedFileURL
-        guard directory.deletingLastPathComponent()==FileManager.default.temporaryDirectory.standardizedFileURL,
-              directory.lastPathComponent.hasPrefix("hanq-storage-") else{_exit(64)}
+        let directory=URL(fileURLWithPath:args[i+1])
+        guard let workspace=PrivateProbeDirectory.open(directory,prefix:"hanq-storage-"),
+              workspace.enter() else{_exit(64)}
         DispatchQueue.global().asyncAfter(deadline:.now()+8){_exit(71)}
         let result=InputIncidentTrace.shared.waitForStorageReadiness()
         let response=Response(token:directory.lastPathComponent,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",directory:InputIncidentTrace.shared.destinationDirectory?.standardizedFileURL.path ?? "",readiness:result,bounded:InputIncidentPreferences.launch(arguments:args,defaults:.standard).bounded)
         do {
-            let url=directory.appendingPathComponent("result.json")
-            try JSONEncoder().encode(response).write(to:url,options:.atomic)
-            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+            guard workspace.publish(try JSONEncoder().encode(response)) else{_exit(74)}
             _exit(0)
         }catch{_exit(74)}
     }
     private struct Response:Encodable {
         let token:String;let pid:Int32;let build:String;let directory:String;let readiness:DiagnosticStorageReadiness;let bounded:Bool
+    }
+}
+
+/// Probe responses use a fresh private directory, independent of Foundation's
+/// process-dependent temporaryDirectory. Never follow links or replace a result.
+final class PrivateProbeDirectory {
+    static let root=URL(fileURLWithPath:"/private/tmp",isDirectory:true)
+    private let directory:URL
+    private let fd:Int32
+    private let identity:stat
+    private init(_ directory:URL,_ fd:Int32,_ identity:stat){
+        self.directory=directory;self.fd=fd;self.identity=identity
+    }
+    deinit{close(fd)}
+    static func open(_ directory:URL,prefix:String)->PrivateProbeDirectory? {
+        guard ["hanq-permission-","hanq-storage-"].contains(prefix),
+              directory.deletingLastPathComponent().path==root.path,
+              directory.lastPathComponent.hasPrefix(prefix),
+              directory.lastPathComponent.count>prefix.count,
+              directory.lastPathComponent.count<=128 else{return nil}
+        // Foundation may abbreviate /private/tmp to /tmp even when no link is
+        // traversed. Validate each real component with directory descriptors.
+        let base=Darwin.open("/private",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard base>=0 else{return nil};defer{close(base)}
+        let parent=openat(base,"tmp",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard parent>=0 else{return nil};defer{close(parent)}
+        let fd=openat(parent,directory.lastPathComponent,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard fd>=0 else{return nil}
+        var info=stat()
+        guard fstat(fd,&info)==0,info.st_uid==getuid(),info.st_mode&S_IFMT==S_IFDIR,
+              info.st_mode&0o7777==0o700 else{close(fd);return nil}
+        let workspace=PrivateProbeDirectory(directory,fd,info)
+        return workspace.isCurrent ? workspace:nil
+    }
+    private var isCurrent:Bool {
+        var info=stat()
+        return lstat(directory.path,&info)==0 && info.st_dev==identity.st_dev && info.st_ino==identity.st_ino &&
+            info.st_uid==getuid() && info.st_mode&S_IFMT==S_IFDIR && info.st_mode&0o7777==0o700
+    }
+    func enter()->Bool{isCurrent && fchdir(fd)==0}
+    func publish(_ data:Data)->Bool {
+        guard data.count<=8192,isCurrent else{return false}
+        let name=".result-"+UUID().uuidString
+        let output=openat(fd,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
+        guard output>=0 else{return false}
+        defer{close(output);unlinkat(fd,name,0)}
+        let written=data.withUnsafeBytes { bytes->Bool in
+            var offset=0
+            while offset<bytes.count {
+                let count=write(output,bytes.baseAddress!.advanced(by:offset),bytes.count-offset)
+                if count<0 && errno==EINTR{continue}
+                guard count>0 else{return false};offset+=count
+            }
+            return true
+        }
+        // Publish a complete private file atomically; EEXIST includes symlinks.
+        return written && isCurrent && linkat(fd,name,fd,"result.json",0)==0
     }
 }
 
