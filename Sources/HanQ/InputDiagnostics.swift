@@ -122,18 +122,45 @@ struct InputIncidentControl:Codable,Equatable {
 struct InputIncidentPreferences {
     static let key="inputIncidentDiagnosticsEnabled"
     static let archiveBeforePruningKey="inputIncidentArchiveBeforePruning"
+    static let boundedDirectoryKey="inputIncidentBoundedDirectory"
     static var defaultDirectory:URL {
         FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
             .appendingPathComponent("HanQ Diagnostics",isDirectory:true).appendingPathComponent("InputIncidents",isDirectory:true)
     }
-    static func launch(arguments:[String],defaults:UserDefaults)->(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool) {
+    typealias Launch=(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool,bounded:Bool,valid:Bool)
+    private static func bounded(_ value:String?,enabled:Bool)->Launch {
+        guard let value,value.hasPrefix("/"),!value.contains("\0") else{return (defaultDirectory,false,true,false,true,false)}
+        let directory=URL(fileURLWithPath:value).standardizedFileURL
+        let path=directory.resolvingSymlinksInPath().path.lowercased()
+        let shared=defaultDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path.lowercased()
+        let safe=path != shared && !path.hasPrefix(shared+"/") && !shared.hasPrefix(path=="/" ? "/":path+"/")
+        return (directory,enabled,true,false,true,safe)
+    }
+    static func launch(arguments:[String],defaults:UserDefaults)->Launch {
+        let bounded=arguments.indices.filter{arguments[$0].hasPrefix("--bounded-input-incidents")}
+        if !bounded.isEmpty {
+            let modes=arguments.filter{["--bounded-input-incidents","--preserve-input-incidents","--diagnose-input-incidents"].contains($0)}
+            guard bounded.count==1,let i=bounded.first,arguments[i]=="--bounded-input-incidents",modes.count==1,
+                  i+1<arguments.count,arguments[i+1].hasPrefix("/"),!arguments[i+1].contains("\0") else{
+                return (defaultDirectory,false,true,false,true,false)
+            }
+            // The bounded mode must never adopt the shared diagnostic namespace,
+            // including an alias or an ancestor that contains preserved logs.
+            return self.bounded(arguments[i+1],enabled:true)
+        }
         if let i=arguments.firstIndex(of:"--preserve-input-incidents"),i+1<arguments.count,arguments[i+1].hasPrefix("/") {
-            return (URL(fileURLWithPath:arguments[i+1]),true,true,true)
+            return (URL(fileURLWithPath:arguments[i+1]),true,true,true,false,true)
         }
         if let i=arguments.firstIndex(of:"--diagnose-input-incidents"),i+1<arguments.count,!arguments[i+1].hasPrefix("--") {
-            return (URL(fileURLWithPath:arguments[i+1]),true,false,true)
+            return (URL(fileURLWithPath:arguments[i+1]),true,false,true,false,true)
         }
-        return (defaultDirectory,defaults.bool(forKey:key),true,false)
+        // An explicitly configured bounded route also applies to login and
+        // permission-recovery launches. Explicit investigation arguments above
+        // retain priority so another session keeps its own destination.
+        if let value=defaults.object(forKey:boundedDirectoryKey) {
+            return self.bounded(value as? String,enabled:defaults.bool(forKey:key))
+        }
+        return (defaultDirectory,defaults.bool(forKey:key),true,false,false,true)
     }
 }
 
@@ -644,9 +671,10 @@ final class InputIncidentTrace {
     }
     static let shared:InputIncidentTrace = {
         let option=InputIncidentPreferences.launch(arguments:ProcessInfo.processInfo.arguments,defaults:.standard)
-        let archive=UserDefaults.standard.bool(forKey:InputIncidentPreferences.archiveBeforePruningKey)
+        guard option.valid else{fputs("HanQ: invalid isolated bounded diagnostic directory; no shared logs were opened.\n",stderr);_exit(64)}
+        let archive = !option.bounded && UserDefaults.standard.bool(forKey:InputIncidentPreferences.archiveBeforePruningKey)
             ? InputIncidentPreferences.defaultDirectory.deletingLastPathComponent().appendingPathComponent("InvestigationArchives"):nil
-        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive)
+        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive,boundedStorage:option.bounded)
     }()
     private let runID=UUID().uuidString
     private var monitorStatus:MonitorStatus?
@@ -717,7 +745,7 @@ final class InputIncidentTrace {
     private let writer:((Capture)->Void)?
     private var storageObserver:(()->Void)?
     private var lastStorageNotice:Int?
-    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
+    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
         eventCredits=DispatchSemaphore(value:self.observationCapacity/2)
         shapeCredits=DispatchSemaphore(value:max(1,self.observationCapacity/8))
@@ -734,7 +762,7 @@ final class InputIncidentTrace {
         routineCredits=DispatchSemaphore(value:self.decisionCapacity-important)
         overflowSignals=(destination != nil || writer != nil) ? (0..<310).map{_ in DispatchSemaphore(value:0)}:[]
         self.destinationDirectory=destination
-        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory)}
+        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory,requiresBoundedPriorPolicy:boundedStorage)}
         self.configured=destination != nil || writer != nil;self.gate=DiagnosticCollectionGate(self.configured && initiallyEnabled)
         self.capacity=max(1,min(capacity,16384));self.clock=clock;self.callbackCPU=callbackCPU;origin=clock();self.writer=writer
         ring=Array(repeating:nil,count:self.configured ? self.capacity:0)
@@ -743,7 +771,7 @@ final class InputIncidentTrace {
             // before assigning any capture IDs or accepting test readiness.
             queue.sync {
                 if let token=DiagnosticStorageStartup.token {
-                    let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID))
+                    let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID,bounded:boundedStorage))
                     _ = storage?.verifyReadiness(receipt:receipt,name:DiagnosticReadinessReceipt.name(token))
                 }else{_ = storage?.verifyReadiness()}
                 captures=storage?.lastCaptureIncident ?? 0
@@ -1658,6 +1686,9 @@ final class DiagnosticLogStore {
     private struct Group {let incident:Int;var files:[File];var key:String=""}
     private let directory:URL,policy:DiagnosticLogRetentionPolicy
     private let archiveDirectory:URL?
+    private let requiresBoundedPriorPolicy:Bool
+    private var boundedWriterLock:Int32 = -1
+    private var boundedNamespaceAccepted=false
     private var directoryIdentity:stat?
     private var groups:[Group]=[]
     private var manualGroups:[Group]=[]
@@ -1673,11 +1704,23 @@ final class DiagnosticLogStore {
     var usage:Usage {Usage(files:groups.reduce(0){$0+$1.files.count},bytes:groups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     var manualUsage:Usage {Usage(files:manualGroups.reduce(0){$0+$1.files.count},bytes:manualGroups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     private(set) var lastResult:Result?
-    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil){
+    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,requiresBoundedPriorPolicy:Bool=false){
         self.directory=directory;self.policy=policy;self.persistentOwnership=persistentOwnership
         self.archiveDirectory=archiveDirectory
+        self.requiresBoundedPriorPolicy=requiresBoundedPriorPolicy
         status=Status(maximumAutomaticFiles:policy.maximumAutomaticFiles,maximumAutomaticBytes:policy.maximumAutomaticBytes)
         status.maximumManualBytes=policy.maximumManualBytes;status.manualFiles=0;status.manualBytes=0
+    }
+    deinit {if boundedWriterLock>=0{close(boundedWriterLock)}}
+    private func retainBoundedWriterLock(_ directoryFD:Int32)->Bool {
+        if boundedWriterLock>=0{return true}
+        guard flock(directoryFD,LOCK_EX|LOCK_NB)==0 else{_ = failed(3,errno);return false}
+        let retained=dup(directoryFD)
+        guard retained>=0 else{let code=errno;_ = flock(directoryFD,LOCK_UN);_ = failed(3,code);return false}
+        guard fcntl(retained,F_SETFD,FD_CLOEXEC)==0 else{
+            let code=errno;close(retained);_ = flock(directoryFD,LOCK_UN);_ = failed(3,code);return false
+        }
+        boundedWriterLock=retained;return true
     }
 
     // This is a real filesystem proof using the same ownership guard and byte
@@ -1810,15 +1853,27 @@ final class DiagnosticLogStore {
     private static func digest(_ data:Data)->String {SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()}
     private(set) var lastCaptureIncident=0
     func prepareOwnership(){
+        if requiresBoundedPriorPolicy && !persistentOwnership {
+            ownershipPrepared=true;ownershipHealthy=false;return
+        }
         guard persistentOwnership,!ownershipPrepared else{return}
         ownershipPrepared=true;ownershipHealthy=false
+        defer{if requiresBoundedPriorPolicy && !ownershipHealthy{boundedNamespaceAccepted=false}}
+        if requiresBoundedPriorPolicy {
+            guard policy.maximumAutomaticFiles<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticFiles,
+                  policy.maximumAutomaticBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticBytes,
+                  policy.maximumManualBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumManualBytes,
+                  archiveDirectory==nil else{return}
+        }
         guard let dir=openDirectory() else{return};defer{close(dir)}
+        if requiresBoundedPriorPolicy,!retainBoundedWriterLock(dir){return}
         guard prepareVolume(dir) else{return}
         var info=stat()
         if fstatat(dir,ownershipName,&info,AT_SYMLINK_NOFOLLOW) != 0 {
             guard errno==ENOENT else{return}
             let names=(try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []
             guard !names.contains(where:{$0.hasPrefix("incident-") || $0.hasPrefix(".storage-")}) else{return}
+            if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
             ownershipHealthy=persistOwnership(dir);return
         }
         let fd=openat(dir,ownershipName,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
@@ -1831,6 +1886,15 @@ final class DiagnosticLogStore {
               index.status.maximumAutomaticFiles>0,index.status.maximumAutomaticBytes>0,
               index.files.count<=index.status.maximumAutomaticFiles,index.lastIncident>=0,
               validStatusName(index.statusName),validAttemptCounts(index.status) else{return}
+        if requiresBoundedPriorPolicy {
+            // Reject a preserved investigation root before trim, migration or
+            // status/index writes. A new bound is not deletion authority.
+            guard index.schema==3,
+                  index.status.maximumAutomaticFiles<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticFiles,
+                  index.status.maximumAutomaticBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticBytes,
+                  let manual=index.status.maximumManualBytes,
+                  manual<=DiagnosticLogRetentionPolicy.incidentDefault.maximumManualBytes else{return}
+        }
         if index.schema<3,index.device != Int64(identity.st_dev) {
             if preserveLegacyRemount(index,info,dir) {
                 directoryIdentity=nil;volumeUUID=nil;ownershipPrepared=false
@@ -1899,6 +1963,7 @@ final class DiagnosticLogStore {
         status.maximumAutomaticFiles=policy.maximumAutomaticFiles;status.maximumAutomaticBytes=policy.maximumAutomaticBytes
         status.maximumManualBytes=policy.maximumManualBytes
         statusName=index.statusName;statusFile=previousStatus;ownershipFile=File(name:ownershipName,phase:0,identity:info)
+        if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
         // Lowered limits and legacy manual data rotate before accepting new files.
         guard trimRestored(dir) else{return}
         updateUsage()
@@ -2123,6 +2188,9 @@ final class DiagnosticLogStore {
     // A wholly unwritable disk cannot persist its failure: keep the last good
     // status and report the accumulated failure on the next successful write.
     private func writeStatus()->Bool {
+        if requiresBoundedPriorPolicy {
+            guard boundedWriterLock>=0,boundedNamespaceAccepted else{return false}
+        }
         let previousStage=failureStage,previousErrno=failureErrno
         defer{failureStage=previousStage;failureErrno=previousErrno}
         guard let data=try? JSONEncoder().encode(StatusDocument(status:status)),data.count<=16*1024,
@@ -2330,8 +2398,9 @@ struct DiagnosticReadinessReceipt: Codable {
     let build: String
     let runID: String
     let ready: Bool
-    static func make(token:String,runID:String)->Self {
-        Self(schema:1,token:token,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test",runID:runID,ready:true)
+    let bounded: Bool?
+    static func make(token:String,runID:String,bounded:Bool=false)->Self {
+        Self(schema:1,token:token,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test",runID:runID,ready:true,bounded:bounded)
     }
     static func name(_ token:String)->String {".preflight-\(token).json"}
 }
@@ -2339,8 +2408,13 @@ struct DiagnosticReadinessReceipt: Codable {
 enum DiagnosticStorageStartup {
     static let tokenArgument="--diagnostic-readiness-token"
     static var explicit:Bool {
-        let args=ProcessInfo.processInfo.arguments
-        return args.contains("--preserve-input-incidents") || args.contains("--diagnose-input-incidents")
+        explicitRequested(arguments:ProcessInfo.processInfo.arguments,defaults:.standard)
+    }
+    static func explicitRequested(arguments args:[String],defaults:UserDefaults)->Bool {
+        let option=InputIncidentPreferences.launch(arguments:args,defaults:defaults)
+        // An ordinary configured launch waits for the UI instance lock before
+        // creating its writer. Test launches request an actual nonce proof.
+        return args.contains("--preserve-input-incidents") || args.contains("--diagnose-input-incidents") || args.contains("--bounded-input-incidents") || (args.contains(tokenArgument) && option.bounded && option.enabled && option.valid)
     }
     static var token:String? {
         let args=ProcessInfo.processInfo.arguments
@@ -2366,7 +2440,7 @@ enum DiagnosticStorageStartup {
               directory.lastPathComponent.hasPrefix("hanq-storage-") else{_exit(64)}
         DispatchQueue.global().asyncAfter(deadline:.now()+8){_exit(71)}
         let result=InputIncidentTrace.shared.waitForStorageReadiness()
-        let response=Response(token:directory.lastPathComponent,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",directory:InputIncidentTrace.shared.destinationDirectory?.standardizedFileURL.path ?? "",readiness:result)
+        let response=Response(token:directory.lastPathComponent,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",directory:InputIncidentTrace.shared.destinationDirectory?.standardizedFileURL.path ?? "",readiness:result,bounded:InputIncidentPreferences.launch(arguments:args,defaults:.standard).bounded)
         do {
             let url=directory.appendingPathComponent("result.json")
             try JSONEncoder().encode(response).write(to:url,options:.atomic)
@@ -2375,7 +2449,7 @@ enum DiagnosticStorageStartup {
         }catch{_exit(74)}
     }
     private struct Response:Encodable {
-        let token:String;let pid:Int32;let build:String;let directory:String;let readiness:DiagnosticStorageReadiness
+        let token:String;let pid:Int32;let build:String;let directory:String;let readiness:DiagnosticStorageReadiness;let bounded:Bool
     }
 }
 

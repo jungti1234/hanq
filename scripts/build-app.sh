@@ -122,6 +122,7 @@ cat > "$app/Contents/Info.plist" <<EOF
 <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
 <key>HanQReleaseVersion</key><string>$RELEASE_VERSION</string>
 <key>HanQDiagnosticReadinessVersion</key><integer>1</integer>
+<key>HanQBoundedDiagnosticStorageVersion</key><integer>1</integer>
 <key>LSMinimumSystemVersion</key><string>$macos_minimum</string>
 <key>LSUIElement</key><true/>
 <key>CFBundleIconFile</key><string>HanQ.icns</string>

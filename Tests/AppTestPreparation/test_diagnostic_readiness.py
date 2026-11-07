@@ -5,6 +5,7 @@ import os
 import pathlib
 import uuid
 import unittest
+from unittest import mock
 import test_prepare_app_test as common
 preflight = common.preflight
 
@@ -15,18 +16,26 @@ class DiagnosticMacOS(common.FakeMacOS):
         self.write_receipt = True
         self.diagnostic_ready = True
         self.receipt = None
+        self.report_bounded_probe = True
+        self.report_bounded_receipt = True
+        self.probe_mode = None
+        self.launch_mode = None
 
-    def diagnostic_probe(self, app, directory):
+    def diagnostic_probe(self, app, directory, mode='preserve'):
         self.action('diagnostic_probe')
+        self.probe_mode = mode
         pathlib.Path(directory).mkdir(mode=0o700, exist_ok=True)
-        return {'build': '132', 'readiness': {'ready': self.diagnostic_ready, 'reason': 'fixture'}}
+        return {'build': '132', 'readiness': {'ready': self.diagnostic_ready, 'reason': 'fixture'},
+                'bounded': mode == 'bounded' and self.report_bounded_probe}
 
-    def launch_diagnostics(self, app, directory, token):
+    def launch_diagnostics(self, app, directory, token, mode='preserve'):
+        self.launch_mode = mode
         pid = self.launch(app)
         self.receipt = pathlib.Path(directory) / f'.preflight-{token}.json'
         if self.write_receipt:
             self.receipt.write_text(json.dumps({'schema': 1, 'token': token, 'pid': pid,
-                                              'build': '132', 'runID': str(uuid.uuid4()), 'ready': True}))
+                                              'build': '132', 'runID': str(uuid.uuid4()), 'ready': True,
+                                              'bounded': mode == 'bounded' and self.report_bounded_receipt}))
             self.receipt.chmod(0o600)
         return pid
 
@@ -152,3 +161,102 @@ class DiagnosticReadinessTests(unittest.TestCase):
         preflight.prepare(self.app, self.output, operations=self.ops)
         with self.assertRaises(preflight.PreflightError):
             preflight.check(self.output / 'record.json', operations=self.ops, require_diagnostics=True)
+
+
+class BoundedReadinessTests(unittest.TestCase):
+    write_plist = common.PreparationTests.write_plist
+    command = common.PreparationTests.command
+    record = common.PreparationTests.record
+    check = common.PreparationTests.check
+
+    def setUp(self):
+        DiagnosticReadinessTests.setUp(self)
+        self.info['HanQBoundedDiagnosticStorageVersion'] = 1
+        self.write_plist()
+
+    def prepare_bounded(self):
+        return preflight.prepare(self.app, self.output, operations=self.ops,
+                                 diagnostics=self.logs, diagnostic_mode='bounded')
+
+    def test_bounded_probe_and_launch_precede_current_process_proof(self):
+        self.assertEqual(self.prepare_bounded(), 0)
+        self.assertEqual(self.ops.calls[:3], ['diagnostic_probe', 'stop', 'reset'])
+        self.assertEqual(self.ops.probe_mode, 'bounded')
+        self.assertEqual(self.ops.launch_mode, 'bounded')
+        self.assertEqual(self.record()['diagnostics']['mode'], 'bounded')
+        self.assertEqual(self.check(), 0)
+        self.assertIs(self.record()['diagnostics']['receipt']['bounded'], True)
+
+    def test_older_app_is_rejected_before_probe_or_stop(self):
+        del self.info['HanQBoundedDiagnosticStorageVersion']
+        self.write_plist()
+        with self.assertRaises(preflight.PreflightError):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.calls, [])
+
+    def test_boolean_capability_is_rejected_before_probe(self):
+        self.info['HanQBoundedDiagnosticStorageVersion'] = True
+        self.write_plist()
+        with self.assertRaises(preflight.PreflightError):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.calls, [])
+
+    def test_nonbounded_probe_never_stops_running_app(self):
+        self.ops.report_bounded_probe = False
+        with self.assertRaises(preflight.PreflightError):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.calls, ['diagnostic_probe'])
+        self.assertEqual(self.record()['steps']['previous_app_stopped'], 'not_run')
+
+    def test_active_writer_storage_refusal_never_stops_running_app(self):
+        self.ops.running = [{'pid': 77, 'app': 'existing', 'helper': False}]
+        before = copy.deepcopy(self.ops.running)
+        self.ops.diagnostic_ready = False
+        with self.assertRaises(preflight.PreflightError):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.running, before)
+        self.assertEqual(self.ops.calls, ['diagnostic_probe'])
+
+    def test_nonbounded_main_receipt_is_not_input_ready(self):
+        self.ops.report_bounded_receipt = False
+        self.prepare_bounded()
+        with self.assertRaises(preflight.PreflightError):
+            self.check()
+        self.assertEqual(self.record()['status'], 'awaiting_diagnostics')
+
+    def test_missing_bounded_receipt_field_cannot_reuse_permission(self):
+        self.prepare_bounded()
+        receipt = json.loads(self.ops.receipt.read_text())
+        del receipt['bounded']
+        self.ops.receipt.write_text(json.dumps(receipt))
+        with self.assertRaises(preflight.PreflightError):
+            self.check()
+
+    def test_old_preserve_receipt_remains_compatible(self):
+        preflight.prepare(self.app, self.output, operations=self.ops, diagnostics=self.logs)
+        receipt = json.loads(self.ops.receipt.read_text())
+        del receipt['bounded']
+        self.ops.receipt.write_text(json.dumps(receipt))
+        self.assertEqual(self.check(), 0)
+
+    def test_unknown_mode_fails_before_stop(self):
+        with self.assertRaises(preflight.PreflightError):
+            preflight.prepare(self.app, self.output, operations=self.ops,
+                              diagnostics=self.logs, diagnostic_mode='unknown')
+        self.assertEqual(self.ops.calls, [])
+
+    def test_bounded_mode_is_forwarded_to_real_launch_arguments(self):
+        ops = preflight.MacOS()
+        with mock.patch.object(ops, '_launch', return_value=700) as launch:
+            self.assertEqual(ops.launch_diagnostics('/test/HanQ.app', '/new/logs', 'nonce', mode='bounded'), 700)
+        launch.assert_called_once_with('/test/HanQ.app', ['--bounded-input-incidents', '/new/logs',
+                                                       '--diagnostic-readiness-token', 'nonce'])
+
+    def test_record_mode_corruption_revokes_readiness(self):
+        self.prepare_bounded()
+        record = self.record()
+        record['diagnostics']['mode'] = 'unknown'
+        (self.output / 'record.json').write_text(json.dumps(record))
+        with self.assertRaises(preflight.PreflightError):
+            self.check()
+        self.assertNotEqual(self.record()['status'], 'input_test_ready')

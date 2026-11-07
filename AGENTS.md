@@ -9,4 +9,4 @@
 
 - 문서·릴리스 노트·사이트는 로컬 렌더링 결과 확인으로 충분하다. Markdown은 로컬 렌더러가 생성한 HTML이나 에디터 미리보기 결과를 확인한다. 브라우저 실행·화면 캡처·대상 서비스에서의 표시 확인은 필수가 아니며, 검사만을 위한 GitHub 업로드·API 전송은 하지 않는다. 의도한 강조 대신 `**` 등 Markdown 기호가 본문에 남는지 점검하며, 특히 말줄임표·괄호 등 문장부호와 한글 조사가 붙는 표현은 필요 시 `<strong>` 또는 일반 문구로 수정한다. 원본 구문 검사만으로 렌더링 결과 확인을 대신하지 않는다. 실제 게시 후 화면 확인은 사용자가 별도로 요청한 경우에 수행한다.
 
-- 입력 문제의 실입력·물리 키 조사는 `prepare-app-test.py prepare --preserve-input-incidents <전용 폴더>`와 `check <record.json> --require-diagnostics`를 사용한다. 현재 실행본의 실제 파일 쓰기·다시 읽기 증명까지 확인한 `input_test_ready` 전에는 사용자에게 재현 입력을 요청하지 않는다. `permissions_ready`·폴더 존재·버튼 ON만으로 저장 성공을 추정하지 않는다. 저장 실패 후에는 누락을 명시하고 실패 자료를 보존하며, 같은 프로세스의 폴더 권한만 수정해 성공했다고 기록하지 않는다.
+- 입력 문제의 실입력·물리 키 조사는 `prepare-app-test.py prepare --preserve-input-incidents <전용 폴더>` 또는 `prepare-app-test.py prepare --bounded-input-incidents <새 전용 폴더>`와 `check <record.json> --require-diagnostics`를 사용한다. 현재 실행본의 실제 파일 쓰기·다시 읽기 증명까지 확인한 `input_test_ready` 전에는 사용자에게 재현 입력을 요청하지 않는다. `permissions_ready`·폴더 존재·버튼 ON만으로 저장 성공을 추정하지 않는다. 저장 실패 후에는 누락을 명시하고 실패 자료를 보존하며, 같은 프로세스의 폴더 권한만 수정해 성공했다고 기록하지 않는다.

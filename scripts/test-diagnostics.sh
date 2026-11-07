@@ -5,6 +5,8 @@ mkdir -p .build/hanq/module-cache
 source scripts/test-workspace.sh
 stage=$(hanq_test_stage diagnostics)
 trap 'rm -rf "$stage"' EXIT
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/Bounded/main.swift -o "$stage/bounded-tests"
+hanq_test_run "$stage/bounded-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tests/Diagnostics/main.swift -o "$stage/diagnostics-tests"
 hanq_test_run "$stage/diagnostics-tests"
 hanq_test_run "$stage/diagnostics-tests" --diagnose-input "$stage/trace.log"
