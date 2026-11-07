@@ -52,6 +52,21 @@ struct MismatchRecoveryPlan {
         if observedTwoSetPrefix(text:text,selection:selection){return true}
         return mixedInsertion(text:text,selection:selection,allowPendingKeys:true) != nil
     }
+    private func ambiguousWholePrefix(text:String,selection:NSRange)->Bool {
+        // A different document as a whole, not an ordinary insertion within
+        // intact text. This match can preserve a candidate, never start a write.
+        guard !before.isEmpty,pendingCompletion==nil,verifiedReplacement==nil,
+              !codes.isEmpty,codes.count<256,selection.length==0,
+              selection.location==text.utf16.count,!text.isEmpty,hasLetters,
+              !sameObservedSurroundings("") else{return false}
+        // Lengths are UTF-16. Compare exact keyboard output or an already
+        // supported mixed rendering, without normalizing a draft or moving a caret.
+        if text.utf16.count==roman.utf16.count && text.lowercased()==roman.lowercased(){return true}
+        guard text.utf16.count<=codes.count*3 else{return false}
+        var shape=MismatchRecoveryPlan(before:"",caret:0,sourceID:sourceID)
+        shape.codes=codes;shape.roman=roman
+        return shape.mixedInsertion(text:text,selection:selection) != nil
+    }
     static func next(previous:MismatchRecoveryPlan?,text:String,selection:NSRange,code:UInt16,shift:Bool,sourceID:String=KoreanKeyboardLayout.twoSetID)->MismatchRecoveryPlan? {
         let ns=text as NSString
         guard selection.location>=0,selection.length>=0,selection.location<=ns.length,
@@ -78,6 +93,13 @@ struct MismatchRecoveryPlan {
                 let inserted=NSRange(location:previous.caret,length:selection.location-previous.caret)
                 candidate.before=(replacingSelection as NSString).replacingCharacters(in:inserted,with:"")
                 candidate.pendingCompletion=selection.length>0 ? (text,selection):nil
+            } else if previous.ambiguousWholePrefix(text:text,selection:selection) {
+                // The complete displayed body could be our earlier keys OR a
+                // restored draft. Losing their surroundings does not authorize
+                // erasing them, nor does it make a suffix-only repair complete.
+                // Keep the original coordinates. If they reappear, the ordinary
+                // full-context verifier can recover every key.
+                candidate=previous
             }
         }
         guard candidate.append(code:code,shift:shift) else{return nil}

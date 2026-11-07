@@ -458,8 +458,16 @@ final class InputIncidentTrace {
         case snapshotWait,textWait,caretWait,repairWait,repairReceiptWait,onsetReceiptWait,replayReceiptWait,focusWait,selectionCommitWait,sourceCommitWait
         case inputResumed,editorStyleMatched,terminalLFMatched,terminalLFStyleMatched,pendingTextPrefix,sourceInitialBodyRemoved
         case manualEditStarted,manualEditVerified,manualEditUnverified
+        case initialLayoutWait,initialLayoutReady,initialLayoutDeadline,initialContextChanged,initialSourceChanged,initialNativeBatchObserved,initialOriginalResumed
         static func event(_ stage:String)->BoundaryStage? {
             switch stage {
+            case "initial_original_resumed":return .initialOriginalResumed
+            case "initial_native_batch_observed":return .initialNativeBatchObserved
+            case "initial_layout_wait":return .initialLayoutWait
+            case "initial_layout_ready":return .initialLayoutReady
+            case "initial_layout_deadline":return .initialLayoutDeadline
+            case "initial_context_changed":return .initialContextChanged
+            case "initial_source_changed":return .initialSourceChanged
             case "manual_edit_started":return .manualEditStarted
             case "manual_edit_verified":return .manualEditVerified
             case "manual_edit_unverified":return .manualEditUnverified

@@ -17,6 +17,36 @@ final class SourceSwitchBarrier {
     static let marker:Int64 = 0x4851535749544348
     var read:()->Snapshot? = {nil}
     var readFocus:(()->AXUIElement?)?
+    // Only an explicit switch can arm this guard. A layout report cannot
+    // authorize an edit to text the application already owns.
+    enum InitialLayout {case conflicting, ready, unknown, sourceChanged}
+    var initialLayout:(()->InitialLayout)?
+    var fieldWindow:(AXUIElement)->AXUIElement? = { field in
+        var raw:CFTypeRef?
+        guard AXUIElementCopyAttributeValue(field,kAXWindowAttribute as CFString,&raw) == .success,
+              let raw,CFGetTypeID(raw)==AXUIElementGetTypeID() else{return nil}
+        return (raw as! AXUIElement)
+    }
+    private struct Entry {let field:AXUIElement;let at:Double}
+    private struct HeldStart {let snapshot:Snapshot;let window:AXUIElement;let until:Double}
+    private var entry:Entry?
+    private var heldStart:HeldStart?
+    private struct NativeBatch {
+        let field:AXUIElement,window:AXUIElement
+        let layout:InitialLayout
+        var keys:[(UInt16,Bool)]=[]
+        var expected:String?
+    }
+    private var nativeBatch:NativeBatch?
+    private var nextLayoutCheck=0.0
+    static func classifyInitialLayout(first:String,layout:String,override:String?,last:String)->InitialLayout {
+        let target=KoreanKeyboardLayout.twoSetID, keyboard="com.apple.keylayout.2SetHangul"
+        guard first==last else{return .unknown}
+        guard first==target else{return first=="unknown" ? .unknown:.sourceChanged}
+        if layout=="com.apple.keylayout.ABC",override==nil{return .conflicting}
+        let korean=[target,keyboard]
+        return korean.contains(layout) && (override==nil || korean.contains(override!)) ? .ready:.unknown
+    }
     var source:()->String = InputSourceAccess.currentID
     var ready:()->Bool = {true}
     var select:(String)->OSStatus = InputSourceAccess.select
@@ -240,7 +270,7 @@ final class SourceSwitchBarrier {
         ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil;noteDiagnosticHistory(9,baseline:true)
         trace("source_initial_body_removed")
     }
-    func resetObservation(){let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
     // Backspace can remove one component of live Hangul rather than commit the
     // remaining syllable. Reuse only our observed key prefix, after the editor
     // proves its entire text and caret. Never decompose existing editor text.
@@ -488,6 +518,82 @@ final class SourceSwitchBarrier {
             trace("select_all_waiting_for_repair");schedule()
         }
     }
+    private func isInitialLetter(_ event:CGEvent)->Bool {
+        guard event.type == .keyDown,event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskSecondaryFn,.maskAlphaShift]).isEmpty,
+              event.getIntegerValueField(.keyboardEventAutorepeat)==0,
+              let code=UInt16(exactly:event.getIntegerValueField(.keyboardEventKeycode)) else{return false}
+        return PhysicalLetterKeys.letters[code] != nil
+    }
+    // Called before a native key passes, or immediately before the first
+    // queued key is posted. Never derive ownership from a displayed string.
+    private func holdFirstIfNeeded(_ event:CGEvent,alreadyQueued:Bool)->Bool {
+        guard let candidate=entry,heldStart==nil else{return heldStart != nil}
+        let age=now()-candidate.at
+        guard age>=0,age<=MismatchSourceEvidence.confirmationSeconds else{entry=nil;return false}
+        if event.type == .keyUp{return false}
+        if event.type == .flagsChanged {
+            if !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{entry=nil}
+            return false
+        }
+        guard isInitialLetter(event),let initialLayout else{entry=nil;return false}
+        entry=nil // at most once, including the ordinary fast path
+        guard initialLayout() == .conflicting,isReady(),!externalEditPending,
+              repairInFlight.isEmpty,onsetInFlight.isEmpty else{return false}
+        guard let snap=read(),CFEqual(candidate.field,snap.field),let window=fieldWindow(snap.field) else{
+            if alreadyQueued{fail("initial_context_changed");return true}
+            return false
+        }
+        let limit=candidate.at+1
+        if !busy{busy=true;transactionField=snap.field;deadline=limit}
+        heldStart=HeldStart(snapshot:snap,window:window,until:limit);nextLayoutCheck=now()+0.016
+        trace("initial_layout_wait");schedule();return true
+    }
+    private func initialDeliveryReady()->Bool {
+        guard let h=heldStart else{return true}
+        let expired=now()>=h.until
+        guard !externalEditPending else{fail("initial_context_changed");return false}
+        guard expired || now()>=nextLayoutCheck else{schedule();return false}
+        nextLayoutCheck=now()+0.016
+        guard let phase=initialLayout?(), phase != .sourceChanged else{fail("initial_source_changed");return false}
+        // Some input methods can continue to produce correct text while the
+        // layout API keeps reporting ABC. That report alone must not park
+        // original input indefinitely or authorize rewriting a draft.
+        guard phase == .ready || (expired && phase == .conflicting) else{
+            if expired{fail("initial_layout_deadline")}else{schedule()};return false
+        }
+        // Nothing in this batch has reached the editor. Even identical letters
+        // in a draft cannot be a receipt for one of these owned events.
+        guard let snap=read(),CFEqual(snap.field,h.snapshot.field),
+              let win=fieldWindow(snap.field),CFEqual(win,h.window),
+              snap.selection==h.snapshot.selection,snap.text.utf16.elementsEqual(h.snapshot.text.utf16),
+              initialLayout?() == phase else{fail("initial_context_changed");return false}
+        if !snap.text.isEmpty {
+            nativeBatch=NativeBatch(field:snap.field,window:win,layout:phase)
+        }
+        heldStart=nil;deadline=now()+1;trace(phase == .ready ? "initial_layout_ready":"initial_original_resumed");return true
+    }
+    private func recordNativeBatchEdge(_ event:CGEvent) {
+        guard nativeBatch != nil,event.type != .keyUp else{return}
+        if event.type == .flagsChanged,event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{return}
+        guard isInitialLetter(event),nativeBatch!.keys.count<64,
+              let code=UInt16(exactly:event.getIntegerValueField(.keyboardEventKeycode)) else{nativeBatch=nil;return}
+        nativeBatch!.keys.append((code,event.flags.contains(.maskShift)));nativeBatch!.expected=nil
+    }
+    // Acknowledges transport only, after all owned edges returned through the
+    // tap. The original AX body may have disappeared when native input began.
+    // Discard all typed-history authority: a matching draft is never evidence
+    // that we may erase any of it on a later key.
+    private func finishNativeBatchIfMatched(_ s:Snapshot)->Bool {
+        guard let batch=nativeBatch,!batch.keys.isEmpty,target==nil,queued.isEmpty,
+              !awaitingReplay,!awaitingSelection,!externalEditPending,repairInFlight.isEmpty,onsetInFlight.isEmpty,
+              CFEqual(batch.field,s.field),s.selection==NSRange(location:s.text.utf16.count,length:0) else{return false}
+        if batch.expected==nil{nativeBatch!.expected=MismatchKeyboardLayout.render(keys:batch.keys,sourceID:KoreanKeyboardLayout.twoSetID)}
+        guard let predicted=nativeBatch?.expected,predicted.utf16.elementsEqual(s.text.utf16),
+              let win=fieldWindow(s.field),CFEqual(win,batch.window),
+              source()==KoreanKeyboardLayout.twoSetID,initialLayout?() == batch.layout else{return false}
+        resetObservation();field=s.field;ledger=MismatchReplayLedger(before:s.text,caret:s.selection.location)
+        trace("initial_native_batch_observed");return true
+    }
     /// Called before the normal key filters. Only our own one-at-a-time replay bypasses the queue.
     func receive(_ type:CGEventType,_ event:CGEvent)->Bool {
         if event.getIntegerValueField(.eventSourceUserData)==Self.marker {
@@ -495,7 +601,12 @@ final class SourceSwitchBarrier {
             awaitingReplay=false;schedule();return false
         }
         beginRepairBoundary(type,event)
+        if !busy,entry != nil { _=holdFirstIfNeeded(event,alreadyQueued:false) }
         guard busy else{return false}
+        if heldStart != nil,type == .flagsChanged,
+           !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty {
+            fail("initial_context_changed");return false
+        }
         // A native select-all has already reached the editor. Before any AX
         // source-switch write, a contradictory body cannot authorize repair.
         // Resume its original keys instead of parking them behind stale history.
@@ -533,6 +644,8 @@ final class SourceSwitchBarrier {
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0)->Bool {
+        if heldStart != nil{fail("initial_source_changed")}
+        entry=nil;nativeBatch=nil
         discardInvalidDeferredHistory()
         refreshIdleField()
         if let edit=manualEdit {
@@ -557,7 +670,7 @@ final class SourceSwitchBarrier {
     private func schedule(){
         guard busy || pendingSelectAll,!scheduled else{return};scheduled=true
         let token=generation
-        DispatchQueue.main.asyncAfter(deadline:.now()+0.002){[weak self] in
+        DispatchQueue.main.asyncAfter(deadline:.now()+(heldStart==nil ? 0.002:0.016)){[weak self] in
             guard let self,self.generation==token else{return}
             self.scheduled=false;self.step()
         }
@@ -582,6 +695,7 @@ final class SourceSwitchBarrier {
     }
     func step(){
         guard busy else{observeNativeSelection();return}
+        if let h=heldStart,now()>=h.until,!isReady(){fail("initial_layout_deadline");return}
         // A repair has its own bounded edit/verification transaction. Do not
         // expire our editor-ack deadline or compete with its AX reads meanwhile.
         if !isReady() {
@@ -590,6 +704,7 @@ final class SourceSwitchBarrier {
             wait("waiting_for_repair");return
         }
         if repairWaitStarted != nil {repairWaitStarted=nil;deadline=now()+1}
+        guard initialDeliveryReady() else{return}
         guard now()<deadline else{fail("deadline");return}
         guard repairInFlight.isEmpty else{wait("waiting_for_repair_receipt");return}
         guard onsetInFlight.isEmpty else{wait("waiting_for_onset_receipt");return}
@@ -661,6 +776,7 @@ final class SourceSwitchBarrier {
             if selectionPending(){wait("waiting_for_source_commit");return}
             guard result==noErr,source()==target else{fail("switch_failed");return}
             let snap=switchSnapshot!;switchSnapshot=nil
+            let confirmedUserRequest=targetTimestamp != 0
             didConfirmSource(target,targetTimestamp)
             didSelect(targetTimestamp);targetTimestamp=0
             let previous=ledger,previousDiagnosticHistory=diagnosticHistory
@@ -681,6 +797,9 @@ final class SourceSwitchBarrier {
                 selectedRange=snap.selection
                 noteDiagnosticHistory(7,baseline:true)
             }
+            if initialLayout != nil,target==KoreanKeyboardLayout.twoSetID,confirmedUserRequest {
+                entry=Entry(field:snap.field,at:now())
+            }
             awaitingSelection=true
             selectionAttempts=1;selectionRetryAt=now()+0.01
             deadline=now()+1.0;waitReason=nil;trace("editor_confirmed_switch");schedule();return
@@ -689,11 +808,12 @@ final class SourceSwitchBarrier {
             replayNext();return
         }
         guard isReady() else{wait("waiting_for_repair");return}
-        if expected == nil || matches(snap) {
-            busy=false;self.transactionField=nil;finishDiagnosticRequest(1);trace("finished")
+        if expected == nil || matches(snap) || finishNativeBatchIfMatched(snap) {
+            nativeBatch=nil;busy=false;self.transactionField=nil;finishDiagnosticRequest(1);trace("finished")
         }else{waitForMatch(snap)}
     }
     private func replayNext(){
+        if let first=queued.first,entry != nil,holdFirstIfNeeded(first,alreadyQueued:true){return}
         waitReason=nil
         let saved=queued.removeFirst()
         replaySource?.userData=Self.marker
@@ -703,9 +823,11 @@ final class SourceSwitchBarrier {
         event.setIntegerValueField(.keyboardEventAutorepeat,value:saved.getIntegerValueField(.keyboardEventAutorepeat))
         event.setIntegerValueField(.eventSourceUserData,value:Self.marker)
         // A fresh delivery after an acknowledged boundary, not an old physical event.
+        recordNativeBatchEdge(event)
         awaitingReplay=true;deadline=now()+1.0;send(event);schedule()
     }
     func fail(_ reason:String){
+        heldStart=nil;entry=nil
         finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
         manualEdit=nil;manualEditSequence+=1
 

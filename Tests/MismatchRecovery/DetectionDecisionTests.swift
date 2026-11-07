@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 
 func runDetectionDecisionTests() {
+    runDisappearingContextTests()
     typealias Reason=InputIncidentTrace.DecisionReason
     let cases:[(String,Reason)]=[("roman",.romanSource),("blocked",.observationBlocked),("old",.preSwitchKey),("snapshot",.snapshotUnavailable),("key",.candidateRejectedKey),("recorded",.candidateRecorded)]
     let field=AXUIElementCreateApplication(12345)
