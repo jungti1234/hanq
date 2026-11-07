@@ -341,7 +341,36 @@ struct InputIncidentShapeProbe {
 final class InputIncidentTrace {
     let fieldRegistry=InputIncidentFieldRegistry()
     enum Lane:Int,Codable {case hid=1,main,onset,mismatch,boundary,onsetAX,mismatchAX,sourceBoundary}
-    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision}
+    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison}
+    struct BoundaryEvidence:Codable,Equatable {
+        // Fixed relations only: never positions, selection lengths, body, keys or hashes.
+        // phase: request/comparison/end; reason: none/success/deadline/context/other.
+        var transaction,phase,reason,text,start,end,expected,reported,change,resolution:Int
+        var seed,mutation,revision,observations,suppressed,coalesced,fieldRelation:Int
+        var baselineAgeMicros,mutationAgeMicros,requestAgeMicros,sampleAgeMicros:Int?
+        static let required=Set(["transaction","phase","reason","text","start","end","expected","reported","change","resolution","seed","mutation","revision","observations","suppressed","coalesced","fieldRelation"])
+        static let ages=Set(["baselineAgeMicros","mutationAgeMicros","requestAgeMicros","sampleAgeMicros"])
+        var valid:Bool {
+            (1...1_000_000_000).contains(transaction) && (1...3).contains(phase) && (0...4).contains(reason) &&
+            ((phase==3) == (reason>0)) && (0...5).contains(text) && (0...3).contains(start) && (0...3).contains(end) &&
+            (0...2).contains(expected) && (0...2).contains(reported) && (0...4).contains(change) && (0...5).contains(resolution) &&
+            (0...13).contains(seed) && (0...13).contains(mutation) && (0...2).contains(fieldRelation) &&
+            [revision,observations,suppressed,coalesced].allSatisfy{(0...1_000_000).contains($0)} &&
+            [baselineAgeMicros,mutationAgeMicros,requestAgeMicros,sampleAgeMicros].allSatisfy{$0.map{(0...60_000_000).contains($0)} ?? true} &&
+            (phase != 1 || (observations==0 && text==0 && resolution==0)) &&
+            (!(1...4).contains(resolution) || (fieldRelation==1 && (1...4).contains(text) && start==2 && end==2 && expected>0 && expected==reported))
+        }
+        var resolutionLabel:String {
+            ["판단 근거 미확인","현재 비교 일치","예측 유지 중 앱 보고가 일치값에 도달","앱 보고 유지 중 예측이 일치값으로 변경","양쪽 변경 뒤 일치","불일치 지속·원인 미확정"][resolution]
+        }
+        static func parse(_ object:[String:Any])->Self? {
+            guard Set(object.keys).subtracting(ages)==required,object.values.allSatisfy({value in
+                guard let number=value as? NSNumber else{return false}
+                return CFGetTypeID(number) != CFBooleanGetTypeID() && number.doubleValue==Double(number.intValue)
+            }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
+            return value
+        }
+    }
     enum OnsetSite:Int {case reservation=1,publication,history,claim}
     enum OnsetReason:Int {
         case baselineMissing=1,baselineAvailable,publicationBlocked,sourceChanged,representationMissing,representationUnchanged
@@ -553,6 +582,7 @@ final class InputIncidentTrace {
         var readOutcome:ReadOutcome?=nil
         var focusEvidence:InputIncidentFocusEvidence?=nil
         var onsetEvidence:OnsetEvidence?=nil
+        var boundaryEvidence:BoundaryEvidence?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -1396,6 +1426,15 @@ final class InputIncidentTrace {
             append(.sourceBoundary,.sourceBoundary,observedAt:time,observationTiming:timing,event:awaitingOnset,category:stage.rawValue,count:queued)
         }
         if stage == .retained || stage == .deadline || stage == .focusChanged || stage == .failed || stage == .manualEditUnverified || stage == .inputResumed {requestCapture(.boundaryInterrupted,lane:.sourceBoundary,detail:stage.rawValue)}
+    }
+    func boundaryComparison(_ evidence:BoundaryEvidence){
+        guard enabled,evidence.valid else{return};let time=clock()
+        // The existing bounded metadata worker; no new timer, AX/TIS query or capture.
+        _ = submit(.context,.sourceBoundary,observedAt:time){[self] timing in
+            append(.sourceBoundary,.boundaryComparison,observedAt:time,observationTiming:timing)
+            ring[(position-1+capacity)%capacity]?.boundaryEvidence=evidence
+            updatePreservedLastFrame()
+        }
     }
     // Own capture admission: ordinary observation overflow cannot erase the
     // detector reason. The serial worker freezes the pre-edit ring; storage

@@ -184,6 +184,16 @@ func previewSnapshot(_ frames: [[String: Any]], status: [String: Any] = [:]) thr
 func projected(_ frames: [[String: Any]]) throws -> DiagnosticReviewDocument {
     try previewSnapshot(frames).incidents[0].documents[0]!
 }
+var comparison:[String:Any]=["transaction":1,"phase":2,"reason":0,"text":1,"start":2,"end":2,"expected":1,"reported":1,"change":2,"resolution":2,"seed":1,"mutation":10,"revision":2,"observations":2,"suppressed":0,"coalesced":0,"fieldRelation":1]
+for (code,label) in [(2,"예측 유지 중 앱 보고가 일치값에 도달"),(3,"앱 보고 유지 중 예측이 일치값으로 변경"),(4,"양쪽 변경 뒤 일치"),(5,"불일치 지속·원인 미확정")] {
+    comparison["resolution"]=code
+    if code==5 {comparison["start"]=3;comparison["end"]=3}
+    let preview=try projected([["kind":14,"boundaryEvidence":comparison]])
+    check(preview.readableText.contains(label),"comparison direction is readable without claiming an internal IME cause")
+}
+comparison["body"]="PRIVATE_COMPARISON_BODY"
+let invalidComparison=try projected([["kind":14,"boundaryEvidence":comparison]])
+check(!invalidComparison.readableText.contains("PRIVATE_COMPARISON_BODY") && !invalidComparison.readableText.contains("전환 범위 비교:"),"malformed comparison cannot enter preview")
 let issues: [String: Any] = ["automaticFiles": 8, "automaticBytes": 2_000_000, "manualFiles": 2,
     "manualBytes": 1024, "limited": 4, "retired": 0, "unavailable": 2,
     "encodingFailures": 0, "statusWriteFailures": 1, "lastFailureStage": 17,

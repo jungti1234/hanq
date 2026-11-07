@@ -9,6 +9,20 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_boundary_comparison_is_typed_bounded_and_not_causal_blame(self):
+        timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
+        evidence=dict(transaction=1,phase=2,reason=0,text=1,start=2,end=2,expected=1,reported=1,change=2,resolution=2,seed=1,mutation=10,revision=2,observations=2,suppressed=0,coalesced=3,fieldRelation=1,baselineAgeMicros=60000000,sampleAgeMicros=0)
+        row=dict(sequence=1,milliseconds=80,lane=8,kind=14,event=0,edge=0,category=0,inputOrigin=0,consumed=False,durationMicros=0,count=0,selected=False,field=0,observationTiming=timing,boundaryEvidence=evidence)
+        result=summary.summarize(dict(schema=1,trigger=1,frames=[row]))['boundary_comparisons'][0]
+        self.assertEqual(result['resolution_name'],'reported_reached_stable_prediction')
+        self.assertEqual(result['mutation_name'],'observed_key')
+        self.assertIn('not_editor_internal_IME_or_causal_fault_proof',result['interpretation'])
+        for patch in [dict(transaction=0),dict(phase=4),dict(reason=2),dict(text=6),dict(start=True),dict(end=4),dict(expected=3),dict(change=5),dict(resolution=6),dict(seed=14),dict(mutation=14),dict(revision=-1),dict(revision=1.5),dict(observations=1000001),dict(suppressed=-1),dict(fieldRelation=0),dict(baselineAgeMicros=60000001),dict(sampleAgeMicros=None),dict(sampleAgeMicros=True),dict(actualLocation=77),dict(body='PRIVATE')]:
+            with self.assertRaises(ValueError):summary.boundary_evidence(dict(evidence,**patch))
+        for patch in [dict(kind=7),dict(lane=2),dict(count=1),dict(event=1),dict(body='PRIVATE'),dict(onsetEvidence=dict(keys=1)),dict(observationTiming=None)]:
+            with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
+        self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[]))['boundary_comparisons'],[])
+
     def test_monitor_lifecycle_is_bounded_typed_and_optional(self):
         sample=dict(observedAtMilliseconds=10,stage=1,reason=9,tapState=0,active=True,enabled=False,
                     suspended=True,recovering=False,rollingBack=False,restartAllowed=False,

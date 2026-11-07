@@ -72,3 +72,8 @@ hanq_test_run "$stage/focus-evidence-tests" "$stage/focus-evidence.json"
 python3 -B scripts/summarize-input-incident.py "$stage/focus-evidence.json" > "$stage/focus-evidence-summary.json"
 
 bash scripts/test-onset-decisions.sh
+
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/BoundaryComparison/main.swift -o "$stage/boundary-comparison-tests"
+hanq_test_run "$stage/boundary-comparison-tests" "$stage/boundary-comparison"
+python3 -B scripts/summarize-input-incident.py "$stage/boundary-comparison-0.json" > "$stage/boundary-comparison-summary.json"
+python3 -B scripts/summarize-input-incident.py "$stage/boundary-comparison-1.json" > "$stage/boundary-comparison-post-summary.json"

@@ -146,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 InputIncidentTrace.shared.sourceBoundary(kind,queued:counts.queued,awaitingOnset:counts.awaitingOnset)
             }
         }
+        barrier.diagnostic = { InputIncidentTrace.shared.boundaryComparison($0) }
         return barrier
     }()
     // The failed queue will not be replayed. Settle only state from edges we
