@@ -242,14 +242,50 @@ final class SourceSwitchBarrier {
         textMatch(snap,ledger,renderedInsertion:ledger.insertion,allowEmptyInsertion:allowEmptyInsertion)
     }
     private func textMatch(_ snap:Snapshot,_ ledger:MismatchReplayLedger,renderedInsertion:String,allowEmptyInsertion:Bool=false)->TextMatch? {
-        let predicted=(ledger.before as NSString).replacingCharacters(in:NSRange(location:ledger.caret,length:0),with:renderedInsertion)
-        if snap.text==predicted{return .exact}
+        let before=ledger.before as NSString
+        let longContext=before.length>=256
+        // Compare canonically equivalent text without repeatedly traversing
+        // bridged strings through Swift's equality slow path. NFC is applied
+        // only to comparison copies; editor text and UTF-16 ranges stay intact.
+        func wellFormed(_ raw:CFString)->Bool {
+            let length=CFStringGetLength(raw)
+            func valid(_ units:UnsafeBufferPointer<UniChar>)->Bool {
+                var i=0
+                while i<units.count {
+                    let unit=units[i];i+=1
+                    if (0xd800...0xdbff).contains(unit) {
+                        guard i<units.count,(0xdc00...0xdfff).contains(units[i]) else{return false}
+                        i+=1
+                    } else if (0xdc00...0xdfff).contains(unit) {return false}
+                }
+                return true
+            }
+            return withExtendedLifetime(raw) {
+                if let pointer=CFStringGetCharactersPtr(raw){return valid(UnsafeBufferPointer(start:pointer,count:length))}
+                var buffer=[UniChar](repeating:0,count:length)
+                return buffer.withUnsafeMutableBufferPointer {units in
+                    if length>0{CFStringGetCharacters(raw,CFRange(location:0,length:length),units.baseAddress!)}
+                    return valid(UnsafeBufferPointer(units))
+                }
+            }
+        }
+        func sameText(_ left:String,_ right:String)->Bool {
+            // Short comparisons do not pay for normalization or validation.
+            guard longContext,left.utf16.count>=256,right.utf16.count>=256 else{return left==right}
+            let leftRaw=left as CFString,rightRaw=right as CFString
+            // A foreign NSString can contain unpaired surrogates. Swift
+            // repairs those during equality; preserve that exact fallback.
+            guard wellFormed(leftRaw),wellFormed(rightRaw) else{return left==right}
+            return (left.precomposedStringWithCanonicalMapping as NSString)
+                .isEqual(to:right.precomposedStringWithCanonicalMapping)
+        }
+        let predicted=before.replacingCharacters(in:NSRange(location:ledger.caret,length:0),with:renderedInsertion)
+        if sameText(snap.text,predicted){return .exact}
         guard !ledger.segments.isEmpty,allowEmptyInsertion || !renderedInsertion.isEmpty else{return nil}
         var wanted=predicted as NSString
         var removedLF=false
         // An empty final web paragraph can expose one AX-only LF, then omit it
         // on typing. Only that original suffix after the insertion may disappear.
-        let before=ledger.before as NSString
         if snap.text.utf16.count+1==wanted.length,ledger.caret==before.length-1,
            ledger.caret>=0,before.substring(from:ledger.caret)=="\n" {
             wanted=wanted.substring(to:wanted.length-1) as NSString;removedLF=true
@@ -258,14 +294,14 @@ final class SourceSwitchBarrier {
         let insertion=NSRange(location:ledger.caret,length:renderedInsertion.utf16.count)
         let actual=snap.text as NSString
         guard NSMaxRange(insertion)<=wanted.length else{return nil}
-        guard actual.substring(to:insertion.location)==wanted.substring(to:insertion.location),
-              actual.substring(from:NSMaxRange(insertion))==wanted.substring(from:NSMaxRange(insertion)) else{return nil}
+        guard sameText(actual.substring(to:insertion.location),wanted.substring(to:insertion.location)),
+              sameText(actual.substring(from:NSMaxRange(insertion)),wanted.substring(from:NSMaxRange(insertion))) else{return nil}
         func fold(_ value:String)->[UInt32] {
             value.unicodeScalars.map{(65...90).contains($0.value) ? $0.value+32:($0.value==160 ? 32:$0.value)}
         }
         let actualInsertion=actual.substring(with:insertion),wantedInsertion=wanted.substring(with:insertion)
         guard fold(actualInsertion)==fold(wantedInsertion) else{return nil}
-        if removedLF{return actualInsertion==wantedInsertion ? .terminalLF:.terminalLFStyle}
+        if removedLF{return sameText(actualInsertion,wantedInsertion) ? .terminalLF:.terminalLFStyle}
         return .style
     }
     func matchesText(_ snap:Snapshot)->Bool {
