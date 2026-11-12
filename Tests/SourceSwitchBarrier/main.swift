@@ -11,6 +11,7 @@ runInitialLayoutTests()
 runNativeObservationTests()
 runBoundaryDiagnosticTests()
 runRoutingWorkTests()
+runDeletionRestorationTests()
 // A native select-all is an observation boundary, never an edit command.
 for body in ["ㄱㅡ럼", "그럼", "ordinary"] {
  let b=SourceSwitchBarrier();var range=NSRange(location:body.utf16.count,length:0),writes=0,posts=0

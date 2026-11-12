@@ -239,9 +239,12 @@ final class SourceSwitchBarrier {
     }
     private enum TextMatch {case exact,style,terminalLF,terminalLFStyle}
     private func textMatch(_ snap:Snapshot,_ ledger:MismatchReplayLedger,allowEmptyInsertion:Bool=false)->TextMatch? {
-        let predicted=ledger.text
+        textMatch(snap,ledger,renderedInsertion:ledger.insertion,allowEmptyInsertion:allowEmptyInsertion)
+    }
+    private func textMatch(_ snap:Snapshot,_ ledger:MismatchReplayLedger,renderedInsertion:String,allowEmptyInsertion:Bool=false)->TextMatch? {
+        let predicted=(ledger.before as NSString).replacingCharacters(in:NSRange(location:ledger.caret,length:0),with:renderedInsertion)
         if snap.text==predicted{return .exact}
-        guard !ledger.segments.isEmpty,allowEmptyInsertion || !ledger.insertion.isEmpty else{return nil}
+        guard !ledger.segments.isEmpty,allowEmptyInsertion || !renderedInsertion.isEmpty else{return nil}
         var wanted=predicted as NSString
         var removedLF=false
         // An empty final web paragraph can expose one AX-only LF, then omit it
@@ -252,7 +255,7 @@ final class SourceSwitchBarrier {
             wanted=wanted.substring(to:wanted.length-1) as NSString;removedLF=true
         }
         guard snap.text.utf16.count==wanted.length else{return nil}
-        let insertion=NSRange(location:ledger.caret,length:ledger.insertion.utf16.count)
+        let insertion=NSRange(location:ledger.caret,length:renderedInsertion.utf16.count)
         let actual=snap.text as NSString
         guard NSMaxRange(insertion)<=wanted.length else{return nil}
         guard actual.substring(to:insertion.location)==wanted.substring(to:insertion.location),
@@ -363,22 +366,29 @@ final class SourceSwitchBarrier {
         deletionHistory=nil
         guard CFEqual(saved.field,snap.field),
               let last=saved.ledger.segments.last,last.source==source() else{return}
-        func adopt(_ candidate:MismatchReplayLedger)->Bool {
-            guard textMatch(snap,candidate) != nil,candidate.selection==snap.selection else{return false}
+        // Render only within this restoration attempt. Earlier source segments
+        // are identical for every candidate; text and caret share one rendering.
+        // No result survives a new snapshot, field or input-source check.
+        let committed=saved.ledger.segments.dropLast().map{MismatchReplayLedger.render($0)}.joined()
+        func adopt(_ candidate:MismatchReplayLedger,_ insertion:String)->Bool {
+            guard textMatch(snap,candidate,renderedInsertion:insertion) != nil,
+                  NSRange(location:candidate.caret+insertion.utf16.count,length:0)==snap.selection else{return false}
             var candidate=candidate
             candidate.postDeletionPrefixCount=candidate.segments.last?.source==mismatchKoreanID ? candidate.segments.last?.keys.count:nil
             field=snap.field;ledger=candidate;historyStarted=saved.started;noteDiagnosticHistory(8,baseline:true);return true
         }
-        if adopt(saved.ledger){return}
+        if adopt(saved.ledger,committed+MismatchReplayLedger.render(last)){return}
         // Deleting the last medial can leave the initial detached from the
         // preceding committed syllable (이거 -> 이ㄱ, never 익). Try boundaries
         // only between keys we observed; accept solely the exact editor result.
         guard last.keys.count>1 else{return}
         for split in stride(from:last.keys.count-1,through:1,by:-1) {
+            let left=(source:last.source,keys:Array(last.keys.prefix(split)))
+            let right=(source:last.source,keys:Array(last.keys.dropFirst(split)))
             var candidate=saved.ledger
-            candidate.segments[candidate.segments.count-1].keys=Array(last.keys.prefix(split))
-            candidate.segments.append((source:last.source,keys:Array(last.keys.dropFirst(split))))
-            if adopt(candidate){return}
+            candidate.segments[candidate.segments.count-1]=left
+            candidate.segments.append(right)
+            if adopt(candidate,committed+MismatchReplayLedger.render(left)+MismatchReplayLedger.render(right)){return}
         }
     }
     // The main tap records accepted keys before the mismatch tap reads their
