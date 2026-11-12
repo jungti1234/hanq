@@ -4,7 +4,7 @@ import Darwin
 // Passive scalar callbacks and existing snapshot paths only. No taps, posts, AX calls or source changes.
 let enabled=CommandLine.arguments.contains("--on")
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,initiallyEnabled:enabled,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:enabled,writer:{captures.append($0)})
 let event=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:true)!
 var probe=InputIncidentShapeProbe(),latencies:[UInt64]=[],workCount=0,cpuCount=0,selectedCount=0
 let count=2048
@@ -12,7 +12,10 @@ func processCPU()->UInt64{var usage=rusage();getrusage(RUSAGE_SELF,&usage);retur
 func callback(_ lane:InputIncidentTrace.Lane,_ type:CGEventType){
  let before=DispatchTime.now().uptimeNanoseconds
  #if HANQ_INDIRECT_TIMING
- let start=trace.beginCallback(type)
+ var start=trace.beginCallback(type)
+ #if HANQ_MAIN_CHECKPOINTS
+ if lane == .main {for stage in [InputIncidentTrace.CallbackStage.processing,.recipient,.candidate,.barrier,.external,.filters,.routing,.diagnostics]{trace.checkpoint(stage,&start)}}
+ #endif
  trace.event(lane,type,event,started:start)
  #else
  trace.event(lane,type,event)
@@ -42,5 +45,10 @@ if let c=captures.last{workCount=c.frames.filter{$0.workEvidence != nil}.count;c
 #endif
 latencies.sort()
 func percentile(_ q:Double)->Double{Double(latencies[min(latencies.count-1,Int(Double(latencies.count-1)*q))])/1000}
-let row:[String:Any]=["enabled":enabled,"callbacks":latencies.count,"cpu_us":cpu,"wall_us":wall/1000,"p50_us":percentile(0.5),"p99_us":percentile(0.99),"max_us":Double(latencies.last!)/1000,"work_frames":workCount,"cpu_frames":cpuCount,"motion_frames":selectedCount,"capture_bytes":captures.last.flatMap{try? JSONEncoder().encode($0).count} ?? 0]
+#if HANQ_MAIN_CHECKPOINTS
+let checkpointCount=captures.last?.frames.filter{$0.workEvidence?.checkpoints != nil}.count ?? 0
+#else
+let checkpointCount=0
+#endif
+let row:[String:Any]=["enabled":enabled,"callbacks":latencies.count,"cpu_us":cpu,"wall_us":wall/1000,"p50_us":percentile(0.5),"p99_us":percentile(0.99),"max_us":Double(latencies.last!)/1000,"work_frames":workCount,"cpu_frames":cpuCount,"motion_frames":selectedCount,"checkpoint_frames":checkpointCount,"capture_bytes":captures.last.flatMap{try? JSONEncoder().encode($0).count} ?? 0]
 print(String(data:try! JSONSerialization.data(withJSONObject:row,options:[.sortedKeys]),encoding:.utf8)!)

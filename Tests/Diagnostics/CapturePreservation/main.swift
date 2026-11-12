@@ -7,7 +7,7 @@ func encoded(_ value:InputIncidentTrace.Capture)->Data{do{return try JSONEncoder
 func strict(_ value:InputIncidentTrace.Capture)->Bool{(try? RecorderTrace.decode(encoded(value))) != nil}
 var time=100.0
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,clock:{time},writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{captures.append($0)})
 trace.captureForTest(.axDelay);trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
 check(captures.count==2,"initial automatic pre and post published")
 time=102
@@ -45,7 +45,7 @@ if CommandLine.arguments.count>1{do{try encoded(post).write(to:URL(fileURLWithPa
 
 // All ready windows drain in one batch, rather than one every ten seconds.
 var batchTime=200.0,batchCaptures:[InputIncidentTrace.Capture]=[]
-let batch=InputIncidentTrace(destination:nil,clock:{batchTime},writer:{batchCaptures.append($0)})
+let batch=InputIncidentTrace(secureInput:{false},destination:nil,clock:{batchTime},writer:{batchCaptures.append($0)})
 batch.captureForTest(.axDelay);batch.flush();batch.finishCaptureWindowsForTest();batch.flush()
 batchTime=202
 for _ in 0..<16{batch.captureForTest(.boundaryInterrupted);batch.flush();batch.finishCaptureWindowsForTest();batch.flush()}
@@ -62,7 +62,7 @@ check(batchCaptures.allSatisfy{strict($0)},"bounded batch payloads pass strict c
 
 // A full post does not silently overwrite early post context.
 var smallCaptures:[InputIncidentTrace.Capture]=[]
-let small=InputIncidentTrace(destination:nil,capacity:8,writer:{smallCaptures.append($0)})
+let small=InputIncidentTrace(secureInput:{false},destination:nil,capacity:8,writer:{smallCaptures.append($0)})
 small.captureForTest(.axDelay);small.flush()
 for _ in 0..<20{small.context();small.flush()}
 small.finishCaptureWindowsForTest();small.flush()
@@ -72,7 +72,7 @@ check(smallCaptures.last?.captureBacklog?.postOverflow[3]==12,"post overflow is 
 
 // A request list is bounded independently of frame and window capacity.
 var listTime=300.0,listCaptures:[InputIncidentTrace.Capture]=[]
-let list=InputIncidentTrace(destination:nil,clock:{listTime},writer:{listCaptures.append($0)})
+let list=InputIncidentTrace(secureInput:{false},destination:nil,clock:{listTime},writer:{listCaptures.append($0)})
 for _ in 0..<33{list.captureForTest(.axDelay);list.flush()}
 list.finishCaptureWindowsForTest();list.flush();listTime=310.1;list.drainCapturesForTest();list.flush()
 check(listCaptures.filter{$0.phase==1}.count==2,"request thirty-three opens another protected window")
@@ -82,7 +82,7 @@ check(listCaptures.filter{$0.phase==1}.allSatisfy{($0.capturePreservation?.reque
 // Admission under a held metadata lock never blocks the requesting path.
 let held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0)
 var heldCaptures:[InputIncidentTrace.Capture]=[]
-let heldTrace=InputIncidentTrace(destination:nil,writer:{heldCaptures.append($0)})
+let heldTrace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{heldCaptures.append($0)})
 Thread{heldTrace.withLockedMetadataForTest{held.signal();release.wait()};done.signal()}.start()
 check(held.wait(timeout:.now()+2) == .success,"controlled lock held")
 let began=ProcessInfo.processInfo.systemUptime
@@ -95,7 +95,7 @@ check(heldCaptures.last?.capturePreservation?.requests.count==16,"all admitted c
 
 // Real timer closes one second after the last merged request.
 var timedCaptures:[InputIncidentTrace.Capture]=[]
-let timed=InputIncidentTrace(destination:nil,writer:{timedCaptures.append($0)})
+let timed=InputIncidentTrace(secureInput:{false},destination:nil,writer:{timedCaptures.append($0)})
 timed.captureForTest(.axDelay);timed.flush();Thread.sleep(forTimeInterval:0.6)
 timed.captureForTest(.boundaryInterrupted);timed.flush();Thread.sleep(forTimeInterval:0.6);timed.flush()
 check(timedCaptures.count==1,"merged request extends post instead of ending at first request plus one second")
@@ -104,7 +104,7 @@ check(timedCaptures.count==2 && timedCaptures.last?.capturePreservation?.request
 
 // Shutdown flushes a deferred window and identifies shortened post coverage.
 var exitTime=400.0,exitCaptures:[InputIncidentTrace.Capture]=[]
-let exiting=InputIncidentTrace(destination:nil,clock:{exitTime},writer:{exitCaptures.append($0)})
+let exiting=InputIncidentTrace(secureInput:{false},destination:nil,clock:{exitTime},writer:{exitCaptures.append($0)})
 exiting.captureForTest(.axDelay);exiting.flush();exiting.finishCaptureWindowsForTest();exiting.flush();exitTime=402
 exiting.sourceBoundary(.manualEditUnverified,queued:8,awaitingOnset:1);exiting.flush();exiting.stopAndFlush()
 check(exitCaptures.count==4,"normal shutdown drains deferred pre and post before pausing collection")
@@ -112,7 +112,7 @@ check(exitCaptures.last?.capturePreservation?.endedOnShutdown==true,"shortened s
 
 // OFF cancels pending writes and reports discarded protected requests on next ON.
 var offTime=500.0,offCaptures:[InputIncidentTrace.Capture]=[]
-let off=InputIncidentTrace(destination:nil,clock:{offTime},writer:{offCaptures.append($0)})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,clock:{offTime},writer:{offCaptures.append($0)})
 func toggle(_ value:Bool){var done=false;off.setCollectionEnabled(value){done=true};let end=Date().addingTimeInterval(2);while !done && Date()<end{RunLoop.current.run(until:Date().addingTimeInterval(0.01))};check(done,"toggle completed")}
 off.captureForTest(.axDelay);off.flush();off.finishCaptureWindowsForTest();off.flush();offTime=502
 off.sourceBoundary(.manualEditUnverified,queued:8,awaitingOnset:1);off.flush();toggle(false)
@@ -124,7 +124,7 @@ check(offCaptures.last?.frames.contains{$0.kind == .sourceBoundary && $0.count==
 
 // The actual deferred timer drains without another input or capture request.
 var trailingTime=600.0,trailingCaptures:[InputIncidentTrace.Capture]=[]
-let trailing=InputIncidentTrace(destination:nil,clock:{trailingTime},writer:{trailingCaptures.append($0)})
+let trailing=InputIncidentTrace(secureInput:{false},destination:nil,clock:{trailingTime},writer:{trailingCaptures.append($0)})
 trailing.captureForTest(.axDelay);trailing.flush();trailing.finishCaptureWindowsForTest();trailing.flush()
 trailingTime=609.8;trailing.sourceBoundary(.manualEditUnverified,queued:7,awaitingOnset:0);trailing.flush();trailing.finishCaptureWindowsForTest();trailing.flush()
 check(trailingCaptures.count==2,"completed deferred window awaits real trailing timer")
@@ -134,7 +134,7 @@ check(trailingCaptures.count==4,"real trailing timer saves deferred evidence wit
 // A stalled writer cannot postpone the protected snapshot until after overwrite.
 let writerHeld=DispatchSemaphore(value:0),writerRelease=DispatchSemaphore(value:0)
 var stalledTime=700.0,stalledCaptures:[InputIncidentTrace.Capture]=[],writeCalls=0
-let stalled=InputIncidentTrace(destination:nil,clock:{stalledTime},writer:{value in
+let stalled=InputIncidentTrace(secureInput:{false},destination:nil,clock:{stalledTime},writer:{value in
     writeCalls+=1;if writeCalls==1{writerHeld.signal();writerRelease.wait()};stalledCaptures.append(value)
 })
 stalled.captureForTest(.axDelay)
@@ -152,7 +152,7 @@ check(stalledCaptures.allSatisfy{strict($0)},"stalled writer snapshots remain st
 let folder=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("hanq-capture-order-"+UUID().uuidString)
 defer{try? FileManager.default.removeItem(at:folder)}
 var orderTime=800.0
-let ordered=InputIncidentTrace(destination:folder,clock:{orderTime})
+let ordered=InputIncidentTrace(secureInput:{false},destination:folder,clock:{orderTime})
 ordered.captureForTest(.axDelay);ordered.flush();ordered.finishCaptureWindowsForTest();ordered.flush()
 orderTime=802;ordered.sourceBoundary(.manualEditUnverified,queued:31,awaitingOnset:1);ordered.flush()
 orderTime=811;ordered.captureForTest(.callbackDelay);ordered.flush()
@@ -167,7 +167,7 @@ check(orderedDocs.compactMap{$0.storageBeforeWrite?.retired}.allSatisfy{$0==0},"
 // OFF also accounts for a protected post already queued behind a stalled writer.
 let cancelHeld=DispatchSemaphore(value:0),cancelRelease=DispatchSemaphore(value:0)
 var cancelTime=900.0,cancelCaptures:[InputIncidentTrace.Capture]=[],cancelWrites=0
-let cancel=InputIncidentTrace(destination:nil,clock:{cancelTime},writer:{value in
+let cancel=InputIncidentTrace(secureInput:{false},destination:nil,clock:{cancelTime},writer:{value in
  cancelWrites+=1;if cancelWrites==1{cancelHeld.signal();cancelRelease.wait()};cancelCaptures.append(value)
 })
 cancel.captureForTest(.axDelay)

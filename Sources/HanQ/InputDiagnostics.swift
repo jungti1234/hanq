@@ -92,7 +92,7 @@ struct InputIncidentControl:Codable,Equatable {
     // device/default binding). Preserve that first read, never retry it.
     var priorQuery:Query?=nil
     static func begin(_ trace:InputIncidentTrace,_ type:CGEventType,_ event:CGEvent)->Self? {
-        guard trace.enabled,!IsSecureEventInputEnabled() else{return nil}
+        guard trace.enabled,!trace.secureInput() else{return nil}
         let key=event.getIntegerValueField(.keyboardEventKeycode)
         let disabled=type == .tapDisabledByTimeout || type == .tapDisabledByUserInput
         guard disabled || ([CGEventType.flagsChanged,.keyDown,.keyUp].contains(type) && (key==54 || key==61)) else{return nil}
@@ -128,12 +128,39 @@ struct InputIncidentPreferences {
             .appendingPathComponent("HanQ Diagnostics",isDirectory:true).appendingPathComponent("InputIncidents",isDirectory:true)
     }
     typealias Launch=(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool,bounded:Bool,valid:Bool)
+    // Foundation leaves a dangling directory alias unresolved. Walk links even
+    // when their target/suffix does not yet exist; this is a read-only preflight,
+    // not authority to bypass the writer's ownership/no-follow checks.
+    static func namespacePath(_ value:String)->String? {
+        guard value.hasPrefix("/"),!value.contains("\0") else{return nil}
+        var pending=value.split(separator:"/").map(String.init),parts:[String]=[],links=0
+        while !pending.isEmpty {
+            let next=pending.removeFirst()
+            if next=="."{continue}
+            if next==".."{if !parts.isEmpty{parts.removeLast()};continue}
+            let path="/"+(parts+[next]).joined(separator:"/");var info=stat()
+            if lstat(path,&info)==0 {
+                if info.st_mode&S_IFMT==S_IFLNK {
+                    links+=1
+                    guard links<=40,let target=try? FileManager.default.destinationOfSymbolicLink(atPath:path) else{return nil}
+                    if target.hasPrefix("/"){parts=[]}
+                    pending=target.split(separator:"/").map(String.init)+pending
+                    continue
+                }
+                if !pending.isEmpty,info.st_mode&S_IFMT != S_IFDIR{return nil}
+            }else if errno != ENOENT{return nil}
+            parts.append(next)
+        }
+        return "/"+parts.joined(separator:"/")
+    }
+    static func boundedNamespaceIsSeparate(_ directory:URL,shared:URL=defaultDirectory.deletingLastPathComponent())->Bool {
+        guard let path=namespacePath(directory.path)?.lowercased(),let shared=namespacePath(shared.path)?.lowercased() else{return false}
+        return path != shared && !path.hasPrefix(shared+"/") && !shared.hasPrefix(path=="/" ? "/":path+"/")
+    }
     private static func bounded(_ value:String?,enabled:Bool)->Launch {
         guard let value,value.hasPrefix("/"),!value.contains("\0") else{return (defaultDirectory,false,true,false,true,false)}
         let directory=URL(fileURLWithPath:value).standardizedFileURL
-        let path=directory.resolvingSymlinksInPath().path.lowercased()
-        let shared=defaultDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path.lowercased()
-        let safe=path != shared && !path.hasPrefix(shared+"/") && !shared.hasPrefix(path=="/" ? "/":path+"/")
+        let safe=boundedNamespaceIsSeparate(directory)
         return (directory,enabled,true,false,true,safe)
     }
     static func launch(arguments:[String],defaults:UserDefaults)->Launch {
@@ -612,6 +639,14 @@ final class InputIncidentTrace {
         let beganAtMicros:Int;let endedAtMicros:Int;let clockValid:Bool
         let cpuState:Int // 0 unmeasured(AX), 1 measured, 2 unavailable, 3 other thread, 4 counter reversed, 5 invalid wall
         let cpuMicros:Int?
+        var checkpoints:[CallbackCheckpoint]?=nil
+    }
+    struct CallbackCheckpoint:Codable {
+        let stage:Int,elapsedMicros:Int,cpuState:Int
+        let cpuMicros:Int?
+    }
+    enum CallbackStage:Int {
+        case processing=1,recipient,candidate,barrier,external,filters,routing,diagnostics
     }
     static func callbackThreadCPU()->UInt64? {
         var value=timespec()
@@ -620,15 +655,16 @@ final class InputIncidentTrace {
     }
     struct CallbackStart {
         fileprivate let began:Double,cpu:UInt64?,thread:pthread_t,generation:Int32
+        fileprivate var checkpoints:[CallbackCheckpoint]=[]
     }
     private func workEvidence(began:Double,ended:Double,cpuState:Int=0,cpuMicros:Int?=nil)->WorkEvidence {
         let valid=began.isFinite && ended.isFinite && began>=origin && ended>=began && (ended-origin)*1_000_000<=9_000_000_000_000_000
         return WorkEvidence(beganAtMicros:valid ? Int((began-origin)*1_000_000):0,endedAtMicros:valid ? Int((ended-origin)*1_000_000):0,clockValid:valid,cpuState:valid ? cpuState:5,cpuMicros:valid ? cpuMicros:nil)
     }
-    // Only keyDown is sampled. OFF/secure input returns before either clock.
+    // Key down/up only. OFF/secure input returns before either clock.
     func beginCallback(_ type:CGEventType)->CallbackStart? {
         let generation=gate.generation
-        guard generation>0,type == .keyDown,!IsSecureEventInputEnabled() else{return nil}
+        guard generation>0,(type == .keyDown || type == .keyUp),!secureInput() else{return nil}
         let began=clock(),cpu=callbackCPU()
         return CallbackStart(began:began,cpu:cpu,thread:pthread_self(),generation:generation)
     }
@@ -641,7 +677,21 @@ final class InputIncidentTrace {
         else if let start=span.cpu,let end=endCPU {
             if end>=start{state=1;value=Int(min((end-start)/1000,9_000_000_000_000_000))}else{state=4}
         }
-        return workEvidence(began:span.began,ended:ended,cpuState:state,cpuMicros:value)
+        var result=workEvidence(began:span.began,ended:ended,cpuState:state,cpuMicros:value)
+        result.checkpoints=span.checkpoints.isEmpty ? nil:span.checkpoints
+        return result
+    }
+    // Fixed main-callback boundaries, no input payload, lookup, queue or file I/O.
+    // Cumulative points include instrumentation cost. Missing stages mean an
+    // early return, not zero work. CPU complements wall time; it cannot identify
+    // a particular lock or prove OS/IME scheduling as the cause of a wait.
+    func checkpoint(_ stage:CallbackStage,_ span:inout CallbackStart?) {
+        guard let current=span,gate.generation==current.generation,
+              stage.rawValue>(current.checkpoints.last?.stage ?? 0),
+              let work=finishCallback(current) else{return}
+        span?.checkpoints.append(CallbackCheckpoint(stage:stage.rawValue,
+            elapsedMicros:work.clockValid ? work.endedAtMicros-work.beganAtMicros:0,
+            cpuState:work.cpuState,cpuMicros:work.cpuMicros))
     }
     struct ShapeChange {let sample:Int;let known:Bool;let content:Bool;let selection:Bool;var ax:InputIncidentAXEvidence?=nil;var caretPrecedingClass:Int?=nil;var selectionMotion:Int?=nil}
     struct ShapeEvidence:Codable {
@@ -786,6 +836,8 @@ final class InputIncidentTrace {
     private var observationWaits:[Int:DecisionWaitStats]=[:]
     private let storage:DiagnosticLogStore?
     private let clock:()->Double
+    // Default remains the live OS security state; synthetic fixtures inject their state.
+    fileprivate let secureInput:()->Bool
     private let callbackCPU:()->UInt64?
     private let origin:Double
     private var ring:[Frame?]
@@ -807,7 +859,8 @@ final class InputIncidentTrace {
     private let writer:((Capture)->Void)?
     private var storageObserver:(()->Void)?
     private var lastStorageNotice:Int?
-    init(destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
+    init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
+        self.secureInput=secureInput
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
         eventCredits=DispatchSemaphore(value:self.observationCapacity/2)
         shapeCredits=DispatchSemaphore(value:max(1,self.observationCapacity/8))
@@ -1146,7 +1199,7 @@ final class InputIncidentTrace {
     }
     // No extra event tag, AX call, event copy, key post or source selection.
     func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0,started:CallbackStart?=nil){
-        guard enabled,!IsSecureEventInputEnabled() else{return}
+        guard enabled,!secureInput() else{return}
         let work=finishCallback(started),workGeneration=started?.generation
         let time=clock(),reference=EventReference(event,type)
         let evidence = lane == .hid || lane == .main ? EventEvidence(time:time,origin:origin,type:type,event:event):nil
@@ -1201,7 +1254,7 @@ final class InputIncidentTrace {
         return (identifier,inputOrigin)
     }
     func decision(_ site:DecisionSite,_ reason:DecisionReason,event:CGEvent?=nil) {
-        let generation=gate.generation;guard generation>0,!IsSecureEventInputEnabled() else{return}
+        let generation=gate.generation;guard generation>0,!secureInput() else{return}
         // Reserve 3/4 of the bounded queue for input decisions and non-routine
         // reasons. Repeated idle allowed/no-candidate/Roman calls cannot fill it.
         let routine=event==nil && (reason == .observationAllowed || reason == .noCandidate || reason == .romanSource)
@@ -1443,7 +1496,7 @@ final class InputIncidentTrace {
     // Read-only focus decisions must not move the edit boundary or invalidate
     // shape baselines. The existing state() method is for actual edits.
     func focusHandoffObservation(_ state:State){
-        guard enabled,!IsSecureEventInputEnabled(),(9...15).contains(state.rawValue) else{return}
+        guard enabled,!secureInput(),(9...15).contains(state.rawValue) else{return}
         let time=clock()
         _ = submit(.state,.onset,state.rawValue,observedAt:time){[self] timing in
             append(.onset,.state,observedAt:time,observationTiming:timing,category:state.rawValue)
@@ -1452,7 +1505,7 @@ final class InputIncidentTrace {
     // Existing numeric branch results only. No additional AX/source query,
     // event objects, synchronous lock or file I/O on the caller.
     func onsetDecision(_ site:OnsetSite,_ reason:OnsetReason,firstTime:Double?=nil,keys:Int=0,detail:OnsetDetail?=nil){
-        guard enabled,!IsSecureEventInputEnabled() else{return}
+        guard enabled,!secureInput() else{return}
         let time=clock(),count=max(0,min(keys,16))
         let age=firstTime.flatMap{first -> Int? in
             let elapsed=time-first
@@ -1472,7 +1525,7 @@ final class InputIncidentTrace {
         }
     }
     func onsetObservation(_ value:OnsetObservation,capture:Bool=false){
-        guard enabled,!IsSecureEventInputEnabled(),value.valid else{return}
+        guard enabled,!secureInput(),value.valid else{return}
         let time=clock()
         _ = submit(.context,.onset,22,observedAt:time){[self] timing in
             append(.onset,.onsetObservation,observedAt:time,observationTiming:timing)
@@ -1482,7 +1535,7 @@ final class InputIncidentTrace {
         }
     }
     func sourceEvidence(_ action:SourceEvidenceAction,_ value:SourceEvidence,event:CGEvent?=nil){
-        guard enabled,!IsSecureEventInputEnabled() else{return}
+        guard enabled,!secureInput() else{return}
         let time=clock(),reference=event.map{EventReference($0,$0.type)}
         _ = submit(.context,.mismatch,action.rawValue,observedAt:time){[self] timing in
             let signature=value.selected+value.confirmed*8+value.target*64+(value.committed ? 512:0)+(value.deferred ? 1024:0)+(value.candidatePreserved ? 2048:0)+(value.historyPreserved ? 4096:0)
@@ -1498,7 +1551,7 @@ final class InputIncidentTrace {
         }
     }
     func control(_ lane:Lane,_ type:CGEventType,_ event:CGEvent?,_ value:InputIncidentControl,consumed:Bool=false){
-        guard enabled,!IsSecureEventInputEnabled() else{return}
+        guard enabled,!secureInput() else{return}
         let time=clock(),reference=event.map{EventReference($0,type)}
         let evidence = lane == .hid || lane == .main ? event.map{EventEvidence(time:time,origin:origin,type:type,event:$0)}:nil
         _ = submit(.context,lane,8+value.role,observedAt:time){[self] timing in
@@ -1511,7 +1564,7 @@ final class InputIncidentTrace {
     }
     // Existing HUD work only: firstDraw is AppKit drawing, not compositor receipt.
     func hud(_ stage:HUDStage,sourceClass:Int,presentation:Int=0){
-        guard enabled,!IsSecureEventInputEnabled() else{return};let time=clock()
+        guard enabled,!secureInput() else{return};let time=clock()
         _ = submit(.context,.main,16+stage.rawValue,observedAt:time){[self] timing in
             append(.main,.hud,observedAt:time,observationTiming:timing,event:max(0,presentation),edge:stage.rawValue,category:max(0,min(sourceClass,4)))
         }
@@ -1543,7 +1596,7 @@ final class InputIncidentTrace {
     // detector reason. The serial worker freezes the pre-edit ring; storage
     // throttling defers publication, not preservation. No caller-side AX/I/O.
     func recoveryStarted(_ lane:Lane,reason:RecoveryReason){
-        guard enabled,!IsSecureEventInputEnabled(),
+        guard enabled,!secureInput(),
               (lane == .mismatch && ((1...6).contains(reason.rawValue) || reason == .unspecifiedMismatch)) ||
               (lane == .onset && (7...9).contains(reason.rawValue)) else{return}
         requestCapture(.recoveryStarted,lane:lane,detail:reason.rawValue)

@@ -134,7 +134,7 @@ func toggle(_ trace:InputIncidentTrace,_ active:Bool){
     trace.flush()
 }
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{captures.append($0)})
 trace.state(.mismatch,.buffered,pending:11);trace.mark();trace.flush()
 check(captures.isEmpty && trace.beginRead(.mismatchAX)==nil,"OFF observes and writes nothing")
 toggle(trace,true)
@@ -158,7 +158,7 @@ let newSpan=trace.beginRead(.mismatchAX);trace.endRead(.mismatchAX,newSpan);trac
 check(newSpan != nil,"old span returns its reservation after OFF")
 toggle(trace,false)
 let offDir=root.appendingPathComponent("disabled")
-let off=InputIncidentTrace(destination:offDir,initiallyEnabled:false,persistentOwnership:true)
+let off=InputIncidentTrace(secureInput:{false},destination:offDir,initiallyEnabled:false,persistentOwnership:true)
 off.mark();off.flush()
 check(!fm.fileExists(atPath:offDir.path),"disabled startup does not create storage")
 toggle(off,true);off.mark();off.flush()
@@ -166,7 +166,7 @@ let savedFiles=files(offDir),savedData=try savedFiles.map{try Data(contentsOf:$0
 toggle(off,false)
 check(try savedFiles.map{try Data(contentsOf:$0)}==savedData,"OFF preserves existing disk evidence")
 let previousRun=(try JSONSerialization.jsonObject(with:Data(contentsOf:savedFiles[0])) as! [String:Any])["runID"] as! String
-let resumed=InputIncidentTrace(destination:offDir,persistentOwnership:true)
+let resumed=InputIncidentTrace(secureInput:{false},destination:offDir,persistentOwnership:true)
 resumed.mark();resumed.flush()
 check(files(offDir).contains{$0.lastPathComponent.hasPrefix("incident-2-0-")},"new trace instance advances persistent capture identity")
 let newFile=files(offDir).first{$0.lastPathComponent.hasPrefix("incident-2-0-")}!

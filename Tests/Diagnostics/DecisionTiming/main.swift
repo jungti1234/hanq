@@ -8,7 +8,7 @@ func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;if !value()
 let entered=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0),attempted=DispatchSemaphore(value:0)
 let counterLock=NSLock();var clockCalls=0
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,clock:{
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{
     if Thread.current.name=="hold-real-wait"{Thread.current.name="held-real-wait";entered.signal();release.wait()}
     return ProcessInfo.processInfo.systemUptime
 },decisionClock:{
@@ -53,7 +53,7 @@ check(decoded.decisionDelivery?.waits?["244"]?.processed==3,"timing aggregates s
 func controlled(_ values:[UInt64],contend:Bool)->InputIncidentTrace.Capture {
     let entered=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0),attempted=DispatchSemaphore(value:0)
     let clockLock=NSLock();var call=0;var result:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,clock:{
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{
         if Thread.current.name=="hold-controlled-wait"{Thread.current.name="held-controlled-wait";entered.signal();release.wait()}
         return ProcessInfo.processInfo.systemUptime
     },decisionClock:{
@@ -91,7 +91,7 @@ for data in [exact,clipped,free] {
 // even when no try-lock failed. Exact threshold and a short repeat are distinct.
 let queueTimes:[UInt64]=[1_000_000_000,1_000_000_000,1_000_000_000,1_049_999_000,1_000_000_000,1_050_000_000,1_000_000_000,61_000_000_000,1_000_000_000,61_000_001_000]
 var queueIndex=0,queueCaptures:[InputIncidentTrace.Capture]=[]
-let queueTrace=InputIncidentTrace(destination:nil,decisionClock:{let result=queueTimes[min(queueIndex,queueTimes.count-1)];queueIndex+=1;return result},writer:{queueCaptures.append($0)})
+let queueTrace=InputIncidentTrace(secureInput:{false},destination:nil,decisionClock:{let result=queueTimes[min(queueIndex,queueTimes.count-1)];queueIndex+=1;return result},writer:{queueCaptures.append($0)})
 for _ in 0..<5{queueTrace.decision(.sample,.noCandidate);queueTrace.flush()}
 queueTrace.mark();queueTrace.flush()
 let queueFrames=queueCaptures[0].frames.filter{$0.kind == .detectionDecision}

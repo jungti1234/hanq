@@ -529,7 +529,7 @@ do {
 for reason in ["current","pre_key","pending_key","adopted","ascii","mixed","jamo","partial","wrong-key","text","caret","selection","field","source","expiry","boundary","busy","repair","permission","limit","reset"] {
  let b=SourceSwitchBarrier();var source=ko,time=1.0
  var captures:[InputIncidentTrace.Capture]=[]
- let incident=InputIncidentTrace(destination:nil,writer:{captures.append($0)});b.incidentTrace=incident
+ let incident=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)});b.incidentTrace=incident
  b.now={time};b.source={source};b.read={.init(field:field,text:"앞🙂뒤",selection:NSRange(location:3,length:0))}
  for code:UInt16 in [15,40,1]{let event=key(code);event.timestamp=100;b.observe(.keyDown,event)}
  let verified=MismatchSnapshot(element:field,text:"앞🙂간뒤",selection:NSRange(location:4,length:0))
@@ -559,6 +559,10 @@ for reason in ["current","pre_key","pending_key","adopted","ascii","mixed","jamo
  check((result?.plan.replayRoman=="rks") == ["current","pre_key","adopted","ascii","mixed","jamo","partial"].contains(reason),"verified delivery-history \(reason) proof")
  incident.mark();incident.flush()
  let rejected:[String:InputIncidentTrace.DecisionReason]=["pending_key":.handoffTextMismatch,"wrong-key":.handoffTextMismatch,"text":.handoffTextMismatch,"caret":.handoffTextMismatch,"selection":.handoffTextMismatch,"field":.handoffField,"source":.handoffSource,"expiry":.handoffExpired,"boundary":.handoffBoundary,"busy":.handoffBusy,"repair":.handoffExternalEdit,"permission":.handoffNotReady,"limit":.handoffNoHistory,"reset":.handoffField]
+ let observed=captures.first?.frames.last{$0.kind == .detectionDecision}?.category
+ if observed != (rejected[reason] ?? .handoffAccepted).rawValue {
+  fputs("delivery-history diagnostic failure reason=\(reason) enabled=\(incident.enabled) secure=\(IsSecureEventInputEnabled()) captures=\(captures.count) categories=\(captures.map{$0.frames.filter{$0.kind == .detectionDecision}.map{$0.category}})\n",stderr)
+ }
  check(captures[0].frames.last{$0.kind == .detectionDecision}?.category==(rejected[reason] ?? .handoffAccepted).rawValue,"actual delivery-history \(reason) decision reason")
  b.fail("test_cleanup")
 }
@@ -568,7 +572,7 @@ for reason in ["current","pre_key","pending_key","adopted","ascii","mixed","jamo
 for selected in [false,true] {
  let b=SourceSwitchBarrier();var source=en,text="a",range=NSRange(location:selected ? 0:1,length:selected ? 1:0)
  var captures:[InputIncidentTrace.Capture]=[]
- let incident=InputIncidentTrace(destination:nil,writer:{captures.append($0)});b.incidentTrace=incident
+ let incident=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)});b.incidentTrace=incident
  b.source={source};b.read={.init(field:field,text:text,selection:range)};b.select={source=$0;return noErr}
  if !selected {
   text="";range=NSRange(location:0,length:0)

@@ -9,7 +9,7 @@ check(InputIncidentTrace.ReadOutcome.snapshot("",includesContent:false)==InputIn
 check(InputIncidentTrace.ReadOutcome.snapshot("PRIVATE_UNKNOWN_REASON")==InputIncidentTrace.ReadOutcome.other,"unknown strings never enter serialized metadata")
 let held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0)
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
 Thread{trace.withLockedMetadataForTest{held.signal();release.wait()};done.signal()}.start()
 check(held.wait(timeout:.now()+2)==DispatchTimeoutResult.success,"real worker metadata lock held")
 let began=ProcessInfo.processInfo.systemUptime
@@ -42,7 +42,7 @@ for patch:[String:Any] in [["kind":1],["lane":2],["category":1]] {
 }
 object["frames"]=base.map{row in var r=row;r.removeValue(forKey:"readOutcome");return r}
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object))) != nil,"old capture with no outcome remains valid")
-let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{_ in check(false,"OFF never writes")})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{_ in check(false,"OFF never writes")})
 let disabled=off.beginRead(.onsetAX);off.endRead(.onsetAX,disabled,outcome:.textUnreadable);off.mark();off.flush()
 check(disabled==nil,"OFF does not allocate read result")
 print("PASS \(checks) snapshot outcome mapping/contention/correlation/privacy/legacy/OFF checks")

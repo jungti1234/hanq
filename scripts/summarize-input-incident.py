@@ -110,10 +110,22 @@ SELECTION_MOTIONS={0:'unknown',1:'unchanged',2:'backward',3:'forward',4:'selecti
 
 def work_evidence(value):
     fields={'beganAtMicros','endedAtMicros','cpuState','clockValid'}
-    if not isinstance(value,dict) or set(value)-{'cpuMicros'}!=fields or type(value['clockValid']) is not bool or any(type(value[k]) is not int for k in fields-{'clockValid'}) or value['cpuState'] not in range(6):raise ValueError('invalid work evidence')
+    if not isinstance(value,dict) or set(value)-{'cpuMicros','checkpoints'}!=fields or type(value['clockValid']) is not bool or any(type(value[k]) is not int for k in fields-{'clockValid'}) or value['cpuState'] not in range(6):raise ValueError('invalid work evidence')
     if not value['clockValid']:
         if value['beganAtMicros']!=0 or value['endedAtMicros']!=0 or value['cpuState']!=5 or 'cpuMicros' in value:raise ValueError('invalid clock evidence')
     elif value['cpuState']==5 or not 0<=value['beganAtMicros']<=value['endedAtMicros']<=9_000_000_000_000_000 or ('cpuMicros' in value)!=(value['cpuState']==1) or ('cpuMicros' in value and (type(value['cpuMicros']) is not int or not 0<=value['cpuMicros']<=9_000_000_000_000_000)):raise ValueError('invalid CPU evidence')
+    if 'checkpoints' in value:
+        points=value['checkpoints'];stage=0;elapsed=0
+        if not isinstance(points,list) or not 1<=len(points)<=8:raise ValueError('invalid callback checkpoints')
+        for p in points:
+            if not isinstance(p,dict) or set(p)-{'cpuMicros'}!={'stage','elapsedMicros','cpuState'} or any(type(p[k]) is not int for k in p):raise ValueError('invalid checkpoint fields')
+            if not stage<p['stage']<=8 or p['cpuState'] not in range(1,6) or not 0<=p['elapsedMicros']<=9_000_000_000_000_000 or ('cpuMicros' in p)!=(p['cpuState']==1) or ('cpuMicros' in p and not 0<=p['cpuMicros']<=9_000_000_000_000_000):raise ValueError('invalid checkpoint value')
+            stage=p['stage']
+            if p['cpuState']==5:
+                if p['elapsedMicros']!=0:raise ValueError('invalid checkpoint clock')
+            else:
+                if p['elapsedMicros']<elapsed or (value['clockValid'] and p['elapsedMicros']>value['endedAtMicros']-value['beganAtMicros']):raise ValueError('invalid checkpoint order')
+                elapsed=p['elapsedMicros']
     return value
 
 def work_timelines(rows,shapes):
@@ -126,6 +138,20 @@ def work_timelines(rows,shapes):
         r['wall_us']=wall;r['cpu_status']=['unmeasured','measured','unavailable','different_thread','counter_reversed','invalid_wall'][r['cpuState']]
         cpu=r.get('cpuMicros');r['wall_minus_thread_cpu_us']=wall-cpu if wall is not None and cpu is not None and cpu<=wall else None
         r['cpu_exceeds_wall']=wall is not None and cpu is not None and cpu>wall
+        if 'checkpoints' in r:
+            names=['callback_entry_to_processing','validation_and_early_recipient','candidate_and_focus',
+                   'barrier_and_edit_observation','external_key_and_existing_source_query','legacy_filters',
+                   'late_routing_or_early_return','control_diagnostic_submission','event_diagnostic_entry']
+            previous_wall=0;previous_cpu=0;stages=[]
+            points=list(r['checkpoints'])+[dict(stage=9,elapsedMicros=wall,cpuState=r['cpuState'],cpuMicros=cpu)]
+            for point in points:
+                end=point['elapsedMicros'] if point['cpuState']!=5 else None
+                cpu_end=point.get('cpuMicros') if point['cpuState']==1 else None
+                stages.append(dict(through_stage=names[point['stage']-1],wall_us=end-previous_wall if end is not None and previous_wall is not None and end>=previous_wall else None,
+                                   cpu_us=cpu_end-previous_cpu if cpu_end is not None and previous_cpu is not None and cpu_end>=previous_cpu else None))
+                previous_wall=end;previous_cpu=cpu_end
+            r['main_stage_intervals']=stages
+            r['stage_interpretation']='interval_since_previous_recorded_boundary; skipped_stages_are_early_returns; includes_instrumentation; wait_cause_unverified'
         intervals=sorted((max(q['beganAtMicros'],r['beganAtMicros']),min(q['endedAtMicros'],r['endedAtMicros'])) for q in reads if valid and q['beganAtMicros']<r['endedAtMicros'] and q['endedAtMicros']>r['beganAtMicros'])
         total=0;end=-1
         for a,b in intervals:
@@ -471,7 +497,8 @@ def summarize(data):
             read_rows.append(dict(sequence=frame.get('sequence'),milliseconds=frame['milliseconds'],lane=lane,event=frame['event'],outcome='unmeasured',interpretation='legacy_or_uninstrumented_read'))
         if 'workEvidence' in frame:
             work=work_evidence(frame['workEvidence'])
-            callback=frame['kind']==1 and frame['lane'] in [1,2,3,4] and frame['edge']==1 and work['cpuState']!=0
+            callback=frame['kind']==1 and frame['lane'] in [1,2,3,4] and frame['edge'] in [1,2] and work['cpuState']!=0
+            if 'checkpoints' in work and not (callback and frame['lane']==2):raise ValueError('checkpoints outside main callback')
             read=frame['kind']==2 and frame['lane'] in [6,7] and frame['category']==2 and work['cpuState'] in [0,5]
             if not (callback or read) or (work['clockValid'] and work['endedAtMicros']//1000>frame['milliseconds']):raise ValueError('invalid work frame')
             work_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,kind=frame['kind'],event=frame['event'],**work))

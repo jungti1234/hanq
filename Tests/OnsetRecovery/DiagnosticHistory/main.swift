@@ -75,7 +75,7 @@ lifecycle.reset();check(lifecycle.retainedSnapshots==0,"reset erases diagnostic 
 check(evidence.allSatisfy{$0.valid},"all branch payloads valid")
 
 var saved:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,writer:{saved.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{saved.append($0)})
 for value in evidence{trace.onsetObservation(value,capture:value.phase==1 && value.keys==2)}
 trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
 check(!saved.isEmpty,"automatic capture without manual marker")
@@ -100,7 +100,7 @@ row.removeValue(forKey:"text");row["whole"]=true;frames[index]["onsetObservation
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"boolean disguised as comparison rejected")
 trace.stopAndFlush()
 var offWrites=0
-let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{_ in offWrites+=1})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{_ in offWrites+=1})
 for value in evidence{off.onsetObservation(value,capture:true)}
 off.flush();off.finishCaptureWindowsForTest();off.flush()
 check(offWrites==0,"OFF generates no writes");off.stopAndFlush()

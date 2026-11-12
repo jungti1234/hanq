@@ -88,7 +88,7 @@ check(delayed.save(bytes(20),incident:4,phase:0,automatic:true) == .saved,"later
 // Real delayed-post timing is covered by the preservation and storage tests.
 var time=100.0
 let traceDir=root.appendingPathComponent("trace")
-let trace=InputIncidentTrace(destination:traceDir,clock:{time},retention:.init(maximumAutomaticFiles:6,maximumAutomaticBytes:1_000_000))
+let trace=InputIncidentTrace(secureInput:{false},destination:traceDir,clock:{time},retention:.init(maximumAutomaticFiles:6,maximumAutomaticBytes:1_000_000))
 trace.mark();trace.flush()
 let protected=files(traceDir).first!
 let protectedData=try Data(contentsOf:protected)

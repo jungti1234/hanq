@@ -90,7 +90,7 @@ for (mode,expected) in lookupCases {
     check(b.2?.lookup==expected,"lookup reason \(mode): \(b.2?.lookup ?? -1)")
 }
 
-let generationTrace=InputIncidentTrace(destination:nil,writer:{_ in})
+let generationTrace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{_ in})
 let generationEngine=OnsetRecoveryEngine()
 generationEngine.enabled=true;generationEngine.decisionTrace=generationTrace
 generationEngine.testSource={"unsupported.test.layout"}
@@ -122,7 +122,7 @@ for (keys,before,caret,range,source,expected) in inputs {
 }
 
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
 let first=ProcessInfo.processInfo.systemUptime
 func detail(_ lookup:Int,_ age:Int)->InputIncidentTrace.OnsetDetail{.init(discovery:8,representation:1,lookup:lookup,history:0,observationAgeMicros:age)}
 for i in 0..<50{trace.onsetDecision(.publication,.representationMissing,firstTime:first,keys:1,detail:detail(2,i))}

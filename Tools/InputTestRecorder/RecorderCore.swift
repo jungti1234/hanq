@@ -26,10 +26,31 @@ struct RecorderEventEvidence:Codable {
     static let keys=Set(["observedAtMicros","timestampMicros","keyClass"])
     var valid:Bool {[observedAtMicros,timestampMicros].allSatisfy{(0...9_000_000_000_000_000).contains($0)} && (1...6).contains(keyClass) && (creatorClass == nil)==(autoRepeat == nil) && (creatorClass.map{keyClass==1 && (1...3).contains($0)} ?? true)}
 }
+struct RecorderCallbackCheckpoint:Codable {
+    let stage,elapsedMicros,cpuState:Int;let cpuMicros:Int?
+    static let keys=Set(["stage","elapsedMicros","cpuState"])
+    var valid:Bool {
+        (1...8).contains(stage) && (0...9_000_000_000_000_000).contains(elapsedMicros) &&
+        (1...5).contains(cpuState) && (cpuState != 5 || elapsedMicros==0) &&
+        (cpuState==1 ? cpuMicros.map{(0...9_000_000_000_000_000).contains($0)}==true:cpuMicros==nil)
+    }
+}
 struct RecorderWorkEvidence:Codable {
     let beganAtMicros,endedAtMicros,cpuState:Int;let clockValid:Bool;let cpuMicros:Int?
+    var checkpoints:[RecorderCallbackCheckpoint]?=nil
     static let keys=Set(["beganAtMicros","endedAtMicros","cpuState","clockValid"])
     var valid:Bool {
+        if let checkpoints {
+            guard !checkpoints.isEmpty,checkpoints.count<=8 else{return false}
+            var stage=0,elapsed=0
+            for point in checkpoints {
+                guard point.valid,point.stage>stage else{return false};stage=point.stage
+                if point.cpuState != 5 {
+                    guard point.elapsedMicros>=elapsed,(!clockValid || point.elapsedMicros<=endedAtMicros-beganAtMicros) else{return false}
+                    elapsed=point.elapsedMicros
+                }
+            }
+        }
         guard (0...5).contains(cpuState) else{return false}
         if !clockValid{return beganAtMicros==0 && endedAtMicros==0 && cpuState==5 && cpuMicros==nil}
         return cpuState != 5 && beganAtMicros>=0 && endedAtMicros>=beganAtMicros && endedAtMicros<=9_000_000_000_000_000 &&
@@ -409,7 +430,7 @@ struct RecorderTrace: Codable {
                       guard (1...17).contains(outcome),row.kind==2,(6...7).contains(row.lane),row.category==2 else{return false}
                   }
                   if let work=row.workEvidence {
-                      guard work.valid,((row.kind==1 && (1...4).contains(row.lane) && row.edge==1 && work.cpuState != 0) || (row.kind==2 && (6...7).contains(row.lane) && row.category==2 && [0,5].contains(work.cpuState))),(!work.clockValid || work.endedAtMicros/1000<=row.milliseconds) else{return false}
+                      guard work.valid,((row.kind==1 && (1...4).contains(row.lane) && (1...2).contains(row.edge) && work.cpuState != 0) || (row.kind==2 && (6...7).contains(row.lane) && row.category==2 && [0,5].contains(work.cpuState))),(!work.clockValid || work.endedAtMicros/1000<=row.milliseconds),work.checkpoints==nil || (row.kind==1 && row.lane==2) else{return false}
                   }
                   if let evidence=row.eventEvidence {
                       guard evidence.valid,[1,11].contains(row.kind),[1,2].contains(row.lane),row.event>0,evidence.observedAtMicros/1000==row.milliseconds else{return false}
@@ -509,7 +530,10 @@ struct RecorderTrace: Codable {
                       let value=row["readOutcome"] as? Int,(1...17).contains(value) else{return false}
             }
             if row.keys.contains("workEvidence") {
-                guard let value=row["workEvidence"] as? [String:Any],Set(value.keys).subtracting(["cpuMicros"])==RecorderWorkEvidence.keys else{return false}
+                guard let value=row["workEvidence"] as? [String:Any],Set(value.keys).subtracting(["cpuMicros","checkpoints"])==RecorderWorkEvidence.keys else{return false}
+                if value.keys.contains("checkpoints") {
+                    guard let points=value["checkpoints"] as? [[String:Any]],points.allSatisfy({Set($0.keys).subtracting(["cpuMicros"])==RecorderCallbackCheckpoint.keys}) else{return false}
+                }
             }
             if row.keys.contains("eventEvidence") {
                 guard let value=row["eventEvidence"] as? [String:Any],Set(value.keys).subtracting(["creatorClass","autoRepeat"])==RecorderEventEvidence.keys && (!value.keys.contains("creatorClass") || (value["creatorClass"] is NSNumber && value["autoRepeat"] is NSNumber)) && (!value.keys.contains("autoRepeat") || value.keys.contains("creatorClass")) else{return false}

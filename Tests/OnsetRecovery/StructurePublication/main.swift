@@ -260,7 +260,7 @@ for mode in ["missing_switch","restored_draft","unverified_line","changed_surrou
 // obtain its own pre-key record and validate the actual exported decision.
 for mode in ["matched","matched_prior","no_switch","other_first","unknown_visibility","old_draft","moved_caret"] {
     var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
     let left="앞🙂:",right=":끝",body=left+"rㅏ"+right
     let c=Case(label:left+right,priorCaret:left.utf16.count,visibilityKnown:mode != "unknown_visibility",trace:trace)
     c.prefix=left;c.suffix=right

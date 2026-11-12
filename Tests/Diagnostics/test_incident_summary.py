@@ -9,6 +9,14 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_key_up_work_checkpoints_are_bounded_and_private(self):
+        work=dict(beganAtMicros=100,endedAtMicros=28100,clockValid=True,cpuState=1,cpuMicros=2000,
+                  checkpoints=[dict(stage=1,elapsedMicros=2000,cpuState=1,cpuMicros=500),dict(stage=5,elapsedMicros=26000,cpuState=1,cpuMicros=1500)])
+        self.assertEqual(summary.work_evidence(work),work)
+        for points in [[],[dict(stage=9,elapsedMicros=0,cpuState=2)],[dict(stage=1,elapsedMicros=True,cpuState=2)],
+                       [dict(stage=1,elapsedMicros=0,cpuState=2,text='private')],list(reversed(work['checkpoints']))]:
+            with self.assertRaises(ValueError):summary.work_evidence(dict(work,checkpoints=points))
+
     def test_boundary_comparison_is_typed_bounded_and_not_causal_blame(self):
         timing=dict(queueMicros=0,lockWaitMicros=0,contended=False,clipped=False)
         evidence=dict(transaction=1,phase=2,reason=0,text=1,start=2,end=2,expected=1,reported=1,change=2,resolution=2,seed=1,mutation=10,revision=2,observations=2,suppressed=0,coalesced=3,fieldRelation=1,baselineAgeMicros=60000000,sampleAgeMicros=0)
@@ -110,7 +118,7 @@ class IncidentSummaryTests(unittest.TestCase):
             with self.assertRaises(ValueError):summary.work_evidence(bad)
         old=summary.summarize(dict(schema=1,trigger=1,frames=[dict(frame(2,1,ms=30),sequence=1)]))
         self.assertEqual(old['callback_work_timelines'],[])
-        for patch in [dict(kind=3),dict(lane=5),dict(edge=2),dict(milliseconds=29)]:
+        for patch in [dict(kind=3),dict(lane=5),dict(edge=3),dict(milliseconds=29)]:
             with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
         invalid=dict(beganAtMicros=0,endedAtMicros=0,clockValid=False,cpuState=5)
         r=summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,workEvidence=invalid)]))['callback_work_timelines'][0]

@@ -48,7 +48,7 @@ func runMonitorLifecycleTests(){
     c.tick();probeTestCheck(starts==4 && c.engine.retained.count==1 && c.engine.suspended)
     c.stop();probeTestCheck(!c.engine.monitorRestartAllowed)
     var records:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,writer:{records.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{records.append($0)})
     c.engine.incidentTrace=trace;c.active=true;c.engine.enabled=false
     c.engine.retained.removeAll();c.engine.suspended=true;c.engine.monitorRestartAllowed=false
     c.tick();trace.flush();trace.mark();trace.flush()

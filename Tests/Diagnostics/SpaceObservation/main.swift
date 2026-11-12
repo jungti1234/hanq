@@ -14,7 +14,7 @@ func key(_ code:UInt16=49,_ down:Bool=true,creator:Int64=0,repeatFlag:Bool=false
     return e
 }
 var time=100.0,rows:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,capacity:64,clock:{time},writer:{rows.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,capacity:64,clock:{time},writer:{rows.append($0)})
 trace.event(.hid,.keyDown,key());time+=0.031
 trace.event(.hid,.keyUp,key(49,false));time+=0.012
 let second=key(creator:123456789)
@@ -40,29 +40,29 @@ for changes:[String:Any] in [["creatorClass":4],["creatorClass":NSNull()],["auto
 
 for (detail,lane,creator,repeating,replay,consumed) in [(2,InputIncidentTrace.Lane.onset,Int64(0),false,false,true),(3,.main,Int64(getpid()),false,true,false),(4,.hid,Int64(getpid()),true,false,false)] {
     var local:[InputIncidentTrace.Capture]=[]
-    let t=InputIncidentTrace(destination:nil,clock:{time},writer:{local.append($0)})
+    let t=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{local.append($0)})
     t.event(lane,.keyDown,key(creator:creator,repeatFlag:repeating,replay:replay),consumed:consumed);t.flush()
     check(local.first?.capturePreservation?.requests.first?.detail==detail,"consumed/replay/repeat requests are distinguished")
     t.stopAndFlush();check(local.allSatisfy{(try? RecorderTrace.decode(JSONEncoder().encode($0))) != nil},"intervention capture remains strict")
 }
 for separated in [false,true] {
     var local:[InputIncidentTrace.Capture]=[]
-    let t=InputIncidentTrace(destination:nil,clock:{time},writer:{local.append($0)})
+    let t=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{local.append($0)})
     t.event(.hid,.keyDown,key());time+=separated ? 0.03:0.081
     if separated {t.event(.hid,.keyDown,key(0));time+=0.01}
     t.event(.hid,.keyDown,key());t.flush();check(local.isEmpty,"ordinary gaps or intervening letter do not trigger")
     t.stopAndFlush()
 }
 var bounded:[InputIncidentTrace.Capture]=[]
-let boundedTrace=InputIncidentTrace(destination:nil,clock:{time},writer:{bounded.append($0)})
+let boundedTrace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{bounded.append($0)})
 for _ in 0..<20 {boundedTrace.event(.hid,.keyDown,key());time+=0.01;boundedTrace.flush()}
 check(bounded.first?.captureBacklog?.requested[7]==1,"per-condition one-second admission limit")
 boundedTrace.stopAndFlush()
 var off:[InputIncidentTrace.Capture]=[]
-let disabled=InputIncidentTrace(destination:nil,initiallyEnabled:false,clock:{time},writer:{off.append($0)})
+let disabled=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,clock:{time},writer:{off.append($0)})
 disabled.event(.hid,.keyDown,key(),consumed:true);disabled.flush();check(off.isEmpty,"OFF produces no automatic capture")
 var resetRows:[InputIncidentTrace.Capture]=[]
-let reset=InputIncidentTrace(destination:nil,clock:{time},writer:{resetRows.append($0)})
+let reset=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{resetRows.append($0)})
 reset.event(.hid,.keyDown,key());reset.flush()
 reset.setCollectionEnabled(false);reset.flush();reset.setCollectionEnabled(true);reset.flush()
 time+=0.02;reset.event(.hid,.keyDown,key());reset.flush()
@@ -72,7 +72,7 @@ reset.stopAndFlush()
 // The input caller can submit a suspect sequence while the metadata lock is held.
 let entered=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0)
 var contended:[InputIncidentTrace.Capture]=[]
-let busy=InputIncidentTrace(destination:nil,clock:{time},writer:{contended.append($0)})
+let busy=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{contended.append($0)})
 DispatchQueue.global().async{busy.withLockedMetadataForTest{entered.signal();release.wait()};done.signal()}
 entered.wait();let began=ProcessInfo.processInfo.systemUptime
 busy.event(.hid,.keyDown,key(),consumed:true)

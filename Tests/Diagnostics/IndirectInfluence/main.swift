@@ -3,19 +3,29 @@ import ApplicationServices
 var checks=0
 func check(_ ok:@autoclosure()->Bool,_ message:String){checks+=1;if !ok(){fputs("FAIL: \(message)\n",stderr);exit(1)}}
 var wall=100.0,cpu:UInt64?=100_000_000,cpuCalls=0,wallCalls=0,captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,clock:{wallCalls+=1;return wall},callbackCPU:{cpuCalls+=1;return cpu},writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{wallCalls+=1;return wall},callbackCPU:{cpuCalls+=1;return cpu},writer:{captures.append($0)})
 let event=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:true)!
 event.timestamp=1_000_000_000_000
 let secret="PRIVATE_INDIRECT_INPUT_SENTINEL";event.keyboardSetUnicodeString(stringLength:secret.utf16.count,unicodeString:Array(secret.utf16))
 func capture()->InputIncidentTrace.Capture{trace.flush();trace.finishCaptureWindowsForTest();trace.drainCapturesForTest();trace.flush();trace.mark();trace.flush();let value=captures.last!;trace.finishCaptureWindowsForTest();trace.flush();return value}
 func work()->InputIncidentTrace.WorkEvidence{capture().frames.last{$0.workEvidence != nil}!.workEvidence!}
-check(trace.beginCallback(.keyUp)==nil && cpuCalls==0,"up events do not sample CPU")
+check(trace.beginCallback(.flagsChanged)==nil && cpuCalls==0,"unsampled events do not sample CPU")
 let span=trace.beginCallback(.keyDown);wall+=0.020;cpu!+=2_000_000
 trace.event(.main,.keyDown,event,duration:0.020,started:span)
 let w=work();check(w.clockValid && abs(w.endedAtMicros-w.beganAtMicros-20_000)<=1 && w.cpuMicros==2000 && w.cpuState==1,"same-thread wall and CPU independently recorded")
 let read=trace.beginRead(.onsetAX);wall+=0.005;trace.endRead(.onsetAX,read);let rw=work()
 check(rw.cpuState==0 && rw.cpuMicros==nil && abs(rw.endedAtMicros-rw.beganAtMicros-5000)<=1,"existing snapshot interval; no per-AX CPU sample")
 check(cpuCalls==2,"only callback start/end sample CPU")
+var up=trace.beginCallback(.keyUp)
+wall+=0.002;cpu!+=500_000;trace.checkpoint(.processing,&up)
+wall+=0.024;cpu!+=1_000_000;trace.checkpoint(.external,&up)
+let sampled=cpuCalls;trace.checkpoint(.recipient,&up)
+check(cpuCalls==sampled,"duplicate/reversed stages perform no extra clock reads")
+wall+=0.002;cpu!+=500_000
+trace.event(.main,.keyUp,event,duration:0.028,started:up)
+let uw=work()
+check(uw.cpuMicros==2000 && abs(uw.endedAtMicros-uw.beganAtMicros-28000)<=1,"key-up measures CPU separately from 28ms wall")
+check(uw.checkpoints?.map{$0.stage}==[1,5] && uw.checkpoints?.last?.cpuMicros==1500,"fixed cumulative checkpoints preserve skipped stages")
 let unavailable=trace.beginCallback(.keyDown);cpu=nil;wall+=0.001;trace.event(.mismatch,.keyDown,event,started:unavailable)
 check(work().cpuState==2 && work().cpuMicros==nil,"failed CPU sample distinct from zero")
 cpu=100;let reversed=trace.beginCallback(.keyDown);cpu=99;wall+=0.001;trace.event(.onset,.keyDown,event,started:reversed)
@@ -50,6 +60,7 @@ let missed=p.observe(identity:3,text:"abcde",selection:NSRange(location:0,length
 shape(2);check(capture().shapeBaselines!.first{$0.lane == .onsetAX}!.current.evidence.selectionMotion==0,"sample gap cannot infer movement")
 let c=capture(),data=try! JSONEncoder().encode(c),sanitized=try! RecorderTrace.decode(data),roundtrip=try! RecorderTrace.decode(JSONEncoder().encode(sanitized))
 check(roundtrip.frames.contains{$0.workEvidence?.cpuState==1},"strict collector and sanitize retain measurements")
+check(roundtrip.frames.contains{$0.edge==2 && $0.workEvidence?.checkpoints?.count==2},"key-up checkpoints survive strict collection")
 let json=String(data:data,encoding:.utf8)!
 for name in [secret,"keyCode","characters","clipboard","location","threadID"]{check(!json.contains(name),"private payload excluded: \(name)")}
 var object=try! JSONSerialization.jsonObject(with:data) as! [String:Any]
@@ -58,11 +69,16 @@ for (key,value) in [("text",secret as Any),("beganAtMicros",-1),("cpuState",true
  var badRows=rows,bad=base;bad[key]=value;badRows[index]["workEvidence"]=bad;object["frames"]=badRows
  check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"strict invalid/private work rejected \(key)")
 }
+for points:[[String:Any]] in [[],[["stage":9,"elapsedMicros":0,"cpuState":2]],[["stage":1,"elapsedMicros":true,"cpuState":2]],[["stage":1,"elapsedMicros":0,"cpuState":2,"text":secret]],[["stage":1,"elapsedMicros":0,"cpuState":2],["stage":1,"elapsedMicros":1,"cpuState":2]]] {
+ var badRows=rows,bad=base;bad["checkpoints"]=points;badRows[index]["workEvidence"]=bad;object["frames"]=badRows
+ check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"invalid/private/unordered checkpoint rejected")
+}
 object["frames"]=rows.map{row -> [String:Any] in var r=row;r.removeValue(forKey:"workEvidence");return r}
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object))) != nil,"old logs remain compatible and unmeasured")
-let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,clock:{wallCalls+=1;return wall},callbackCPU:{cpuCalls+=1;return cpu},writer:{_ in})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,clock:{wallCalls+=1;return wall},callbackCPU:{cpuCalls+=1;return cpu},writer:{_ in})
 let oldCPU=cpuCalls,oldWall=wallCalls
-check(off.beginCallback(.keyDown)==nil && cpuCalls==oldCPU && wallCalls==oldWall,"OFF does not read either clock")
+var inactive=off.beginCallback(.keyUp);off.checkpoint(.processing,&inactive)
+check(off.beginCallback(.keyDown)==nil && inactive==nil && cpuCalls==oldCPU && wallCalls==oldWall,"OFF down/up/checkpoint does not read either clock")
 let stale=trace.beginCallback(.keyDown);trace.setCollectionEnabled(false);trace.event(.main,.keyDown,event,started:stale);trace.flush()
 check(cpuCalls==oldCPU+1,"disabled completion does not sample CPU or emit work")
 if let output=CommandLine.arguments.dropFirst().first{try! data.write(to:URL(fileURLWithPath:output))}

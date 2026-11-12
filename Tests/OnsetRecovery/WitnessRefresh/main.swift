@@ -160,7 +160,7 @@ for mode in ["presentation", "normal", "missing_count", "selected", "invalidated
     let shouldWitness=expectedRefresh && ["presentation","normal","different_field","fast_presentation"].contains(mode)
     check(witnessed==shouldWitness,"pre-key witness after 6.8s: \(mode)")
     var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,initiallyEnabled:true,writer:{captures.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:true,writer:{captures.append($0)})
     c.e.decisionTrace=trace;c.g.incidentTrace=trace
     let started=ProcessInfo.processInfo.systemUptime
     func at(_ t:Double){let remaining=started+t-ProcessInfo.processInfo.systemUptime;if remaining>0{RunLoop.current.run(until:Date(timeIntervalSinceNow:remaining))}}

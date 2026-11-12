@@ -400,7 +400,9 @@ SourceSwitchBarrier는 주 입력 경로에서 앞선 문자·선택의 예상 �
 
 ### 내용 비수집 간접 영향 진단
 
-진단 메뉴를 켠 실행은 기존 사건 JSON의 `workEvidence`에 keyDown 처리 구간/스레드 CPU와 기존 snapshot 조회 구간을 기록한다. 기존 `durationMicros`의 처리 범위는 유지한다. `selectionMotion`은 커서 좌표 없이 이전 snapshot 대비 방향/선택 변화를 나타내며 문맥 변경·샘플 누락은 unknown이다. CPU 계측은 keyDown에만 수행하고 유휴 AX 감시에서는 이미 확보한 시각을 재사용한다. 진단 OFF에서는 추가 시계 조회를 하지 않는다.
+진단 메뉴를 켠 실행은 기존 사건 JSON의 `workEvidence`에 keyDown·keyUp 처리 구간/스레드 CPU와 기존 snapshot 조회 구간을 기록한다. 기존 `durationMicros`의 처리 범위는 유지한다. `selectionMotion`은 커서 좌표 없이 이전 snapshot 대비 방향/선택 변화를 나타내며 문맥 변경·샘플 누락은 unknown이다. CPU 계측은 keyDown·keyUp에 수행하고 유휴 AX 감시에서는 이미 확보한 시각을 재사용한다. 진단 OFF에서는 추가 시계 조회를 하지 않는다.
+
+주 입력 콜백은 최대 8개 고정 경계의 누적 경과 시간·CPU를 같은 이벤트에 기록한다. 처리 진입, 원래 수신 대상, 후보/포커스, 전환 보관, 외부 키, 필터, 후단 전달, 진단 제출 경계다. 생략된 경계는 조기 반환이며 0 비용이 아니다. 계측 비용 자체가 포함되고 새 AX/TIS 조회·파일 쓰기·입력 훅은 없다. 경과 시간에서 스레드 CPU를 뺀 값만으로 락·스케줄링·IME를 원인으로 확정하지 않는다.
 
 `python3 scripts/summarize-input-incident.py <사건.json>`의 `callback_work_timelines`에서 처리 wall/CPU·그 차이·snapshot 조회 중첩의 합집합과 100ms 내 본문 변화 단서를 대조한다. 중첩은 인과관계가 아니며 wall−CPU를 순수 OS/IME 대기로 해석하지 않는다. 한Q 전체 프로세스 CPU·계측하지 않은 탭 사이 구간·편집기 내부 조합/수신은 미확인이다. 오래된 기록은 빈 미계측 목록이며 실패/다른 스레드/역전된 시각을 0 비용 성공으로 처리하지 않는다.
 
@@ -716,3 +718,5 @@ UI 검사는 요약·환경·전후·저장 상태 문서를 각각 선택하고
 
 
 `test-onset-prefocus-app.sh`의 `HANQ_PREFOCUS_MODEL=first-consonant`는 소유 창의 빈 편집기에 표시용 안내를 노출하고 포커스 요청을 의도적으로 거절한다. 첫 원래 자음이 입력칸으로 진입한 뒤 기존 동일 자음 재입력이 작동해 실제 `NSTextView.hasMarkedText()`가 참인지 다섯 Apple 한국어 배열에서 확인한다. 일반 포커스 인계 성공으로 이 검사를 대신하지 않는다. 배포본/수정 전/수정 후의 본문·커서·원래/재입력 키 수·조합 상태를 비교하고 실제 Codex 물리 키 확인은 구분한다. 조합 확정용 방향키는 HID 상태 소스와 Quartz 기본 가상 키123 표현을 사용하며 원래 프로세스 전달과 실제 커서 확인을 유지한다.
+
+합성 진단 검사는 `InputIncidentTrace`의 `secureInput` 대역으로 보안 상태를 명시한다. 실제 앱의 기본값은 macOS의 `IsSecureEventInputEnabled()`이며, 보안 상태의 수집 차단과 해제 후 재개를 별도로 검사한다. 검사를 위해 시스템 보안 입력을 끄지 않는다.

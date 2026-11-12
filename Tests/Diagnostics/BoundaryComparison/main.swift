@@ -4,7 +4,7 @@ import Darwin
 var checks=0
 func check(_ value:@autoclosure ()->Bool,_ title:String){checks+=1;if !value(){fputs("FAIL: \(title)\n",stderr);exit(1)}}
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
 var value=InputIncidentTrace.BoundaryEvidence(transaction:1,phase:2,reason:0,text:1,start:3,end:3,expected:1,reported:1,change:0,resolution:5,
     seed:1,mutation:10,revision:2,observations:1,suppressed:0,coalesced:0,fieldRelation:1,
     baselineAgeMicros:60000000,mutationAgeMicros:3,requestAgeMicros:1000,sampleAgeMicros:0)
@@ -38,6 +38,6 @@ for patch:[String:Any] in [["kind":7],["lane":2],["count":1],["edge":1],["event"
 }
 var old=original.filter{$0["kind"] as? Int != 14};object["frames"]=old
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object))) != nil,"legacy record without comparisons remains accepted")
-let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{_ in fatalError("OFF must not write")})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{_ in fatalError("OFF must not write")})
 off.boundaryComparison(value);off.mark();off.flush()
 print("PASS \(checks) boundary comparison wire checks")

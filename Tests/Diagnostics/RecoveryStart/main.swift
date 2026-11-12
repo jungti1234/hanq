@@ -7,7 +7,7 @@ func strict(_ capture:InputIncidentTrace.Capture)->Bool {
     (try? RecorderTrace.decode(JSONEncoder().encode(capture))) != nil
 }
 var time=100.0,captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,capacity:32,clock:{time},writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,capacity:32,clock:{time},writer:{captures.append($0)})
 trace.shape(.mismatchAX,identity:1,count:17,selected:false,editing:false)
 trace.decision(.handoff,.handoffAccepted)
 trace.flush()
@@ -41,7 +41,7 @@ check(captures.allSatisfy(strict),"strict collector accepts recovery captures an
 // input caller or consume the recovery's separate capture admission credits.
 let blocked=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0)
 var congested:[InputIncidentTrace.Capture]=[]
-let busy=InputIncidentTrace(destination:nil,observationCapacity:4,writer:{congested.append($0)})
+let busy=InputIncidentTrace(secureInput:{false},destination:nil,observationCapacity:4,writer:{congested.append($0)})
 DispatchQueue.global().async {
     busy.withLockedMetadataForTest {blocked.signal();release.wait()}
     done.signal()
@@ -69,7 +69,7 @@ for changes:[String:Any] in [["detail":11],["detail":7],["lane":2],["text":"PRIV
     check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"invalid detection/payload rejected")
 }
 var off:[InputIncidentTrace.Capture]=[]
-let disabled=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{off.append($0)})
+let disabled=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{off.append($0)})
 disabled.recoveryStarted(.mismatch,reason:.interruptedComposition);disabled.flush()
 check(off.isEmpty,"diagnostics OFF does not collect or capture")
 if CommandLine.arguments.count>1 {try JSONEncoder().encode(second).write(to:URL(fileURLWithPath:CommandLine.arguments[1]))}

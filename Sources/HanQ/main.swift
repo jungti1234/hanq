@@ -551,11 +551,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 | (CGEventMask(1) << CGEventType.rightMouseDown.rawValue)
                 | (CGEventMask(1) << CGEventType.otherMouseDown.rawValue)
             let callback: CGEventTapCallBack = { proxy, type, event, context in
-                let incidentStart=InputIncidentTrace.shared.beginCallback(type)
+                var incidentStart=InputIncidentTrace.shared.beginCallback(type)
                 let owner = Unmanaged<AppDelegate>.fromOpaque(context!).takeUnretainedValue()
                 var control=InputIncidentControl.begin(.shared,type,event)
                 control?.runtime=(owner.enabled ? 1:0) | (owner.permissionGranted ? 2:0) | (owner.updateRestricted ? 4:0) | (owner.koreanEnabled ? 8:0) | (owner.hanjaEnabled ? 16:0) | (owner.sourceSwitchBarrier.busy ? 32:0) | (owner.mismatchRecovery.busy ? 64:0)
                 func process() -> Unmanaged<CGEvent>? {
+                    InputIncidentTrace.shared.checkpoint(.processing,&incidentStart)
                     owner.diagnosticEventCount += 1
                     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                         control?.route=InputIncidentControl.Route.tapDisabled.rawValue
@@ -603,6 +604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         return true
                     }
                     if forwardOriginalIfMoved(){control?.route=InputIncidentControl.Route.recipientMovedEarly.rawValue;return nil}
+                    InputIncidentTrace.shared.checkpoint(.recipient,&incidentStart)
                     switch owner.jamoRepair.receiveCandidates(type, event) {
                     case .consumed: control?.route=InputIncidentControl.Route.candidateConsumed.rawValue;return nil
                     case .panelMouse: control?.route=InputIncidentControl.Route.candidatePanel.rawValue;return Unmanaged.passUnretained(event)
@@ -612,10 +614,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         owner.onsetRecovery.engine?.prepareFocusForFirstInput(type,event)
                         owner.onsetRecovery.engine?.observeDeferredBeforeInput(type,event)
                     }else{owner.onsetRecovery.engine?.cancelDeferredObservation()}
+                    InputIncidentTrace.shared.checkpoint(.candidate,&incidentStart)
                     if owner.sourceSwitchBarrier.receive(type,event) {control?.route=InputIncidentControl.Route.barrierQueued.rawValue;return nil}
                     if [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
                         owner.jamoRepair.inputDidChange(type: type, key: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
                     }
+                    InputIncidentTrace.shared.checkpoint(.barrier,&incidentStart)
                     let active = owner.enabled && !IsSecureEventInputEnabled()
                     let key = event.getIntegerValueField(.keyboardEventKeycode)
                     let externalQueryBegan=InputIncidentTrace.shared.enabled ? ProcessInfo.processInfo.systemUptime:0
@@ -654,6 +658,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             $0.isKorean && $0.id.hasPrefix("com.apple.inputmethod.Korean.")
                         } == true)
                     }
+                    InputIncidentTrace.shared.checkpoint(.external,&incidentStart)
                     if external.consume {control?.route=InputIncidentControl.Route.externalConsumed.rawValue;return nil}
                     event.flags = external.flags
                     let legacyKey = external.handled ? Int64(-1) : key
@@ -700,6 +705,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                     if result.consume || option.consume {control?.route=InputIncidentControl.Route.filterConsumed.rawValue;return nil}
                     event.flags = option.flags
+                    InputIncidentTrace.shared.checkpoint(.filters,&incidentStart)
                     owner.sourceSwitchBarrier.observeBeforeOnset(type,event,waiting:
                         owner.onsetRecovery.engine?.gate?.hasActiveReplayHold() == true)
                     if forwardOriginalIfMoved(){control?.route=InputIncidentControl.Route.recipientMovedLate.rawValue;return nil}
@@ -710,7 +716,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     processed=true
                     let began=InputIncidentTrace.shared.enabled ? ProcessInfo.processInfo.systemUptime:nil
                     let result=process()
+                    InputIncidentTrace.shared.checkpoint(.routing,&incidentStart)
                     if let control{InputIncidentTrace.shared.control(.main,type,event,control,consumed:result==nil)}
+                    InputIncidentTrace.shared.checkpoint(.diagnostics,&incidentStart)
                     if let began{InputIncidentTrace.shared.event(.main,type,event,consumed:result==nil,duration:ProcessInfo.processInfo.systemUptime-began,started:incidentStart)}
                     return result
                 }

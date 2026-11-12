@@ -83,7 +83,7 @@ for cancel in [false,true] {
 }
 // The new fixed phases use existing nonblocking boundary collection and strict codecs.
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
 for stage in [InputIncidentTrace.BoundaryStage.manualEditStarted,.manualEditVerified,.manualEditUnverified]{trace.sourceBoundary(stage,queued:0,awaitingOnset:0)}
 trace.flush();trace.mark();trace.flush();let capture=captures.last!
 check(capture.frames.filter{$0.kind == .sourceBoundary && $0.category>=29}.count==3,"manual phases retained")

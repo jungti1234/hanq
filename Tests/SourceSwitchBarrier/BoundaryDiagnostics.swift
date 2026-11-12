@@ -44,7 +44,7 @@ func runBoundaryDiagnosticTests() {
     for enabled in [false,true] {
         let b=SourceSwitchBarrier();var body="",range=at0,selected=ko,time=0.0,reads=0,queries=0,switches=0,posts=0,writes=0,retained=0
         var evidence:[InputIncidentTrace.BoundaryEvidence]=[]
-        b.incidentTrace=InputIncidentTrace(destination:nil,initiallyEnabled:enabled,writer:{_ in})
+        b.incidentTrace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:enabled,writer:{_ in})
         b.diagnostic={evidence.append($0)};b.now={time}
         b.read={reads+=1;return .init(field:field,text:body,selection:range)};b.readFocus={field}
         b.source={queries+=1;return selected};b.select={selected=$0;switches+=1;return noErr}
@@ -73,7 +73,7 @@ func runBoundaryDiagnosticTests() {
     }
     check(outcomes[0]==outcomes[1],"ON/OFF has identical existing AX/source call counts, edits, delivery and retained result")
     do {
-        let trace=InputIncidentTrace(destination:nil,writer:{_ in}),b=SourceSwitchBarrier()
+        let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{_ in}),b=SourceSwitchBarrier()
         var text="",selection=at0,source=ko,records:[InputIncidentTrace.BoundaryEvidence]=[]
         b.incidentTrace=trace;b.diagnostic={records.append($0)};b.now={0}
         b.read={.init(field:field,text:text,selection:selection)};b.readFocus={field};b.source={source};b.select={source=$0;return noErr};b.send={_ in}

@@ -2,7 +2,7 @@ import AppKit
 import Carbon
 var checks=0
 func check(_ v:@autoclosure ()->Bool,_ why:String){checks+=1;if !v(){fputs("FAIL: \(why)\n",stderr);exit(1)}}
-let trace=InputIncidentTrace(destination:nil,capacity:4096,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,capacity:4096,writer:{captures.append($0)})
 var captures:[InputIncidentTrace.Capture]=[]
 func event(_ flags:CGEventFlags=[],key:CGKeyCode=54,tag:Int64=0)->CGEvent {
  let e=CGEvent(keyboardEventSource:nil,virtualKey:key,keyDown:true)!;e.type = .flagsChanged;e.flags=flags;e.timestamp=UInt64(100000+checks)*1000;e.setIntegerValueField(.eventSourceUserData,value:tag);return e
@@ -102,7 +102,7 @@ Thread.sleep(forTimeInterval:0.06);release.signal();_ = done.wait(timeout:.now()
 trace.flush();trace.mark();trace.flush();cap=captures.last!
 check(cap.frames.contains{$0.kind == .controlDecision && ($0.observationTiming?.contended == true || ($0.observationTiming?.queueMicros ?? 0)>=50000)},"important wait retained")
 // Saturate the actual bounded metadata lane while its worker cannot progress.
-let small=InputIncidentTrace(destination:nil,observationCapacity:4,writer:{overflowCaptures.append($0)})
+let small=InputIncidentTrace(secureInput:{false},destination:nil,observationCapacity:4,writer:{overflowCaptures.append($0)})
 var overflowCaptures:[InputIncidentTrace.Capture]=[]
 let held2=DispatchSemaphore(value:0),release2=DispatchSemaphore(value:0),done2=DispatchSemaphore(value:0)
 Thread{small.withLockedMetadataForTest{held2.signal();release2.wait()};done2.signal()}.start();_ = held2.wait(timeout:.now()+2)
@@ -113,7 +113,7 @@ release2.signal();_ = done2.wait(timeout:.now()+2);small.flush();small.mark();sm
 let overflow=overflowCaptures.last!
 check((overflow.observationDelivery.overflow[((6-1)*8+2-1)*32+9] ?? 0)>0,"overflow identifies main/right Command control")
 check((try? RecorderTrace.decode(JSONEncoder().encode(overflow))) != nil,"overflow strict decode")
-let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{_ in})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{_ in})
 check(InputIncidentControl.begin(off,.flagsChanged,event(right))==nil,"OFF skips control probe")
 let out=CommandLine.arguments.dropFirst().first.map{URL(fileURLWithPath:$0)}
 if let out{try encoded.write(to:out)}

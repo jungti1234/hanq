@@ -16,7 +16,7 @@ final class Fixture {
   barrier.send={ [unowned self] _ in forbiddenSideEffects+=1 }
   barrier.select={ [unowned self] _ in forbiddenSideEffects+=1;return -50 }
   barrier.applySelection={ [unowned self] _,_ in forbiddenSideEffects+=1;return false }
-  let trace=InputIncidentTrace(destination:nil,writer:{ [weak self] capture in self?.captures.append(capture) })
+  let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{ [weak self] capture in self?.captures.append(capture) })
   barrier.incidentTrace=trace
   engine.enabled=true;engine.lastSource=ko;engine.locked=field
   engine.testSource={ko};engine.testFastContext={true}

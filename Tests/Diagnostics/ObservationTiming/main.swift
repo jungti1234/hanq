@@ -9,7 +9,7 @@ var measured:[String:Int]=[:]
 for operation in 1...10 {
     let held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0),attempted=DispatchSemaphore(value:0)
     let clockLock=NSLock();var calls=0;var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,observationClock:{
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,observationClock:{
         clockLock.lock();calls+=1;let n=calls;clockLock.unlock()
         if n==3{attempted.signal()}
         return DispatchTime.now().uptimeNanoseconds
@@ -55,7 +55,7 @@ for operation in 1...10 {
 do {
     let phase0=DispatchSemaphore(value:0),phase1=DispatchSemaphore(value:0),held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0),attempted=DispatchSemaphore(value:0)
     let guardLock=NSLock();var calls=0;var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,observationClock:{guardLock.lock();calls+=1;let n=calls;guardLock.unlock();if n==3{attempted.signal()};return DispatchTime.now().uptimeNanoseconds},writer:{c in captures.append(c);(c.phase==0 ? phase0:phase1).signal()})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,observationClock:{guardLock.lock();calls+=1;let n=calls;guardLock.unlock();if n==3{attempted.signal()};return DispatchTime.now().uptimeNanoseconds},writer:{c in captures.append(c);(c.phase==0 ? phase0:phase1).signal()})
     trace.captureForTest(.manual);check(phase0.wait(timeout:.now()+2) == .success,"pre capture written")
     guardLock.lock();calls=0;guardLock.unlock()
     Thread{trace.withLockedMetadataForTest{held.signal();release.wait()};done.signal()}.start()
@@ -72,7 +72,7 @@ do {
 func controlled(_ values:[UInt64],contend:Bool)->InputIncidentTrace.Capture {
     let held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0),attempted=DispatchSemaphore(value:0)
     let guardLock=NSLock();var call=0;var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,observationClock:{guardLock.lock();let n=call;call+=1;guardLock.unlock();if n==2{attempted.signal()};return values[min(n,values.count-1)]},writer:{captures.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,observationClock:{guardLock.lock();let n=call;call+=1;guardLock.unlock();if n==2{attempted.signal()};return values[min(n,values.count-1)]},writer:{captures.append($0)})
     if contend {Thread{trace.withLockedMetadataForTest{held.signal();release.wait()};done.signal()}.start();check(held.wait(timeout:.now()+2) == .success,"controlled lock held")}
     trace.state(.mismatch,.buffered,pending:2)
     if contend {check(attempted.wait(timeout:.now()+2) == .success,"controlled try failure");release.signal();check(done.wait(timeout:.now()+2) == .success,"controlled release")}

@@ -34,7 +34,7 @@ for role in ["AXTextArea","AXTextField","AXComboBox","AXWebArea","AXGroup","AXBu
 check(InputIncidentFocusEvidence.role("PRIVATE_ROLE_SENTINEL")==10 && InputIncidentFocusEvidence.role(nil)==1,"unknown/unavailable role never serializes raw string")
 let held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0)
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
 Thread{trace.withLockedMetadataForTest{held.signal();release.wait()};done.signal()}.start()
 check(held.wait(timeout:.now()+2)==DispatchTimeoutResult.success,"worker lock held")
 let began=ProcessInfo.processInfo.systemUptime
@@ -70,6 +70,6 @@ var rows=original;rows[index].removeValue(forKey:"readOutcome");object["frames"]
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"unbound focus evidence rejected")
 object["frames"]=original.map{row in var row=row;row.removeValue(forKey:"focusEvidence");return row}
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object))) != nil,"old captures remain accepted")
-let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{_ in check(false,"OFF never writes")})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{_ in check(false,"OFF never writes")})
 off.endRead(.onsetAX,off.beginRead(.onsetAX),outcome:.unsupportedTextField,focus:first);off.mark();off.flush()
 print("PASS \(checks) focus role/identity/gaps/contention/privacy/strict/legacy/OFF checks")

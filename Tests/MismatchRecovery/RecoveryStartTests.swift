@@ -15,7 +15,7 @@ func runRecoveryStartTests(){
     for (keys,inserted,reason) in cases {
         for enabled in [false,true] {
             var captures:[InputIncidentTrace.Capture]=[]
-            let trace=InputIncidentTrace(destination:nil,initiallyEnabled:enabled,writer:{captures.append($0)})
+            let trace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:enabled,writer:{captures.append($0)})
             let engine=MismatchRecoveryEngine();engine.enabled=true;engine.incidentTrace=trace
             engine.lastSource=mismatchKoreanID;engine.locked=field;engine.planElement=field
             var plan=MismatchRecoveryPlan(before:"앞 뒤",caret:2)
@@ -49,7 +49,7 @@ func runRecoveryStartTests(){
     }
     // A candidate rejected by the edit safety gate is not a started recovery.
     var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
     let engine=MismatchRecoveryEngine();engine.incidentTrace=trace;engine.canBeginRepair={false}
     let plan=MismatchRecoveryPlan(before:"",caret:0)
     engine.beginRecovery(plan,MismatchSnapshot(element:field,text:"",selection:NSRange(location:0,length:0)))

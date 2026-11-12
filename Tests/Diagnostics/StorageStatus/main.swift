@@ -61,7 +61,7 @@ check(statuses(recoveredDir).count==2 && previousStatusPreserved,"prior run stat
 // Actual trace headers report only prior completed writes, never their own save.
 var time=100.0
 let traceDir=root.appendingPathComponent("trace")
-let trace=InputIncidentTrace(destination:traceDir,clock:{time},retention:.init(maximumAutomaticFiles:2,maximumAutomaticBytes:1_000_000))
+let trace=InputIncidentTrace(secureInput:{false},destination:traceDir,clock:{time},retention:.init(maximumAutomaticFiles:2,maximumAutomaticBytes:1_000_000))
 trace.captureForTest(.axDelay);trace.flush()
 let pre=names(traceDir).first{$0.pathExtension=="json"}!
 let preData=try Data(contentsOf:pre)

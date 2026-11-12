@@ -6,7 +6,7 @@ func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;preconditio
 let entered=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),finished=DispatchSemaphore(value:0)
 var captures:[InputIncidentTrace.Capture]=[]
 var time=100.0
-let trace=InputIncidentTrace(destination:nil,clock:{
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{
     if Thread.current.name=="hold-decision-trace" {
         Thread.current.name="held-decision-trace";entered.signal();release.wait()
     }
@@ -54,7 +54,7 @@ check(collected.decisionDelivery?.capacity==4096 && collected.decisionDelivery?.
 // two credits; the six reserved important credits remain available to inputs.
 let fullEntered=DispatchSemaphore(value:0),fullRelease=DispatchSemaphore(value:0),fullDone=DispatchSemaphore(value:0)
 var fullCaptures:[InputIncidentTrace.Capture]=[]
-let full=InputIncidentTrace(destination:nil,clock:{
+let full=InputIncidentTrace(secureInput:{false},destination:nil,clock:{
     if Thread.current.name=="hold-full-trace"{Thread.current.name="held-full-trace";fullEntered.signal();fullRelease.wait()}
     return ProcessInfo.processInfo.systemUptime
 },decisionCapacity:8,writer:{fullCaptures.append($0)})
@@ -84,7 +84,7 @@ check(fullCaptures[2].frames.contains{$0.kind == .detectionDecision && $0.edge==
 // Multiple producers exercise credit lifetime, FIFO publication and bounded
 // deduplication; enough capacity to keep every input-bound observation.
 var concurrentCaptures:[InputIncidentTrace.Capture]=[]
-let concurrent=InputIncidentTrace(destination:nil,capacity:4096,writer:{concurrentCaptures.append($0)})
+let concurrent=InputIncidentTrace(secureInput:{false},destination:nil,capacity:4096,writer:{concurrentCaptures.append($0)})
 DispatchQueue.concurrentPerform(iterations:4){_ in
     for _ in 0..<100{concurrent.decision(.event,.observationBlocked,event:event)}
 }

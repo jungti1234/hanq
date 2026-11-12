@@ -13,7 +13,7 @@ func make(_ code:CGKeyCode,_ at:Double,_ type:CGEventType = .keyDown)->CGEvent {
 var last:Data?
 for (preKey,output,expectedClass) in [(CGKeyCode(17),"t",1),(49,"t",1),(49,"ㅅ",3),(49,"사",2)] {
     var now=100.0,captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,clock:{now},writer:{captures.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{now},writer:{captures.append($0)})
     var probe=InputIncidentShapeProbe()
     func shape(_ text:String) {
         let change=probe.observe(identity:1,text:text,selection:NSRange(location:text.utf16.count,length:0),generation:trace.collectionGeneration)
@@ -62,8 +62,29 @@ for (preKey,output,expectedClass) in [(CGKeyCode(17),"t",1),(49,"t",1),(49,"ㅅ"
 for (s,range,value) in [("",NSRange(location:0,length:0),0),("abc",NSRange(location:3,length:1),0),("abc",NSRange(location:99,length:0),0),(" ",NSRange(location:1,length:0),4),("7",NSRange(location:1,length:0),5)] {
     check(InputIncidentShapeProbe.precedingClass(s,range)==value,"bounded caret evidence rejects invalid/selected ranges")
 }
-let disabled=InputIncidentTrace(destination:nil)
+let disabled=InputIncidentTrace(secureInput:{false},destination:nil)
 disabled.hud(.requested,sourceClass:1);disabled.event(.hid,.keyDown,make(49,1));disabled.mark();disabled.flush()
 check(!disabled.enabled,"OFF does not collect")
+// An injected secure state must suppress the same paths even on a non-secure host.
+var secure=true,secureCaptures:[InputIncidentTrace.Capture]=[],secureClockReads=0
+let privacy=InputIncidentTrace(secureInput:{secure},destination:nil,clock:{secureClockReads+=1;return 100},writer:{secureCaptures.append($0)})
+let beforePrivacyClock=secureClockReads
+let protectedEvent=make(54,1,.flagsChanged)
+check(InputIncidentControl.begin(privacy,.flagsChanged,protectedEvent)==nil,"secure control metadata suppressed")
+check(privacy.beginCallback(.keyDown)==nil && privacy.beginCallback(.keyUp)==nil,"secure timing suppressed")
+privacy.event(.main,.keyDown,protectedEvent)
+privacy.hud(.requested,sourceClass:1)
+privacy.onsetDecision(.reservation,.baselineMissing)
+privacy.focusHandoffObservation(.init(rawValue:9)!)
+privacy.control(.main,.flagsChanged,protectedEvent,InputIncidentControl())
+check(secureClockReads==beforePrivacyClock,"secure paths return before trace clocks")
+privacy.mark();privacy.flush()
+check(secureCaptures.count==1 && secureCaptures[0].frames.allSatisfy{$0.kind == .marker},"secure input creates no event/HUD/decision/control metadata")
+secure=false
+privacy.hud(.requested,sourceClass:1);privacy.flush()
+privacy.finishCaptureWindowsForTest();privacy.flush()
+check(secureCaptures.last!.frames.contains{$0.kind == .hud},"same trace resumes after secure input ends")
+privacy.stopAndFlush()
+
 if CommandLine.arguments.count>1{try! last!.write(to:URL(fileURLWithPath:CommandLine.arguments[1]))}
 print("PASS \(checks) switch timing, space/letter, AX class, HUD stages, privacy and strict collector checks; no OS posts, AX queries or source changes")

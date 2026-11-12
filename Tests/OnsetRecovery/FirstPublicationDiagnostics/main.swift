@@ -117,7 +117,7 @@ for mode in ["fresh","old","missing","normal"] {
     c.e.updateQueued=true
     if mode=="missing"{c.e.focusHandoff.invalidateEmptyEntries()}
     var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,initiallyEnabled:enabled,writer:{captures.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:enabled,writer:{captures.append($0)})
     c.e.decisionTrace=trace;c.g.incidentTrace=trace
     let secureBefore=IsSecureEventInputEnabled()
     let start=ProcessInfo.processInfo.systemUptime

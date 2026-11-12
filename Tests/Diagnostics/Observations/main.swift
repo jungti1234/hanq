@@ -6,7 +6,7 @@ func code(_ op:Int,_ lane:Int,_ detail:Int=0)->Int {((op-1)*8+lane-1)*32+detail}
 let held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0)
 var captures:[InputIncidentTrace.Capture]=[]
 var time=100.0
-let trace=InputIncidentTrace(destination:nil,clock:{time},writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{captures.append($0)})
 let event=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:true)!
 event.timestamp=123456789;let payload="PRIVATE_OBSERVATION_PAYLOAD"
 event.keyboardSetUnicodeString(stringLength:payload.utf16.count,unicodeString:Array(payload.utf16))
@@ -54,7 +54,7 @@ if let path=CommandLine.arguments.dropFirst().first {try! data.write(to:URL(file
 // Separate reservations: normal events4, state3, shape1, read pair1.
 let entered=DispatchSemaphore(value:0),unblock=DispatchSemaphore(value:0),finished=DispatchSemaphore(value:0)
 var fullCaptures:[InputIncidentTrace.Capture]=[]
-let full=InputIncidentTrace(destination:nil,observationCapacity:8,readCapacity:1,writer:{fullCaptures.append($0)})
+let full=InputIncidentTrace(secureInput:{false},destination:nil,observationCapacity:8,readCapacity:1,writer:{fullCaptures.append($0)})
 Thread{full.withLockedMetadataForTest{entered.signal();unblock.wait()};finished.signal()}.start()
 check(entered.wait(timeout:.now()+2) == .success,"saturation lock held")
 for _ in 0..<4{full.event(.hid,.keyUp,event)}
@@ -85,7 +85,7 @@ let next=full.beginRead(.onsetAX)
 check(next != nil,"completed read releases reserved pair while old span remains retained by caller")
 full.endRead(.onsetAX,next);full.flush()
 var concurrentCaptures:[InputIncidentTrace.Capture]=[]
-let concurrent=InputIncidentTrace(destination:nil,writer:{concurrentCaptures.append($0)})
+let concurrent=InputIncidentTrace(secureInput:{false},destination:nil,writer:{concurrentCaptures.append($0)})
 DispatchQueue.concurrentPerform(iterations:100){_ in
     concurrent.event(.hid,.keyDown,event)
     concurrent.state(.mismatch,.buffered,pending:2)

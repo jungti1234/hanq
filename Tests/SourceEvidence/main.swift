@@ -4,7 +4,7 @@ var checks=0
 func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;if !value(){fputs("FAIL: \(message)\n",stderr);exit(1)}}
 let ko=mismatchKoreanID,en="com.apple.keylayout.ABC",field=AXUIElementCreateApplication(12345)
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
 var posts=0,edits=0,switches=0
 func key(_ code:UInt16=2,_ stamp:UInt64=300)->CGEvent {
     guard let source=CGEventSource(stateID:.privateState),let e=CGEvent(keyboardEventSource:source,virtualKey:code,keyDown:true) else{exit(2)}
@@ -26,7 +26,7 @@ final class Fixture {
         engine.testPost={_ in posts+=1};engine.testPostAtTap={_,_ in posts+=1};engine.testSelectSource={_ in switches+=1;return -50};engine.testSetRange={_,_ in edits+=1;return .cannotComplete}
         engine.verifiedDeliveryHistory={ [unowned self] snap,prior in historyCalls+=1;return barrier.verifiedTwoSetHistory(snap,after:200,allowPrior:prior) }
         engine.noteUserSourceSwitch(at:200)
-        if tracing{engine.incidentTrace=trace;barrier.incidentTrace=trace}else{engine.incidentTrace=InputIncidentTrace(destination:nil);barrier.incidentTrace=InputIncidentTrace(destination:nil)}
+        if tracing{engine.incidentTrace=trace;barrier.incidentTrace=trace}else{engine.incidentTrace=InputIncidentTrace(secureInput:{false},destination:nil);barrier.incidentTrace=InputIncidentTrace(secureInput:{false},destination:nil)}
     }
     var range:NSRange{selection ?? NSRange(location:text.utf16.count,length:0)}
     func press(_ code:UInt16=2,_ stamp:UInt64=300){
@@ -103,7 +103,7 @@ check(posts==0 && edits==0 && switches==0,"no global posts, AX edits or input so
 // Source metadata uses nonblocking bounded slots, with measured worker waits.
 do {
     var records:[InputIncidentTrace.Capture]=[]
-    let t=InputIncidentTrace(destination:nil,observationCapacity:16,writer:{records.append($0)})
+    let t=InputIncidentTrace(secureInput:{false},destination:nil,observationCapacity:16,writer:{records.append($0)})
     let f=Fixture();let value=f.evidence.diagnostic(selected:en)
     let entered=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0)
     DispatchQueue.global().async{t.withLockedMetadataForTest{entered.signal();release.wait()}}
@@ -130,7 +130,7 @@ let capture=captures.last!,data=try JSONEncoder().encode(capture),decoded=try Re
 // arbitrary strings. Receiving another event updates current status, not history.
 do {
     var captured:[InputIncidentTrace.Capture]=[],instant=100.0
-    let t=InputIncidentTrace(destination:nil,capacity:8,clock:{instant},writer:{captured.append($0)})
+    let t=InputIncidentTrace(secureInput:{false},destination:nil,capacity:8,clock:{instant},writer:{captured.append($0)})
     var sample=InputIncidentTrace.MonitorSample();sample.active=true;sample.enabled=true;sample.tapState=1;sample.stage=1
     t.monitor(sample);t.flush()
     for value in 1...20{instant+=0.01;sample.attempts=value;t.monitor(sample);t.flush()}

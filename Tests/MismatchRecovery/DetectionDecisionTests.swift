@@ -12,7 +12,7 @@ func runDetectionDecisionTests() {
         var baseline:(Bool,Int,String?,Int)?
         for enabled in [false,true] {
             var captures:[InputIncidentTrace.Capture]=[]
-            let trace=enabled ? InputIncidentTrace(destination:nil,writer:{captures.append($0)}):InputIncidentTrace(destination:nil)
+            let trace=enabled ? InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)}):InputIncidentTrace(secureInput:{false},destination:nil)
             let engine=MismatchRecoveryEngine();engine.enabled=true;engine.incidentTrace=trace;engine.lastSource=mismatchKoreanID;engine.locked=field
             var reads=0,sourceReads=0
             engine.testSource={sourceReads+=1;return name=="roman" ? "com.apple.keylayout.ABC":mismatchKoreanID}
@@ -44,7 +44,7 @@ func runDetectionDecisionTests() {
     // A verified candidate rejected by repair eligibility is separate from an
     // observation skip. No selection or key posting should be reached.
     var captures:[InputIncidentTrace.Capture]=[]
-    let trace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+    let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
     let engine=MismatchRecoveryEngine();engine.incidentTrace=trace;engine.canBeginRepair={false}
     var plan=MismatchRecoveryPlan(before:"",caret:0);_=plan.append(code:2,shift:false)
     engine.beginRecovery(plan,.init(element:field,text:"d",selection:NSRange(location:1,length:0)))

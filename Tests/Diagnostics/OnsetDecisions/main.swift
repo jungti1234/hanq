@@ -7,7 +7,7 @@ var failureEvidence:(()->Void)?
 func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;if !value(){failureEvidence?();fputs("FAIL: \(message)\n",stderr);exit(1)}}
 func strict(_ capture:InputIncidentTrace.Capture)->Bool{(try? RecorderTrace.decode(JSONEncoder().encode(capture))) != nil}
 var time=100.0,captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,clock:{time},writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{captures.append($0)})
 failureEvidence={
     trace.flush()
     fputs("ENV secureNow=\(IsSecureEventInputEnabled()) enabled=\(trace.enabled) generation=\(trace.collectionGeneration) onsetCounts=\(captures.map{$0.frames.filter{$0.kind == .onsetDecision}.count})\n",stderr)
@@ -57,7 +57,7 @@ invalid{$0["onsetEvidence"]=["keys":1,"text":"private"]}
 invalid{$0["kind"]=6}
 
 var disabledCaptures:[InputIncidentTrace.Capture]=[]
-let off=InputIncidentTrace(destination:nil,initiallyEnabled:false,writer:{disabledCaptures.append($0)})
+let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{disabledCaptures.append($0)})
 for _ in 0..<100{off.onsetDecision(.publication,.representationMissing,firstTime:99,keys:1)}
 off.mark();off.flush();check(disabledCaptures.isEmpty,"OFF creates no branch capture")
 off.stopAndFlush()
@@ -69,7 +69,7 @@ check(captures.last!.frames.filter{$0.kind == .onsetDecision}.count==1,"new ON g
 trace.stopAndFlush()
 
 var saturated:[InputIncidentTrace.Capture]=[]
-let busy=InputIncidentTrace(destination:nil,observationCapacity:4,writer:{saturated.append($0)})
+let busy=InputIncidentTrace(secureInput:{false},destination:nil,observationCapacity:4,writer:{saturated.append($0)})
 let start=ProcessInfo.processInfo.systemUptime
 busy.withLockedMetadataForTest{for i in 0..<1000{busy.onsetDecision(.history,.historyRejected,firstTime:Double(i),keys:2)}}
 let elapsed=ProcessInfo.processInfo.systemUptime-start

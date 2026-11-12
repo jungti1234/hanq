@@ -4,7 +4,7 @@ var checks=0
 func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;if !value(){fputs("FAIL: \(message)\n",stderr);exit(1)}}
 var time=100.0,captures:[InputIncidentTrace.Capture]=[]
 var probe=InputIncidentShapeProbe()
-let trace=InputIncidentTrace(destination:nil,capacity:16,clock:{time},writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,capacity:16,clock:{time},writer:{captures.append($0)})
 func observe(_ text:String,_ range:NSRange = NSRange(location:1,length:0),editing:Bool=false,identity:UInt=1){
     let change=probe.observe(identity:identity,text:text,selection:range,generation:trace.collectionGeneration)
     trace.shape(.mismatchAX,identity:identity,count:text.utf16.count,selected:range.length>0,editing:editing,change:change)
@@ -76,7 +76,7 @@ check(oldTrace.shapeBaselines==nil,"old traces remain explicitly unmeasured")
 // A held trace lock cannot block the submitting snapshot path; queue credits
 // overflow immediately and the first later sample advertises the discontinuity.
 var overflowCaptures:[InputIncidentTrace.Capture]=[]
-let over=InputIncidentTrace(destination:nil,observationCapacity:8,writer:{overflowCaptures.append($0)})
+let over=InputIncidentTrace(secureInput:{false},destination:nil,observationCapacity:8,writer:{overflowCaptures.append($0)})
 var overProbe=InputIncidentShapeProbe()
 func send(_ text:String){let c=overProbe.observe(identity:1,text:text,selection:NSRange(location:1,length:0),generation:over.collectionGeneration);over.shape(.onsetAX,identity:1,count:text.utf16.count,selected:false,editing:false,change:c)}
 send("a");over.flush()
@@ -95,13 +95,13 @@ check(overflow.frames.contains{$0.shapeEvidence != nil && $0.observationTiming?.
 check((try? RecorderTrace.decode(JSONEncoder().encode(overflow))) != nil,"overflow/lock metadata strict decode")
 // Important queue delay survives as a shape checkpoint, with no real sleep.
 var calls=0,delayedCaptures:[InputIncidentTrace.Capture]=[]
-let delayed=InputIncidentTrace(destination:nil,observationClock:{calls+=1;return calls<3 ? 1_000_000_000:(calls==3 ? 2_000_000_000:2_075_000_000)},writer:{delayedCaptures.append($0)})
+let delayed=InputIncidentTrace(secureInput:{false},destination:nil,observationClock:{calls+=1;return calls<3 ? 1_000_000_000:(calls==3 ? 2_000_000_000:2_075_000_000)},writer:{delayedCaptures.append($0)})
 delayed.shape(.onsetAX,identity:1,count:3,selected:false,editing:false);delayed.flush()
 delayed.shape(.onsetAX,identity:1,count:3,selected:false,editing:false);delayed.flush();delayed.mark();delayed.flush()
 check(delayedCaptures.last!.frames.contains{$0.shapeEvidence?.phase==2 && $0.observationTiming?.queueMicros==75_000},"long unchanged-shape queue delay remains individual")
 // Both capture phases attach bounded baselines, even after a late read flood.
 let afterDone=DispatchSemaphore(value:0);var afterCapture:InputIncidentTrace.Capture?
-let after=InputIncidentTrace(destination:nil,capacity:2,writer:{value in if value.phase==1{afterCapture=value;afterDone.signal()}})
+let after=InputIncidentTrace(secureInput:{false},destination:nil,capacity:2,writer:{value in if value.phase==1{afterCapture=value;afterDone.signal()}})
 after.shape(.onsetAX,identity:1,count:4,selected:false,editing:false);after.flush();after.mark();after.flush()
 for _ in 0..<4{let read=after.beginRead(.onsetAX);after.endRead(.onsetAX,read);after.flush()}
 check(afterDone.wait(timeout:.now()+3) == .success,"post capture actually published")
@@ -149,7 +149,7 @@ let re=registry.identify(elementA,owner:90001,window:nil,generation:2)
 check(re.3>rg.3 && re.0 != rg.0,"bounded identity registry advertises eviction epoch")
 var semanticProbe=InputIncidentShapeProbe()
 var ax=InputIncidentAXEvidence();ax.owner=1;ax.window=2;ax.identityEpoch=1;ax.route=2;ax.placeholder=4;ax.label=1;ax.characterCount=2;ax.representation=1
-let semanticTrace=InputIncidentTrace(destination:nil,writer:{captures.append($0)})
+let semanticTrace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)})
 func semantic(_ value:String,_ identity:UInt=1){let change=semanticProbe.observe(identity:identity,text:value,selection:NSRange(location:0,length:0),generation:semanticTrace.collectionGeneration,ax:ax);semanticTrace.shape(.mismatchAX,identity:identity,count:value.utf16.count,selected:false,editing:false,change:change);semanticTrace.flush()}
 semantic("PUBLIC_HINT\n");semantic("PUBLIC_HINT\n");ax.placeholder=3;semantic("\n")
 semanticTrace.mark();semanticTrace.flush()

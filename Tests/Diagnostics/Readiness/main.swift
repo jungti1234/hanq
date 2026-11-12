@@ -63,7 +63,7 @@ try Data("broken".utf8).write(to:index)
 check(!store(damaged).verifyReadiness().ready,"corrupt ownership is never silently adopted")
 check(try Data(contentsOf:index)==Data("broken".utf8),"corrupt evidence is preserved")
 
-let traceParent=try folder("trace-parent"),trace=InputIncidentTrace(destination:traceParent.appendingPathComponent("incidents",isDirectory:true),persistentOwnership:true,retention:.investigation)
+let traceParent=try folder("trace-parent"),trace=InputIncidentTrace(secureInput:{false},destination:traceParent.appendingPathComponent("incidents",isDirectory:true),persistentOwnership:true,retention:.investigation)
 check(trace.waitForStorageReadiness().ready,"real trace initialization completes before readiness")
 let published=DispatchSemaphore(value:0)
 trace.observeStorage{published.signal()}
@@ -74,7 +74,7 @@ trace.stopAndFlush()
 #if HANQ_DIAGNOSTIC_TESTING
 let automaticParent=try folder("automatic-status-failure"),automaticDirectory=automaticParent.appendingPathComponent("incidents",isDirectory:true)
 var automaticTime=0.0
-let automaticTrace=InputIncidentTrace(destination:automaticDirectory,persistentOwnership:true,clock:{automaticTime},retention:.investigation)
+let automaticTrace=InputIncidentTrace(secureInput:{false},destination:automaticDirectory,persistentOwnership:true,clock:{automaticTime},retention:.investigation)
 check(automaticTrace.waitForStorageReadiness().ready,"automatic store begins with actual writable storage")
 let automaticPublished=DispatchSemaphore(value:0)
 automaticTrace.observeStorage{automaticPublished.signal()}
@@ -97,7 +97,7 @@ check(receivedHealth && automaticHealth?.readiness.ready==false && (automaticHea
 automaticTrace.stopAndFlush()
 #endif
 let badTraceParent=try folder("bad-trace-parent",0o755)
-let badTrace=InputIncidentTrace(destination:badTraceParent.appendingPathComponent("incidents",isDirectory:true),persistentOwnership:true,retention:.investigation)
+let badTrace=InputIncidentTrace(secureInput:{false},destination:badTraceParent.appendingPathComponent("incidents",isDirectory:true),persistentOwnership:true,retention:.investigation)
 check(!badTrace.waitForStorageReadiness().ready,"trace cannot report ready from configuration alone")
 check(DiagnosticStorageHealth(readiness:.notChecked,missingWrites:0).menuMessage==nil,"unrequested check is not a false error")
 check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0).menuMessage != nil,"storage failure has a visible explanation")

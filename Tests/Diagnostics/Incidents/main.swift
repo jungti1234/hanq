@@ -5,7 +5,7 @@ var checks=0
 func check(_ value:@autoclosure ()->Bool,_ message:String){checks+=1;if !value(){fputs("FAIL: \(message)\n",stderr);exit(1)}}
 var time=100.0
 var captures:[InputIncidentTrace.Capture]=[]
-let trace=InputIncidentTrace(destination:nil,capacity:8,clock:{time},writer:{captures.append($0)})
+let trace=InputIncidentTrace(secureInput:{false},destination:nil,capacity:8,clock:{time},writer:{captures.append($0)})
 let event=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:true)!
 let payload="PRIVATE_TYPED_TEXT_CLIPBOARD"
 event.keyboardSetUnicodeString(stringLength:payload.utf16.count,unicodeString:Array(payload.utf16))
@@ -24,7 +24,7 @@ for secret in [payload,"keyCode","clipboard","4886718345"]{check(!json.contains(
 check(json.contains("\"bestEffort\":true") && json.contains("\"appReceiptVerified\":false"),"capture never claims app receipt or lossless observation")
 
 var correlated:[InputIncidentTrace.Capture]=[]
-let flow=InputIncidentTrace(destination:nil,writer:{correlated.append($0)})
+let flow=InputIncidentTrace(secureInput:{false},destination:nil,writer:{correlated.append($0)})
 let original=CGEvent(keyboardEventSource:nil,virtualKey:2,keyDown:true)!
 original.setIntegerValueField(.eventSourceUserData,value:Int64(bitPattern:0x4852000000000001))
 flow.event(.hid,.keyDown,original)
@@ -51,7 +51,7 @@ check(Set(uncertain).count==2,"zero timestamps cannot manufacture a cross-stage 
 
 // A normal character change never triggers an automatic edit or fabricated loss.
 var shapeCaptures:[InputIncidentTrace.Capture]=[]
-let shape=InputIncidentTrace(destination:nil,clock:{time},writer:{shapeCaptures.append($0)})
+let shape=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{shapeCaptures.append($0)})
 shape.shape(.onsetAX,identity:99999999,count:5,selected:false,editing:false)
 shape.shape(.onsetAX,identity:99999999,count:6,selected:false,editing:false)
 shape.flush();check(shapeCaptures.isEmpty,"normal growth is not an incident")
@@ -71,7 +71,7 @@ shape.context();shape.shape(.onsetAX,identity:111,count:0,selected:false,editing
 shape.flush();check(shapeCaptures.count==1,"source/focus generation is not shrink")
 
 var focusCaptures:[InputIncidentTrace.Capture]=[]
-let focusTrace=InputIncidentTrace(destination:nil,clock:{time},writer:{focusCaptures.append($0)})
+let focusTrace=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{focusCaptures.append($0)})
 focusTrace.shape(.onsetAX,identity:7766,count:5,selected:false,editing:false)
 focusTrace.focusHandoffObservation(.focusSceneClipped)
 focusTrace.focusHandoffObservation(.repairStarted) // Not a focus observation.
@@ -81,7 +81,7 @@ check(focusCaptures.first?.trigger == .possibleShrink,"focus-only diagnosis neve
 check(focusCaptures[0].frames.contains{$0.kind == .state && $0.category==10},"fixed traversal-limit state survives existing captures")
 check(!focusCaptures[0].frames.contains{$0.kind == .state && $0.category==1},"focus diagnosis cannot fabricate a repair start")
 var spans:[InputIncidentTrace.Capture]=[]
-let reads=InputIncidentTrace(destination:nil,clock:{time},writer:{spans.append($0)})
+let reads=InputIncidentTrace(secureInput:{false},destination:nil,clock:{time},writer:{spans.append($0)})
 let a=reads.beginRead(.onsetAX);time+=0.001
 let b=reads.beginRead(.mismatchAX);time+=0.060
 reads.endRead(.mismatchAX,b);reads.endRead(.onsetAX,a);reads.flush()
@@ -92,14 +92,14 @@ check(Set(frames.map{$0.event}).count==2,"read spans can be correlated independe
 
 // Slow filesystem/writer cannot block event observation or execute a callback twice.
 let started=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0)
-let blocking=InputIncidentTrace(destination:nil,writer:{capture in if capture.phase==0{started.signal();release.wait()}})
+let blocking=InputIncidentTrace(secureInput:{false},destination:nil,writer:{capture in if capture.phase==0{started.signal();release.wait()}})
 blocking.mark();check(started.wait(timeout:.now()+1) == .success,"writer entered")
 let began=ProcessInfo.processInfo.systemUptime
 for _ in 0..<1000{blocking.event(.main,.keyDown,event);blocking.decision(.event,.observationBlocked,event:event)}
 check(ProcessInfo.processInfo.systemUptime-began<0.2,"input observer never waits for writer")
 release.signal();blocking.flush()
 
-let disabled=InputIncidentTrace(destination:nil)
+let disabled=InputIncidentTrace(secureInput:{false},destination:nil)
 for _ in 0..<1000{disabled.event(.main,.keyDown,event);disabled.decision(.event,.preSwitchKey,event:event)}
 check(!disabled.enabled && disabled.beginRead(.onsetAX)==nil,"disabled path does not start timers, reads or output")
 
@@ -107,7 +107,7 @@ let root=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("han
 try! FileManager.default.createDirectory(at:root,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
 defer{try? FileManager.default.removeItem(at:root)}
 let directory=root.appendingPathComponent("records")
-let disk=InputIncidentTrace(destination:directory)
+let disk=InputIncidentTrace(secureInput:{false},destination:directory)
 disk.mark();disk.flush()
 let files=(try! FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil)).filter{$0.pathExtension=="json"}
 check(files.count==1,"manual marker writes one new prehistory file")
@@ -116,15 +116,15 @@ let mode=try! FileManager.default.attributesOfItem(atPath:files[0].path)[.posixP
 check(mode.intValue==0o600,"incident file is private")
 let symlink=root.appendingPathComponent("link")
 try! FileManager.default.createSymbolicLink(at:symlink,withDestinationURL:directory)
-let refusal=InputIncidentTrace(destination:symlink);refusal.mark();refusal.flush()
+let refusal=InputIncidentTrace(secureInput:{false},destination:symlink);refusal.mark();refusal.flush()
 check((try! FileManager.default.contentsOfDirectory(atPath:directory.path)).filter{$0.hasSuffix(".json")}.count==1,"symlink output directory refused")
 let bad=root.appendingPathComponent("missing/records")
-let unavailable=InputIncidentTrace(destination:bad);unavailable.mark();unavailable.flush()
+let unavailable=InputIncidentTrace(secureInput:{false},destination:bad);unavailable.mark();unavailable.flush()
 check(!FileManager.default.fileExists(atPath:bad.path),"unavailable destination never changes input or creates parents")
 check(InputIncidentTrace.State.event("PRIVATE_TYPED_TEXT")==nil,"unknown state messages cannot enter structured traces")
 let post=DispatchSemaphore(value:0)
 var preID:Int?
-let linked=InputIncidentTrace(destination:nil,writer:{capture in
+let linked=InputIncidentTrace(secureInput:{false},destination:nil,writer:{capture in
     if capture.phase==0{preID=capture.incident}else{check(capture.incident==preID,"pre/post captures share incident identity");post.signal()}
 })
 linked.mark();linked.flush()
@@ -135,14 +135,14 @@ disk.flush()
 check(!((try! FileManager.default.contentsOfDirectory(atPath:directory.path)).contains{$0.hasPrefix(".partial-")}),"no partial output remains after publication")
 
 var boundaryCaptures:[InputIncidentTrace.Capture]=[]
-let boundaryTrace=InputIncidentTrace(destination:nil,writer:{boundaryCaptures.append($0)})
+let boundaryTrace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{boundaryCaptures.append($0)})
 boundaryTrace.sourceBoundary(.retained,queued:13,awaitingOnset:2);boundaryTrace.flush()
 check(boundaryCaptures.first?.trigger == .boundaryInterrupted,"source-boundary retention captures immediately without a length shrink")
 check(boundaryCaptures.first?.frames.last?.kind == .sourceBoundary && boundaryCaptures.first?.frames.last?.count==13,"queued counts are distinct from character loss")
 check(InputIncidentTrace.BoundaryStage.event("PRIVATE_TYPED_TEXT")==nil,"unknown boundary payload cannot enter trace")
 let heldLock=DispatchSemaphore(value:0),unlock=DispatchSemaphore(value:0),finished=DispatchSemaphore(value:0)
 var contendedCaptures:[InputIncidentTrace.Capture]=[]
-let contended=InputIncidentTrace(destination:nil,clock:{
+let contended=InputIncidentTrace(secureInput:{false},destination:nil,clock:{
     if Thread.current.name=="incident-test-lock-holder" {
         Thread.current.name="incident-test-lock-released";heldLock.signal();unlock.wait()
     }
@@ -173,7 +173,7 @@ for (name,raw) in [("editor_diverged_input_resumed",23),("editor_insertion_style
 }
 
 var decisions:[InputIncidentTrace.Capture]=[]
-let reasons=InputIncidentTrace(destination:nil,writer:{decisions.append($0)})
+let reasons=InputIncidentTrace(secureInput:{false},destination:nil,writer:{decisions.append($0)})
 let reasonEvent=CGEvent(keyboardEventSource:nil,virtualKey:2,keyDown:true)!
 reasonEvent.timestamp=1234567
 reasonEvent.keyboardSetUnicodeString(stringLength:payload.utf16.count,unicodeString:Array(payload.utf16))

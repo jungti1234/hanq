@@ -82,7 +82,7 @@ try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:deniedArchive.path)
 
 // Actual trace accepts >32 manual requests, while preserving pending-work limits.
 let traceDir=root.appendingPathComponent("trace")
-let trace=InputIncidentTrace(destination:traceDir,persistentOwnership:true)
+let trace=InputIncidentTrace(secureInput:{false},destination:traceDir,persistentOwnership:true)
 for _ in 0..<40{trace.mark();trace.flush();trace.finishCaptureWindowsForTest();trace.flush()}
 check(files(traceDir).count==80,"forty manual events produce eighty files without lifetime cap")
 let extra=traceDir.appendingPathComponent("unrelated.txt");try Data("private non-log".utf8).write(to:extra)
@@ -114,7 +114,7 @@ check(try Data(contentsOf:extra)==Data("private non-log".utf8),"original unrelat
 trace.stopAndFlush()
 let offArchive=try export(trace,desktop)
 check(fm.fileExists(atPath:offArchive.path),"existing logs export while collection OFF")
-let empty=InputIncidentTrace(destination:root.appendingPathComponent("empty"),initiallyEnabled:false,persistentOwnership:true)
+let empty=InputIncidentTrace(secureInput:{false},destination:root.appendingPathComponent("empty"),initiallyEnabled:false,persistentOwnership:true)
 do{_ = try export(empty,desktop);check(false,"empty export must fail")}catch{check(error is DiagnosticLogExport.Failure,"no-log result is explicit")}
 do{_ = try export(trace,root.appendingPathComponent("missing/Desktop"));check(false,"unwritable export must fail")}catch{check(true,"destination failure reported")}
 check(try fm.contentsOfDirectory(atPath:desktop.path).allSatisfy{!$0.hasPrefix(".")},"no partial Desktop archives remain")
