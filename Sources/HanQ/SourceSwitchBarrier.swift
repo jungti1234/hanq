@@ -198,7 +198,7 @@ final class SourceSwitchBarrier {
     var diagnosticCounts:(queued:Int,awaitingOnset:Int) {(queued.count,onsetPendingCount)}
     /// The main tap precedes the onset gate. A key seen here may be held there,
     /// so do not predict it until that gate reports its actual delivery decision.
-    func observeBeforeOnset(_ type:CGEventType,_ event:CGEvent,waiting:Bool) {
+    func observeBeforeOnset(_ type:CGEventType,_ event:CGEvent,waiting:Bool,checkpoint:((InputIncidentTrace.RoutingStage)->Void)?=nil) {
         if type == .keyDown,(waiting || !onsetInFlight.isEmpty) {
             guard onsetPendingCount<256,let copy=event.copy() else{fail("delivery_limit");return}
             onsetInFlight[OnsetDeliveryKey(event),default:[]].append(copy)
@@ -206,7 +206,7 @@ final class SourceSwitchBarrier {
             trace("onset_delivery_waiting")
             return
         }
-        observe(type,event)
+        observe(type,event,historyTimestamp:event.timestamp,checkpoint:checkpoint)
     }
     func confirmOnsetDelivery(_ event:CGEvent,passed:Bool) {
         let key=OnsetDeliveryKey(event)
@@ -504,7 +504,8 @@ final class SourceSwitchBarrier {
     func observe(_ type:CGEventType,_ event:CGEvent) {
         observe(type,event,historyTimestamp:event.timestamp)
     }
-    private func observe(_ type:CGEventType,_ event:CGEvent,historyTimestamp:CGEventTimestamp) {
+    private func observe(_ type:CGEventType,_ event:CGEvent,historyTimestamp:CGEventTimestamp,checkpoint:((InputIncidentTrace.RoutingStage)->Void)?=nil) {
+        defer{checkpoint?(.ledger)}
         sourceEvidence?.observeInteraction(type,event)
         let heldCode=event.getIntegerValueField(.keyboardEventKeycode)
         if type == .keyDown {deliveredHeld.insert(heldCode)}
@@ -559,8 +560,10 @@ final class SourceSwitchBarrier {
         let selected=source(),deferred=sourceEvidence?.deferredSource(for:selected)
         discardInvalidDeferredHistory()
         let id=deferred ?? selected
+        checkpoint?(.source)
         guard id.hasPrefix("com.apple.keylayout." ) || MismatchKeyboardLayout.supports(id) else{resetObservation();return}
         refreshIdleField()
+        checkpoint?(.focus)
         if ledger == nil {
             guard let snap=read(),snap.selection.location>=0,snap.selection.length>=0,
                   NSMaxRange(snap.selection)<=snap.text.utf16.count else{return}
@@ -571,6 +574,7 @@ final class SourceSwitchBarrier {
                 noteDiagnosticHistory(1,baseline:true)
             }
         }
+        checkpoint?(.snapshot)
         if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil;noteDiagnosticHistory(11)}
         guard (ledger?.segments.reduce(0,{$0+$1.keys.count}) ?? 0)<128 else{resetObservation();return}
         // A completed switch can preserve the proved body/ledger but starts a

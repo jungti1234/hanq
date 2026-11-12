@@ -707,8 +707,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     event.flags = option.flags
                     InputIncidentTrace.shared.checkpoint(.filters,&incidentStart)
                     owner.sourceSwitchBarrier.observeBeforeOnset(type,event,waiting:
-                        owner.onsetRecovery.engine?.gate?.hasActiveReplayHold() == true)
-                    if forwardOriginalIfMoved(){control?.route=InputIncidentControl.Route.recipientMovedLate.rawValue;return nil}
+                        owner.onsetRecovery.engine?.gate?.hasActiveReplayHold() == true,checkpoint:{
+                            InputIncidentTrace.shared.routingCheckpoint($0,&incidentStart)
+                        })
+                    let moved=forwardOriginalIfMoved()
+                    InputIncidentTrace.shared.routingCheckpoint(.delivery,&incidentStart)
+                    if moved{control?.route=InputIncidentControl.Route.recipientMovedLate.rawValue;return nil}
                     return Unmanaged.passUnretained(event)
                 }
                 var processed=false

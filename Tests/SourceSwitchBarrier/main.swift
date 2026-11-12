@@ -10,6 +10,7 @@ let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(4
 runInitialLayoutTests()
 runNativeObservationTests()
 runBoundaryDiagnosticTests()
+runRoutingWorkTests()
 // A native select-all is an observation boundary, never an edit command.
 for body in ["ㄱㅡ럼", "그럼", "ordinary"] {
  let b=SourceSwitchBarrier();var range=NSRange(location:body.utf16.count,length:0),writes=0,posts=0
@@ -526,46 +527,7 @@ do {
  b.observe(.keyDown,key(2));check(b.expected?.0=="ㅇ","typing after select-all replaces selected Korean body once")
  b.fail("test_cleanup")
 }
-for reason in ["current","pre_key","pending_key","adopted","ascii","mixed","jamo","partial","wrong-key","text","caret","selection","field","source","expiry","boundary","busy","repair","permission","limit","reset"] {
- let b=SourceSwitchBarrier();var source=ko,time=1.0
- var captures:[InputIncidentTrace.Capture]=[]
- let incident=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captures.append($0)});b.incidentTrace=incident
- b.now={time};b.source={source};b.read={.init(field:field,text:"앞🙂뒤",selection:NSRange(location:3,length:0))}
- for code:UInt16 in [15,40,1]{let event=key(code);event.timestamp=100;b.observe(.keyDown,event)}
- let verified=MismatchSnapshot(element:field,text:"앞🙂간뒤",selection:NSRange(location:4,length:0))
- if reason=="adopted"{
-  var replay=MismatchReplayLedger(before:"앞🙂뒤",caret:3);replay.append(source:ko,keys:[(15,false),(40,false),(1,false)])
-  b.noteExternalEdit();b.adoptVerifiedReplay(replay,snapshot:verified)
- }
- if ["pre_key","pending_key"].contains(reason){b.observe(.keyDown,key(40))}
- if reason=="source"{source=en}
- if reason=="expiry"{time=6.01}
- if reason=="busy"{_ = b.request(en)}
- if reason=="repair"{b.noteExternalEdit()}
- if reason=="permission"{b.ready={false}}
- if reason=="reset"{b.resetObservation()}
- var snap=verified
- let failures=["ascii":"rks","mixed":"rㅏㄴ","jamo":"ㄱㅏㄴ","partial":"가s","wrong-key":"rㅓㄴ"]
- if let value=failures[reason]{snap = .init(element:field,text:"앞🙂"+value+"뒤",selection:NSRange(location:3+value.utf16.count,length:0))}
- if reason=="text"{snap = .init(element:field,text:"다🙂간뒤",selection:verified.selection)}
- if reason=="caret"{snap = .init(element:field,text:verified.text,selection:NSRange(location:3,length:0))}
- if reason=="selection"{snap = .init(element:field,text:verified.text,selection:NSRange(location:4,length:1))}
- if reason=="field"{snap = .init(element:other,text:verified.text,selection:verified.selection)}
- if reason=="limit"{
-  var long=MismatchReplayLedger(before:"앞🙂뒤",caret:3);long.append(source:ko,keys:Array(repeating:(15,false),count:65))
-  snap = .init(element:field,text:long.text,selection:long.selection);b.adoptVerifiedReplay(long,snapshot:snap)
- }
- let result=b.verifiedTwoSetHistory(snap,after:reason=="boundary" ? UInt64.max:0,allowPrior:reason=="pre_key")
- check((result?.plan.replayRoman=="rks") == ["current","pre_key","adopted","ascii","mixed","jamo","partial"].contains(reason),"verified delivery-history \(reason) proof")
- incident.mark();incident.flush()
- let rejected:[String:InputIncidentTrace.DecisionReason]=["pending_key":.handoffTextMismatch,"wrong-key":.handoffTextMismatch,"text":.handoffTextMismatch,"caret":.handoffTextMismatch,"selection":.handoffTextMismatch,"field":.handoffField,"source":.handoffSource,"expiry":.handoffExpired,"boundary":.handoffBoundary,"busy":.handoffBusy,"repair":.handoffExternalEdit,"permission":.handoffNotReady,"limit":.handoffNoHistory,"reset":.handoffField]
- let observed=captures.first?.frames.last{$0.kind == .detectionDecision}?.category
- if observed != (rejected[reason] ?? .handoffAccepted).rawValue {
-  fputs("delivery-history diagnostic failure reason=\(reason) enabled=\(incident.enabled) secure=\(IsSecureEventInputEnabled()) captures=\(captures.count) categories=\(captures.map{$0.frames.filter{$0.kind == .detectionDecision}.map{$0.category}})\n",stderr)
- }
- check(captures[0].frames.last{$0.kind == .detectionDecision}?.category==(rejected[reason] ?? .handoffAccepted).rawValue,"actual delivery-history \(reason) decision reason")
- b.fail("test_cleanup")
-}
+runDeliveryHistoryDiagnosticTests()
 
 // Reuse the proved body across a switch while initializing only the new
 // source interval on its first delivered key. Old keys remain ineligible.

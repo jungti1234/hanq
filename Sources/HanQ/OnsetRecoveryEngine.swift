@@ -308,6 +308,11 @@ final class OnsetRecoveryEngine:NSObject {
            event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskAlphaShift,.maskSecondaryFn]).isEmpty {return}
         guard (type == .keyDown || type == .keyUp),
               event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty else{cancelDeferredObservation();return}
+        // A release cannot insert the next character. The existing timer and
+        // next key-down still observe/claim with fresh context; do not repeat
+        // a synchronous AX snapshot while this original release is in flight.
+        // No new queued read, hold extension or cached edit permission is added.
+        if type == .keyUp{return}
         if gate?.reservation()==nil,gate?.deferredReservation()==nil,gate?.passedObservation()?.baselineRevision != nil {
             requestImmediateObservation();return
         }

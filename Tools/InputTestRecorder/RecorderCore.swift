@@ -38,13 +38,15 @@ struct RecorderCallbackCheckpoint:Codable {
 struct RecorderWorkEvidence:Codable {
     let beganAtMicros,endedAtMicros,cpuState:Int;let clockValid:Bool;let cpuMicros:Int?
     var checkpoints:[RecorderCallbackCheckpoint]?=nil
+    var routingCheckpoints:[RecorderCallbackCheckpoint]?=nil
     static let keys=Set(["beganAtMicros","endedAtMicros","cpuState","clockValid"])
     var valid:Bool {
-        if let checkpoints {
-            guard !checkpoints.isEmpty,checkpoints.count<=8 else{return false}
+        for (points,limit) in [(checkpoints,8),(routingCheckpoints,5)] {
+            guard let points else{continue}
+            guard !points.isEmpty,points.count<=limit else{return false}
             var stage=0,elapsed=0
-            for point in checkpoints {
-                guard point.valid,point.stage>stage else{return false};stage=point.stage
+            for point in points {
+                guard point.valid,point.stage>stage,point.stage<=limit else{return false};stage=point.stage
                 if point.cpuState != 5 {
                     guard point.elapsedMicros>=elapsed,(!clockValid || point.elapsedMicros<=endedAtMicros-beganAtMicros) else{return false}
                     elapsed=point.elapsedMicros
@@ -430,7 +432,7 @@ struct RecorderTrace: Codable {
                       guard (1...17).contains(outcome),row.kind==2,(6...7).contains(row.lane),row.category==2 else{return false}
                   }
                   if let work=row.workEvidence {
-                      guard work.valid,((row.kind==1 && (1...4).contains(row.lane) && (1...2).contains(row.edge) && work.cpuState != 0) || (row.kind==2 && (6...7).contains(row.lane) && row.category==2 && [0,5].contains(work.cpuState))),(!work.clockValid || work.endedAtMicros/1000<=row.milliseconds),work.checkpoints==nil || (row.kind==1 && row.lane==2) else{return false}
+                      guard work.valid,((row.kind==1 && (1...4).contains(row.lane) && (1...2).contains(row.edge) && work.cpuState != 0) || (row.kind==2 && (6...7).contains(row.lane) && row.category==2 && [0,5].contains(work.cpuState))),(!work.clockValid || work.endedAtMicros/1000<=row.milliseconds),(work.checkpoints==nil && work.routingCheckpoints==nil) || (row.kind==1 && row.lane==2) else{return false}
                   }
                   if let evidence=row.eventEvidence {
                       guard evidence.valid,[1,11].contains(row.kind),[1,2].contains(row.lane),row.event>0,evidence.observedAtMicros/1000==row.milliseconds else{return false}
@@ -530,9 +532,9 @@ struct RecorderTrace: Codable {
                       let value=row["readOutcome"] as? Int,(1...17).contains(value) else{return false}
             }
             if row.keys.contains("workEvidence") {
-                guard let value=row["workEvidence"] as? [String:Any],Set(value.keys).subtracting(["cpuMicros","checkpoints"])==RecorderWorkEvidence.keys else{return false}
-                if value.keys.contains("checkpoints") {
-                    guard let points=value["checkpoints"] as? [[String:Any]],points.allSatisfy({Set($0.keys).subtracting(["cpuMicros"])==RecorderCallbackCheckpoint.keys}) else{return false}
+                guard let value=row["workEvidence"] as? [String:Any],Set(value.keys).subtracting(["cpuMicros","checkpoints","routingCheckpoints"])==RecorderWorkEvidence.keys else{return false}
+                for name in ["checkpoints","routingCheckpoints"] where value.keys.contains(name) {
+                    guard let points=value[name] as? [[String:Any]],points.allSatisfy({Set($0.keys).subtracting(["cpuMicros"])==RecorderCallbackCheckpoint.keys}) else{return false}
                 }
             }
             if row.keys.contains("eventEvidence") {

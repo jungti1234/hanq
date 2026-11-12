@@ -110,16 +110,17 @@ SELECTION_MOTIONS={0:'unknown',1:'unchanged',2:'backward',3:'forward',4:'selecti
 
 def work_evidence(value):
     fields={'beganAtMicros','endedAtMicros','cpuState','clockValid'}
-    if not isinstance(value,dict) or set(value)-{'cpuMicros','checkpoints'}!=fields or type(value['clockValid']) is not bool or any(type(value[k]) is not int for k in fields-{'clockValid'}) or value['cpuState'] not in range(6):raise ValueError('invalid work evidence')
+    if not isinstance(value,dict) or set(value)-{'cpuMicros','checkpoints','routingCheckpoints'}!=fields or type(value['clockValid']) is not bool or any(type(value[k]) is not int for k in fields-{'clockValid'}) or value['cpuState'] not in range(6):raise ValueError('invalid work evidence')
     if not value['clockValid']:
         if value['beganAtMicros']!=0 or value['endedAtMicros']!=0 or value['cpuState']!=5 or 'cpuMicros' in value:raise ValueError('invalid clock evidence')
     elif value['cpuState']==5 or not 0<=value['beganAtMicros']<=value['endedAtMicros']<=9_000_000_000_000_000 or ('cpuMicros' in value)!=(value['cpuState']==1) or ('cpuMicros' in value and (type(value['cpuMicros']) is not int or not 0<=value['cpuMicros']<=9_000_000_000_000_000)):raise ValueError('invalid CPU evidence')
-    if 'checkpoints' in value:
-        points=value['checkpoints'];stage=0;elapsed=0
-        if not isinstance(points,list) or not 1<=len(points)<=8:raise ValueError('invalid callback checkpoints')
+    for name,limit in [('checkpoints',8),('routingCheckpoints',5)]:
+        if name not in value:continue
+        points=value[name];stage=0;elapsed=0
+        if not isinstance(points,list) or not 1<=len(points)<=limit:raise ValueError('invalid callback checkpoints')
         for p in points:
             if not isinstance(p,dict) or set(p)-{'cpuMicros'}!={'stage','elapsedMicros','cpuState'} or any(type(p[k]) is not int for k in p):raise ValueError('invalid checkpoint fields')
-            if not stage<p['stage']<=8 or p['cpuState'] not in range(1,6) or not 0<=p['elapsedMicros']<=9_000_000_000_000_000 or ('cpuMicros' in p)!=(p['cpuState']==1) or ('cpuMicros' in p and not 0<=p['cpuMicros']<=9_000_000_000_000_000):raise ValueError('invalid checkpoint value')
+            if not stage<p['stage']<=limit or p['cpuState'] not in range(1,6) or not 0<=p['elapsedMicros']<=9_000_000_000_000_000 or ('cpuMicros' in p)!=(p['cpuState']==1) or ('cpuMicros' in p and not 0<=p['cpuMicros']<=9_000_000_000_000_000):raise ValueError('invalid checkpoint value')
             stage=p['stage']
             if p['cpuState']==5:
                 if p['elapsedMicros']!=0:raise ValueError('invalid checkpoint clock')
@@ -152,6 +153,21 @@ def work_timelines(rows,shapes):
                 previous_wall=end;previous_cpu=cpu_end
             r['main_stage_intervals']=stages
             r['stage_interpretation']='interval_since_previous_recorded_boundary; skipped_stages_are_early_returns; includes_instrumentation; wait_cause_unverified'
+        if 'routingCheckpoints' in r:
+            # Points share the outer callback origin. Begin at the actual filters
+            # boundary; never attribute earlier callback work to source lookup.
+            start=next((p for p in r.get('checkpoints',[]) if p['stage']==6),None)
+            previous_wall=start['elapsedMicros'] if start and start['cpuState']!=5 else None
+            previous_cpu=start.get('cpuMicros') if start and start['cpuState']==1 else None
+            names=['source_and_eligibility','focus_refresh','baseline_snapshot','ledger_update_or_early_return','recipient_delivery']
+            stages=[]
+            for point in r['routingCheckpoints']:
+                end=point['elapsedMicros'] if point['cpuState']!=5 else None
+                cpu_end=point.get('cpuMicros') if point['cpuState']==1 else None
+                stages.append(dict(through_stage=names[point['stage']-1],wall_us=end-previous_wall if end is not None and previous_wall is not None and end>=previous_wall else None,
+                                   cpu_us=cpu_end-previous_cpu if cpu_end is not None and previous_cpu is not None and cpu_end>=previous_cpu else None))
+                previous_wall=end;previous_cpu=cpu_end
+            r['routing_stage_intervals']=stages
         intervals=sorted((max(q['beganAtMicros'],r['beganAtMicros']),min(q['endedAtMicros'],r['endedAtMicros'])) for q in reads if valid and q['beganAtMicros']<r['endedAtMicros'] and q['endedAtMicros']>r['beganAtMicros'])
         total=0;end=-1
         for a,b in intervals:
@@ -498,7 +514,7 @@ def summarize(data):
         if 'workEvidence' in frame:
             work=work_evidence(frame['workEvidence'])
             callback=frame['kind']==1 and frame['lane'] in [1,2,3,4] and frame['edge'] in [1,2] and work['cpuState']!=0
-            if 'checkpoints' in work and not (callback and frame['lane']==2):raise ValueError('checkpoints outside main callback')
+            if ('checkpoints' in work or 'routingCheckpoints' in work) and not (callback and frame['lane']==2):raise ValueError('checkpoints outside main callback')
             read=frame['kind']==2 and frame['lane'] in [6,7] and frame['category']==2 and work['cpuState'] in [0,5]
             if not (callback or read) or (work['clockValid'] and work['endedAtMicros']//1000>frame['milliseconds']):raise ValueError('invalid work frame')
             work_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,kind=frame['kind'],event=frame['event'],**work))

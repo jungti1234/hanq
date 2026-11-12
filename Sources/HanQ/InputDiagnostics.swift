@@ -640,6 +640,7 @@ final class InputIncidentTrace {
         let cpuState:Int // 0 unmeasured(AX), 1 measured, 2 unavailable, 3 other thread, 4 counter reversed, 5 invalid wall
         let cpuMicros:Int?
         var checkpoints:[CallbackCheckpoint]?=nil
+        var routingCheckpoints:[CallbackCheckpoint]?=nil
     }
     struct CallbackCheckpoint:Codable {
         let stage:Int,elapsedMicros:Int,cpuState:Int
@@ -648,6 +649,7 @@ final class InputIncidentTrace {
     enum CallbackStage:Int {
         case processing=1,recipient,candidate,barrier,external,filters,routing,diagnostics
     }
+    enum RoutingStage:Int {case source=1,focus,snapshot,ledger,delivery}
     static func callbackThreadCPU()->UInt64? {
         var value=timespec()
         guard clock_gettime(CLOCK_THREAD_CPUTIME_ID,&value)==0,value.tv_sec>=0,value.tv_nsec>=0 else{return nil}
@@ -656,6 +658,7 @@ final class InputIncidentTrace {
     struct CallbackStart {
         fileprivate let began:Double,cpu:UInt64?,thread:pthread_t,generation:Int32
         fileprivate var checkpoints:[CallbackCheckpoint]=[]
+        fileprivate var routingCheckpoints:[CallbackCheckpoint]=[]
     }
     private func workEvidence(began:Double,ended:Double,cpuState:Int=0,cpuMicros:Int?=nil)->WorkEvidence {
         let valid=began.isFinite && ended.isFinite && began>=origin && ended>=began && (ended-origin)*1_000_000<=9_000_000_000_000_000
@@ -679,6 +682,7 @@ final class InputIncidentTrace {
         }
         var result=workEvidence(began:span.began,ended:ended,cpuState:state,cpuMicros:value)
         result.checkpoints=span.checkpoints.isEmpty ? nil:span.checkpoints
+        result.routingCheckpoints=span.routingCheckpoints.isEmpty ? nil:span.routingCheckpoints
         return result
     }
     // Fixed main-callback boundaries, no input payload, lookup, queue or file I/O.
@@ -690,6 +694,16 @@ final class InputIncidentTrace {
               stage.rawValue>(current.checkpoints.last?.stage ?? 0),
               let work=finishCallback(current) else{return}
         span?.checkpoints.append(CallbackCheckpoint(stage:stage.rawValue,
+            elapsedMicros:work.clockValid ? work.endedAtMicros-work.beganAtMicros:0,
+            cpuState:work.cpuState,cpuMicros:work.cpuMicros))
+    }
+    // Nested routing points use the same callback origin, thread and privacy gate.
+    // They never replace the stable outer stage codes.
+    func routingCheckpoint(_ stage:RoutingStage,_ span:inout CallbackStart?) {
+        guard let current=span,gate.generation==current.generation,!secureInput(),
+              stage.rawValue>(current.routingCheckpoints.last?.stage ?? 0),
+              let work=finishCallback(current) else{return}
+        span?.routingCheckpoints.append(CallbackCheckpoint(stage:stage.rawValue,
             elapsedMicros:work.clockValid ? work.endedAtMicros-work.beganAtMicros:0,
             cpuState:work.cpuState,cpuMicros:work.cpuMicros))
     }

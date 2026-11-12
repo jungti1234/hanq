@@ -26,6 +26,21 @@ trace.event(.main,.keyUp,event,duration:0.028,started:up)
 let uw=work()
 check(uw.cpuMicros==2000 && abs(uw.endedAtMicros-uw.beganAtMicros-28000)<=1,"key-up measures CPU separately from 28ms wall")
 check(uw.checkpoints?.map{$0.stage}==[1,5] && uw.checkpoints?.last?.cpuMicros==1500,"fixed cumulative checkpoints preserve skipped stages")
+var routing=trace.beginCallback(.keyDown)
+trace.checkpoint(.filters,&routing)
+wall+=0.001;cpu!+=500_000;trace.routingCheckpoint(.source,&routing)
+wall+=0.025;cpu!+=100_000;trace.routingCheckpoint(.focus,&routing)
+wall+=0.015;cpu!+=15_000_000;trace.routingCheckpoint(.snapshot,&routing)
+wall+=0.001;cpu!+=500_000;trace.routingCheckpoint(.ledger,&routing)
+wall+=0.001;cpu!+=500_000;trace.routingCheckpoint(.delivery,&routing)
+let routingCPU=cpuCalls;trace.routingCheckpoint(.source,&routing)
+check(cpuCalls==routingCPU,"repeated routing points do not sample clocks")
+trace.checkpoint(.routing,&routing);trace.event(.main,.keyDown,event,started:routing)
+let routingWork=work()
+check(routingWork.checkpoints?.map{$0.stage}==[6,7],"outer callback codes unchanged")
+check(routingWork.routingCheckpoints?.map{$0.stage}==[1,2,3,4,5],"five nested routing phases retained")
+check(routingWork.routingCheckpoints![1].cpuMicros!-routingWork.routingCheckpoints![0].cpuMicros! == 100,"wait has low CPU despite wall delay")
+check(routingWork.routingCheckpoints![2].cpuMicros!-routingWork.routingCheckpoints![1].cpuMicros! == 15000,"CPU-heavy read phase is separately visible")
 let unavailable=trace.beginCallback(.keyDown);cpu=nil;wall+=0.001;trace.event(.mismatch,.keyDown,event,started:unavailable)
 check(work().cpuState==2 && work().cpuMicros==nil,"failed CPU sample distinct from zero")
 cpu=100;let reversed=trace.beginCallback(.keyDown);cpu=99;wall+=0.001;trace.event(.onset,.keyDown,event,started:reversed)
@@ -61,6 +76,7 @@ shape(2);check(capture().shapeBaselines!.first{$0.lane == .onsetAX}!.current.evi
 let c=capture(),data=try! JSONEncoder().encode(c),sanitized=try! RecorderTrace.decode(data),roundtrip=try! RecorderTrace.decode(JSONEncoder().encode(sanitized))
 check(roundtrip.frames.contains{$0.workEvidence?.cpuState==1},"strict collector and sanitize retain measurements")
 check(roundtrip.frames.contains{$0.edge==2 && $0.workEvidence?.checkpoints?.count==2},"key-up checkpoints survive strict collection")
+check(roundtrip.frames.contains{$0.workEvidence?.routingCheckpoints?.count==5},"nested routing survives strict collector/sanitize")
 let json=String(data:data,encoding:.utf8)!
 for name in [secret,"keyCode","characters","clipboard","location","threadID"]{check(!json.contains(name),"private payload excluded: \(name)")}
 var object=try! JSONSerialization.jsonObject(with:data) as! [String:Any]
@@ -73,13 +89,26 @@ for points:[[String:Any]] in [[],[["stage":9,"elapsedMicros":0,"cpuState":2]],[[
  var badRows=rows,bad=base;bad["checkpoints"]=points;badRows[index]["workEvidence"]=bad;object["frames"]=badRows
  check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"invalid/private/unordered checkpoint rejected")
 }
+for points:[[String:Any]] in [[],[["stage":6,"elapsedMicros":0,"cpuState":2]],[["stage":1,"elapsedMicros":true,"cpuState":2]],[["stage":1,"elapsedMicros":0,"cpuState":2,"text":secret]],[["stage":2,"elapsedMicros":0,"cpuState":2],["stage":1,"elapsedMicros":1,"cpuState":2]]] {
+ var badRows=rows,bad=base;bad["routingCheckpoints"]=points;badRows[index]["workEvidence"]=bad;object["frames"]=badRows
+ check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object)))==nil,"invalid/private nested routing checkpoint rejected")
+}
 object["frames"]=rows.map{row -> [String:Any] in var r=row;r.removeValue(forKey:"workEvidence");return r}
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:object))) != nil,"old logs remain compatible and unmeasured")
 let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,clock:{wallCalls+=1;return wall},callbackCPU:{cpuCalls+=1;return cpu},writer:{_ in})
 let oldCPU=cpuCalls,oldWall=wallCalls
-var inactive=off.beginCallback(.keyUp);off.checkpoint(.processing,&inactive)
+var inactive=off.beginCallback(.keyUp);off.checkpoint(.processing,&inactive);off.routingCheckpoint(.source,&inactive)
 check(off.beginCallback(.keyDown)==nil && inactive==nil && cpuCalls==oldCPU && wallCalls==oldWall,"OFF down/up/checkpoint does not read either clock")
 let stale=trace.beginCallback(.keyDown);trace.setCollectionEnabled(false);trace.event(.main,.keyDown,event,started:stale);trace.flush()
 check(cpuCalls==oldCPU+1,"disabled completion does not sample CPU or emit work")
+var secureRouting=false,secureClocks=0,secureCPU=0
+let secureTrace=InputIncidentTrace(secureInput:{secureRouting},destination:nil,clock:{secureClocks+=1;return 100},callbackCPU:{secureCPU+=1;return 100},writer:{_ in})
+var secureSpan=secureTrace.beginCallback(.keyDown)
+let secureBefore=(secureClocks,secureCPU)
+secureRouting=true;secureTrace.routingCheckpoint(.source,&secureSpan)
+check(secureBefore.0==secureClocks && secureBefore.1==secureCPU,"secure transition stops nested clocks during a callback")
+secureRouting=false;secureTrace.routingCheckpoint(.source,&secureSpan)
+check(secureClocks>secureBefore.0 && secureCPU>secureBefore.1,"nested clocks resume only after security gate permits")
+secureTrace.stopAndFlush()
 if let output=CommandLine.arguments.dropFirst().first{try! data.write(to:URL(fileURLWithPath:output))}
 print("PASS \(checks) indirect timing/cursor/privacy/compatibility checks; no keys posted or AX queries")

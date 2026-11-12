@@ -9,6 +9,14 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_nested_routing_points_are_bounded_and_private(self):
+        work=dict(beganAtMicros=100,endedAtMicros=30000,clockValid=True,cpuState=1,cpuMicros=2000,
+                  routingCheckpoints=[dict(stage=1,elapsedMicros=2000,cpuState=1,cpuMicros=500),dict(stage=5,elapsedMicros=26000,cpuState=1,cpuMicros=1500)])
+        self.assertEqual(summary.work_evidence(work),work)
+        for points in [[],[dict(stage=6,elapsedMicros=0,cpuState=2)],[dict(stage=1,elapsedMicros=True,cpuState=2)],
+                       [dict(stage=1,elapsedMicros=0,cpuState=2,text='private')],list(reversed(work['routingCheckpoints']))]:
+            with self.assertRaises(ValueError):summary.work_evidence(dict(work,routingCheckpoints=points))
+
     def test_key_up_work_checkpoints_are_bounded_and_private(self):
         work=dict(beganAtMicros=100,endedAtMicros=28100,clockValid=True,cpuState=1,cpuMicros=2000,
                   checkpoints=[dict(stage=1,elapsedMicros=2000,cpuState=1,cpuMicros=500),dict(stage=5,elapsedMicros=26000,cpuState=1,cpuMicros=1500)])

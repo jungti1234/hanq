@@ -403,8 +403,11 @@ final class MismatchRecoveryEngine:NSObject {
             focusRead=InputIncidentFocusProbe.Read(target:target.processIdentifier)
             focusAccess.observeFocus={element,owner,route in focusRead?.observe(element,owner:owner,route:route)}
         }
-        guard focusAccess.currentPID()==target.processIdentifier else{unavailableReason="target_not_frontmost";return nil}
-        guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{unavailableReason="focused_element_unreadable";return nil}
+        // The focused-element read already proves its current owner. Preserve
+        // that proof and the final focus recheck without duplicating this IPC.
+        guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{
+            unavailableReason=focusAccess.lastOwner==target.processIdentifier ? "focused_element_unreadable":"target_not_frontmost";return nil
+        }
         // Fetch one coherent attribute batch instead of four synchronous IPCs.
         let names=(includeContent ? [kAXRoleAttribute,kAXSubroleAttribute,kAXValueAttribute,kAXSelectedTextRangeAttribute] : [kAXRoleAttribute,kAXSubroleAttribute]) as CFArray
         var values:CFArray?

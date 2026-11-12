@@ -125,3 +125,7 @@ bash scripts/test-first-publication.sh
 bash scripts/test-witness-refresh.sh
 bash scripts/test-witness-diagnostics.sh
 bash scripts/test-onset-diagnostic-history.sh
+
+# Key-up observation stays off the synchronous input path; next-down/timer guards remain.
+swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/KeyUpObservation/main.swift -o "$stage/keyup-observation"
+hanq_test_run "$stage/keyup-observation"
