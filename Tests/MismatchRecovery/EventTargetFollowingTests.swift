@@ -25,6 +25,15 @@ func runEventTargetFollowingTests(){
     let missing=CGEvent(keyboardEventSource:nil,virtualKey:15,keyDown:false)!
     missing.setIntegerValueField(.eventTargetUnixProcessID,value:0)
     probeTestCheck(owner.event(.keyUp,missing) != nil && focusReads>0,"missing recipient preserves actual-focus discovery")
+    let priorSnapshots=snapshots,priorFocus=focusReads
+    for type in [CGEventType.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel] {
+        owner.plan=MismatchRecoveryPlan(before:"",caret:0)
+        let pointer=CGEvent(source:nil)!
+        pointer.type=type
+        probeTestCheck(owner.event(type,pointer)?.takeUnretainedValue() === pointer,"original navigation passes")
+        probeTestCheck(owner.plan==nil && snapshots==priorSnapshots && focusReads==priorFocus,
+                       "idle pointer cancels detection without waiting on focus or snapshots")
+    }
     let previousReads=focusReads
     owner.followFrontmost()
     probeTestCheck(focusReads>previousReads,"idle target discovery retains actual system focus for nonactivating panels")

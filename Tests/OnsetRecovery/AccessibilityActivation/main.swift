@@ -69,4 +69,22 @@ let healthy=engine();var extraFocusReads=0
 healthy.focusAccess.read={_ in extraFocusReads+=1;return nil}
 healthy.serviceFocusAccessibility()
 check(extraFocusReads==0,"healthy observations add no AX focus query or gate work")
+// A slow failed focus read yields a quiet window, even if AX keeps notifying.
+let slow=OnsetRecoveryEngine()
+slow.enabled=true;slow.testSource={onsetKoreanID}
+var slowReads=0
+slow.testSnapshot={
+    slowReads+=1
+    Thread.sleep(forTimeInterval:0.06)
+    slow.unavailableReason="focused_element_unreadable"
+    return nil
+}
+slow.observeIdleInput();slow.observeIdleInput()
+check(slowReads==1,"an immediate idle retry after a slow focus failure must yield")
+slow.requestImmediateObservation(input:true)
+slow.observeIdleInput()
+check(slowReads==2,"new input bypasses the quiet window")
+Thread.sleep(forTimeInterval:0.26)
+slow.observeIdleInput();check(slowReads==3,"idle probing resumes without user input")
+slow.closeSession()
 print("PASS \(count) production idle activation integration checks; all AX writes injected; no OS keys posted")

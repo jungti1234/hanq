@@ -193,6 +193,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     var permissionGranted = false
     var pendingActivation = true
+    private var timeoutRestart:DispatchWorkItem?
+    private var lastTimeoutRestart = -Double.infinity
+    private var explicitTapStop = false
     private(set) var inputInterruption: InputMonitoringInterruption?
     lazy var inputMonitoringNotice: InputMonitoringNotice = {
         let notice = InputMonitoringNotice()
@@ -568,6 +571,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         // Never re-enable a tap that macOS disabled. Release the input
                         // path before doing UI or permission work on the main run loop.
                         InputDiagnostics.shared.record("tap.disabled type=\(type.rawValue)")
+                        if type == .tapDisabledByUserInput { owner.explicitTapStop=true }
+                        let idleAtTimeout = type == .tapDisabledByTimeout && owner.canRestartIdleMapping
                         owner.enabled = false
                         owner.koreanEnabled = false
                         owner.hanjaEnabled = false
@@ -577,11 +582,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         DispatchQueue.main.async {
                             // Ignore a queued notification from a replaced tap.
                             guard let stoppedTap, owner.tap === stoppedTap else { return }
-                            owner.stopMapping()
+                            let reason:InputMonitoringInterruption = owner.explicitTapStop ? .systemInput:.timeout
+                            let mayRestart = reason == .timeout && idleAtTimeout && owner.canRestartIdleMapping
+                            owner.stopMapping(afterIdleTimeout:mayRestart)
                             owner.updatePermission()
-                            if let reason = InputMonitoringInterruption(eventType: type) {
-                                owner.noteInputInterruption(reason)
-                            }
+                            if mayRestart && owner.scheduleTimeoutRestart() { return }
+                            owner.noteInputInterruption(reason)
                         }
                         return Unmanaged.passUnretained(event)
                     }
@@ -753,6 +759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             CFRunLoopAddSource(CFRunLoopGetMain(), tapSource!, .commonModes)
             freshPermission.start()
         }
+        timeoutRestart?.cancel();timeoutRestart=nil
         enabled = true
         externalKeyboards.start()
         onsetRecovery.start()
@@ -762,6 +769,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         inputInterruption = nil
         inputMonitoringNotice.closeNotice()
         refreshStatus()
+    }
+
+    var canRestartIdleMapping:Bool {
+        let mismatch=mismatchRecovery.engine
+        if let onset=onsetRecovery.engine,
+           onset.recovering || onset.rollingBack || onset.waitingForContext ||
+           !onset.pending.isEmpty || !onset.retainedInput.isEmpty || !onset.prefixRemainder.isEmpty ||
+           onset.gate?.ownsInput == true || (onset.gate?.seenCount() ?? 0)<onset.postedToGate { return false }
+        return (!mismatch.suspended || mismatch.monitorRestartAllowed) &&
+            !mismatch.recovering && !mismatch.rollingBack && mismatch.pending.isEmpty &&
+            mismatch.retained.isEmpty && mismatch.switchGate?.filter.consuming != true &&
+            !sourceSwitchBarrier.busy && !selectionSourceSwitch.isPending && !jamoRepair.isEditing &&
+            !externalKeyboards.isCapturing && !externalKeyboards.consuming && !filter.consuming && !optionFilter.consuming
+    }
+
+    // Start a fresh registration after teardown. Never enable the disabled tap.
+    func scheduleTimeoutRestart(now:Double=ProcessInfo.processInfo.systemUptime)->Bool {
+        guard timeoutRestart==nil,now-lastTimeoutRestart>=60,permissionGranted,!updateRestricted,
+              !enabled,tap==nil,canRestartIdleMapping else{return false}
+        lastTimeoutRestart=now
+        let work=DispatchWorkItem{[weak self] in self?.resumeAfterTimeout()}
+        timeoutRestart=work
+        DispatchQueue.main.asyncAfter(deadline:.now()+2,execute:work)
+        return true
+    }
+
+    func resumeAfterTimeout(
+        ready:()->Bool = {AXIsProcessTrusted() && CGPreflightPostEventAccess() && !IsSecureEventInputEnabled()},
+        settings:UserDefaults = .standard, register:(()->Void)? = nil
+    ){
+        guard let work=timeoutRestart,!work.isCancelled else{return}
+        work.cancel();timeoutRestart=nil
+        guard !enabled,tap==nil,permissionGranted,!updateRestricted else{return}
+        let korean=settings.bool(forKey:"koreanKeyEnabled"),hanja=settings.bool(forKey:"hanjaKeyEnabled")
+        guard korean || hanja else{return}
+        if ready(),canRestartIdleMapping {
+            if let register { register() } else { startMapping() }
+            if enabled {
+                koreanEnabled=korean;hanjaEnabled=hanja;refreshStatus();return
+            }
+        }
+        noteInputInterruption(.timeout)
     }
 
     func noteInputInterruption(_ reason: InputMonitoringInterruption) {
@@ -788,11 +837,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Fail open: remove the system hook, not just the feature flags.
     /// Called outside the tap callback. The watchdog stays armed until cleanup ends.
-    func stopMapping() {
+    func stopMapping(afterIdleTimeout:Bool=false) {
+        timeoutRestart?.cancel();timeoutRestart=nil
+        explicitTapStop=false
         inputDeliveryOrigin?.stop();inputDeliveryOrigin=nil
         sourceSwitchBarrier.fail("input_stopped")
         InputDiagnostics.shared.record("tap.stop.begin present=\(tap != nil)")
-        mismatchRecovery.stop()
+        mismatchRecovery.stop(afterIdleTimeout:afterIdleTimeout)
         onsetRecovery.stop()
         enabled = false
         koreanEnabled = false

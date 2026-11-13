@@ -32,7 +32,9 @@ final class OnsetRecoveryEngine:NSObject {
     var axObserver:AXObserver?
     var observedField:AXUIElement?
     var updateQueued=false
-    func requestImmediateObservation(){
+    private var idleReadAfter=0.0
+    func requestImmediateObservation(input:Bool=false){
+        if input { idleReadAfter=0 }
         guard enabled,!updateQueued else{return};updateQueued=true
         DispatchQueue.main.async{[weak self] in
             guard let self else{return};self.updateQueued=false;self.automaticTick()
@@ -723,7 +725,21 @@ final class OnsetRecoveryEngine:NSObject {
             }
             gate?.beat();return
         }
+        observeIdleInput()
+    }
+
+    func observeIdleInput(){
+        // A slow unavailable AX client must get a quiet interval between idle
+        // polls. Reservations and physical input still take a fresh snapshot.
+        let began=ProcessInfo.processInfo.systemUptime
+        if began<idleReadAfter,gate?.reservation()==nil,gate?.deferredReservation()==nil,
+           gate?.passedObservation()==nil { return }
+        idleReadAfter=0
         sample();gate?.beat()
+        let finished=ProcessInfo.processInfo.systemUptime
+        if unavailableReason=="focused_element_unreadable",finished-began>=0.05 {
+            idleReadAfter=finished+min(0.25,finished-began)
+        }
         serviceFocusAccessibility()
         gate?.beat()
     }
@@ -819,7 +835,7 @@ final class OnsetRecoveryEngine:NSObject {
         gate.failed={[weak self,weak gate] reason in guard let self,let gate,self.gate === gate else{return};self.emergencyStop(reason)}
         gate.observationNeeded={[weak self,weak gate] in
             guard let self,let gate,self.gate === gate,self.enabled else{return}
-            self.requestImmediateObservation()
+            self.requestImmediateObservation(input:true)
         }
         focusHandoff.diagnosticsEnabled=focusTraceRequested && InputDiagnostics.shared.isEnabled
         focusHandoff.beginDiagnosticObservation()
@@ -852,7 +868,7 @@ final class OnsetRecoveryEngine:NSObject {
         if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{emergencyStop("event_tap_disabled");return Unmanaged.passUnretained(event)}
         guard enabled else{return Unmanaged.passUnretained(event)}
-        requestImmediateObservation()
+        requestImmediateObservation(input:true)
         return Unmanaged.passUnretained(event)
     }
     func sample(){
@@ -1179,7 +1195,7 @@ final class OnsetRecoveryEngine:NSObject {
         if let axObserver {
             CFRunLoopRemoveSource(CFRunLoopGetMain(),AXObserverGetRunLoopSource(axObserver),.commonModes)
         }
-        axObserver=nil;observedField=nil;updateQueued=false
+        axObserver=nil;observedField=nil;updateQueued=false;idleReadAfter=0
         gate?.stop();collectHeld();flushReentryTrace()
         enabled=false;timer?.invalidate();timer=nil
         log("session_end",["undeliveredEvents":pending.count+retainedInput.count])

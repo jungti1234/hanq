@@ -85,7 +85,18 @@ final class MismatchRecoveryController: NSObject {
         }
         engine.incidentTrace.monitor(sample)
     }
-    func stop(){engine.freshObservationRequested=false;active=false;timer?.invalidate();timer=nil;engine.suspend("hanq_input_stopped");recordMonitor(stage:4,reason:1)}
+    func stop(afterIdleTimeout:Bool=false){
+        // Both the main and mismatch taps can time out before the next tick.
+        // Carry only the idle restart decision over teardown of both ports.
+        let restartIdle = afterIdleTimeout && engine.suspended && engine.monitorRestartAllowed
+        engine.freshObservationRequested=false;active=false;timer?.invalidate();timer=nil
+        engine.suspend("hanq_input_stopped")
+        if restartIdle,engine.pending.isEmpty,engine.retained.isEmpty {
+            engine.monitorRestartAllowed=true
+            _ = engine.prepareIdleMonitorRestart()
+        }
+        recordMonitor(stage:4,reason:1)
+    }
     func prepareManualEdit()->Bool {
         guard !engine.recovering else{return false}
         engine.cancelDetection();return true

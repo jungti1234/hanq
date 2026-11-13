@@ -518,6 +518,11 @@ final class MismatchRecoveryEngine:NSObject {
         return true
     }
     private func processEvent(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            InputDiagnostics.shared.record("mismatch.tap_disabled kind=1 type=\(type.rawValue)")
+            monitorTapFailed(1)
+            return Unmanaged.passUnretained(event)
+        }
         if !recovering{sourceEvidence?.observeInteraction(type,event)}
         if type == .keyDown || type == .keyUp {log("key_received")}
         detectionRevision+=1
@@ -540,13 +545,17 @@ final class MismatchRecoveryEngine:NSObject {
             if type == .keyUp{heldKeys.remove(code)}
             return Unmanaged.passUnretained(event)
         }
-        if enabled{followFrontmost(event:event)}
-        if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{return Unmanaged.passUnretained(event)}
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            InputDiagnostics.shared.record("mismatch.tap_disabled kind=1 type=\(type.rawValue)")
-            monitorTapFailed(1)
+        // Navigation invalidates the candidate regardless of the focused text.
+        // A click must reach the editor before it can report its new focus.
+        let navigation = type == .leftMouseDown || type == .rightMouseDown ||
+            type == .otherMouseDown || type == .scrollWheel
+        if navigation,enabled,!suspended,!recovering {
+            plan=nil;planElement=nil;lastSampleSnapshot=nil;resetCompositionObservation()
+            incidentTrace.decision(.event,.candidateCancelledNavigation,event:event)
             return Unmanaged.passUnretained(event)
         }
+        if enabled{followFrontmost(event:event)}
+        if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{return Unmanaged.passUnretained(event)}
         guard enabled,!suspended else{return Unmanaged.passUnretained(event)}
         guard canObserve() else{
             incidentTrace.decision(.event,.observationBlocked,event:event)

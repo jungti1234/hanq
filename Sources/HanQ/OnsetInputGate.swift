@@ -206,6 +206,10 @@ final class OnsetInputGate {
         else if holdUntil>0 && now>=holdUntil{expireOrFail("hold_deadline")}
     }
     func stop(){lock.lock();stopped=true;holdUntil=0;early=nil;deferred=nil;passedInput=nil;hintUntil=0;lock.unlock()}
+    var ownsInput:Bool {
+        lock.lock();defer{lock.unlock()}
+        return early != nil || holdUntil>0 || !held.isEmpty
+    }
     func hasActiveReplayHold()->Bool {
         lock.lock();defer{lock.unlock()}
         let now=ProcessInfo.processInfo.systemUptime

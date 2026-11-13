@@ -28,6 +28,39 @@ let result = owner.filter.process(type: .keyDown, key: 0, flags: flags, acceptNe
 precondition(!result.consume && result.flags == flags)
 print("PASS: production teardown releases port/source, clears held keys, passes input, and is idempotent")
 
+// A timeout uses the same teardown as a manual stop, then a fresh registration.
+do {
+    let app=AppDelegate()
+    app.permissionGranted=true;app.pendingActivation=false
+    let domain="hanq.timeout.tests."+UUID().uuidString
+    let settings=UserDefaults(suiteName:domain)!
+    defer {settings.removePersistentDomain(forName:domain)}
+    settings.set(true,forKey:"koreanKeyEnabled");settings.set(false,forKey:"hanjaKeyEnabled")
+    var starts=0
+    func resume() {app.resumeAfterTimeout(ready:{true},settings:settings,register:{starts+=1;app.enabled=true})}
+    let held=CGEvent(keyboardEventSource:nil,virtualKey:1,keyDown:true)!
+    app.mismatchRecovery.engine.retained=[held]
+    precondition(!app.scheduleTimeoutRestart(now:1) && app.mismatchRecovery.engine.retained.first === held)
+    app.mismatchRecovery.engine.retained=[]
+    app.mismatchRecovery.engine.suspended=true
+    precondition(!app.canRestartIdleMapping)
+    app.mismatchRecovery.engine.monitorRestartAllowed=true
+    precondition(app.canRestartIdleMapping)
+    app.stopMapping(afterIdleTimeout:true)
+    precondition(!app.mismatchRecovery.engine.suspended && !app.mismatchRecovery.engine.monitorRestartAllowed)
+    precondition(app.scheduleTimeoutRestart(now:2) && !app.scheduleTimeoutRestart(now:3))
+    resume();resume()
+    precondition(starts==1 && app.koreanEnabled && !app.hanjaEnabled)
+    app.stopMapping()
+    precondition(!app.scheduleTimeoutRestart(now:61) && app.scheduleTimeoutRestart(now:62))
+    app.stopMapping();resume();precondition(starts==1)
+    app.updateRestricted=true
+    precondition(!app.scheduleTimeoutRestart(now:123))
+    app.updateRestricted=false;app.permissionGranted=false
+    precondition(!app.scheduleTimeoutRestart(now:123))
+    print("PASS: fresh timeout registration once, saved switches, retained-input guard, rate limit and teardown cancellation")
+}
+
 // A restriction must remove the real input hook and prevent every activation route.
 _ = NSApplication.shared
 owner.statusIcon.start(menu: NSMenu())
