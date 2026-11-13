@@ -4,9 +4,15 @@ import Carbon
 func runSafariActivationTests() {
     let first: [String:Any] = ["InputSourceKind":"Keyboard Layout","KeyboardLayout Name":"ABC"]
     let second: [String:Any] = ["InputSourceKind":"Input Mode","Input Mode":ko]
-    check(SafariInputActivation.hasPreviousTwoSet([first,second]), "current ABC and previous two-set")
+    check(SafariInputActivation.hasPreviousSource(ko, in: [first,second]), "current ABC and previous two-set")
     for history in [[], [second,first], [first,first], [first, ["Input Mode":ko]]] {
-        check(!SafariInputActivation.hasPreviousTwoSet(history), "ambiguous OS history cannot request a shortcut")
+        check(!SafariInputActivation.hasPreviousSource(ko, in: history), "ambiguous OS history cannot request a shortcut")
+    }
+    for source in KoreanKeyboardLayout.supportedIDs {
+        let history = [first, ["InputSourceKind":"Input Mode", "Input Mode":source]]
+        for target in KoreanKeyboardLayout.supportedIDs {
+            check(SafariInputActivation.hasPreviousSource(target, in: history) == (target == source), "history must match the requested input mode")
+        }
     }
     // Same AX role reported by the Safari recording. A native combo, a list
     // control, or a secure field must not authorize a system input switch.
@@ -46,7 +52,7 @@ func runSafariActivationTests() {
         activation.source = {id}
         activation.layout = {en}
         activation.override = {scenario=="override" ? "com.apple.keylayout.2SetHangul" : nil}
-        activation.previousIsKorean = {past}
+        activation.previousSourceMatches = { $0 == ko && past }
         activation.webEditor = {_ in eligible(role:kAXComboBoxRole)}
         activation.usedDirectSwitch = {directReasons.append($0)}
         activation.now = {clock}
@@ -150,6 +156,48 @@ func runSafariActivationTests() {
         } else {
             let condition=scenario=="historyChanged" ? "previous_source_changed" : (scenario=="focusChanged" ? "field_changed" : "source_switch_timeout")
             check(parked==1 && replayed==0 && direct==1 && reasons==["safariInputActivation."+condition],"failed activation preserves the new key and first failing condition")
+        }
+    }
+    for (source, layout) in [(KoreanKeyboardLayout.threeSetID, "3SetHangul"),
+                             (KoreanKeyboardLayout.threeSet390ID, "390Hangul"),
+                             (KoreanKeyboardLayout.gongjinID, "GJCRomaja"),
+                             (KoreanKeyboardLayout.hncID, "HNCRomaja")] {
+        for scenario in ["native", "itsOverride", "foreignOverride", "differentOutbound", "differentHistory", "changedTarget"] {
+            let a = SafariInputActivation()
+            var selected = scenario == "differentOutbound" ? ko : source
+            var clock = 1.0, chords = 0
+            var directReason: String?
+            var work = [() -> Void]()
+            a.source = { selected }; a.layout = { en }
+            a.override = {
+                switch scenario {
+                case "itsOverride": return "com.apple.keylayout." + layout
+                case "foreignOverride": return "com.apple.keylayout.2SetHangul"
+                default: return nil
+                }
+            }
+            a.previousSourceMatches = { $0 == source && scenario != "differentHistory" }
+            a.safari = { NSRunningApplication.current }; a.focus = { field }; a.webEditor = { _ in true }
+            a.shortcut.configuration = { (49, .maskControl) }
+            a.shortcut.canPost = { true }; a.shortcut.modifiersClear = { true }; a.modifiersReleased = { true }
+            a.shortcut.schedule = { _, f in work.append(f) }; a.shortcut.releasePosted = { _,_ in }
+            a.shortcut.post = { event in if event.type == .keyDown { chords += 1; selected = source } }
+            a.now = { clock }; a.usedDirectSwitch = { directReason = $0 }
+            check(a.select(en, field: field) == nil, "outbound uses normal source selection")
+            selected = en; a.committed(en)
+            let result = a.select(source, field: field)
+            if ["foreignOverride", "differentOutbound", "differentHistory"].contains(scenario) {
+                check(result == nil && !a.pending && chords == 0 && directReason == (scenario == "foreignOverride" ? "layout_override_present" : "previous_source_changed"), "an unrelated input source cannot authorize a shortcut")
+                continue
+            }
+            if scenario == "changedTarget" {
+                check(a.select(ko, field: field) == -50 && !a.pending && chords == 0, "in-flight target cannot change")
+                continue
+            }
+            check(result == noErr && a.pending, "matching supported mode starts activation")
+            clock += 0.03; _ = a.select(source, field: field)
+            while !work.isEmpty { work.removeFirst()() }
+            check(a.select(source, field: field) == noErr && !a.pending && selected == source && chords == 1, "exact supported input mode acknowledged")
         }
     }
 }

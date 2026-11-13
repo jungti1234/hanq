@@ -1,11 +1,9 @@
 import AppKit
 import Carbon
 
-/// The selected two-set ID can be correct while a WebKit editor still receives
-/// independent jamo. Activate the verified previous source through the system
-/// input switcher only for the affected right-Command round trip.
+/// WebKit can receive separate jamo even after the Korean input mode is selected.
+/// Reactivate only the mode that left this field on the same right-Command round trip.
 final class SafariInputActivation {
-    private static let korean = "com.apple.inputmethod.Korean.2SetKorean"
     private static let english = "com.apple.keylayout.ABC"
     private static let marker: Int64 = 0x48414E5157464958 // HanQ synthetic-event namespace
 
@@ -18,9 +16,9 @@ final class SafariInputActivation {
     }
     var layout = InputSourceAccess.currentLayoutID
     var override = InputSourceAccess.currentOverrideID
-    var previousIsKorean: () -> Bool = {
+    var previousSourceMatches: (String) -> Bool = { target in
         let history = UserDefaults(suiteName: "com.apple.HIToolbox")?.array(forKey: "AppleInputSourceHistory") as? [[String: Any]]
-        return hasPreviousTwoSet(history)
+        return hasPreviousSource(target, in: history)
     }
     var safari: () -> NSRunningApplication? = {
         guard let front = NSWorkspace.shared.frontmostApplication, front.bundleIdentifier == "com.apple.Safari" else { return nil }
@@ -36,6 +34,7 @@ final class SafariInputActivation {
     private struct Attempt {
         let field: AXUIElement
         let recipient: NSRunningApplication
+        let target: String
         var phase: Phase
         var until: Double
         let limit: Double
@@ -43,21 +42,21 @@ final class SafariInputActivation {
         var clearSince: Double?
     }
     private var attempt: Attempt?
-    private var outboundField: AXUIElement?
+    private var outbound: (field: AXUIElement, source: String)?
     private var confirmedOutbound = false
     private var rejected: String?
-    private var missedReturn: (field: AXUIElement, until: Double)?
+    private var missedReturn: (field: AXUIElement, source: String, until: Double)?
     // Includes modifier release, two bounded acknowledgments, and the retry lead-in.
     static let maximumDuration = 1.75
     var pendingLimit: Double? { attempt?.limit }
     var pending: Bool { attempt != nil }
 
-    static func hasPreviousTwoSet(_ history: [[String: Any]]?) -> Bool {
-        guard let history, history.count >= 2 else { return false }
+    static func hasPreviousSource(_ target: String, in history: [[String: Any]]?) -> Bool {
+        guard KoreanKeyboardLayout.supportedIDs.contains(target), let history, history.count >= 2 else { return false }
         return history[0]["InputSourceKind"] as? String == "Keyboard Layout" &&
             history[0]["KeyboardLayout Name"] as? String == "ABC" &&
             history[1]["InputSourceKind"] as? String == "Input Mode" &&
-            history[1]["Input Mode"] as? String == korean
+            history[1]["Input Mode"] as? String == target
     }
 
     static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -98,14 +97,14 @@ final class SafariInputActivation {
 
     func committed(_ id: String) {
         missedReturn = nil
-        confirmedOutbound = outboundField != nil && id == Self.english
-        if !confirmedOutbound { outboundField = nil }
+        confirmedOutbound = outbound != nil && id == Self.english
+        if !confirmedOutbound { outbound = nil }
     }
 
     func observed(_ id: String) {
         if id != Self.english { missedReturn = nil }
         if confirmedOutbound && id != Self.english {
-            outboundField = nil
+            outbound = nil
             confirmedOutbound = false
         }
     }
@@ -119,13 +118,13 @@ final class SafariInputActivation {
             // The OS can update its history before the TIS current-source
             // query converges. Only the previous-source lookup preceding our
             // Space down authorizes the switch. Afterwards verify its target.
-            return shortcut.switchKeyPosted || previousIsKorean() ? nil : "previous_source_changed"
+            return shortcut.switchKeyPosted || previousSourceMatches(attempt.target) ? nil : "previous_source_changed"
         }
-        return (attempt.phase == .activation || attempt.retry) && id == Self.korean ? nil : "source_changed"
+        return (attempt.phase == .activation || attempt.retry) && id == attempt.target ? nil : "source_changed"
     }
 
     func cancel(_ reason: String) {
-        outboundField = nil
+        outbound = nil
         confirmedOutbound = false
         // The outer barrier reports switch_failed immediately after our own
         // terminal miss. Keep only that short-lived, same-field evidence.
@@ -141,17 +140,21 @@ final class SafariInputActivation {
     /// nil leaves the established direct-selection path in charge. A pending
     /// attempt belongs to the editor barrier, which keeps new keys in order.
     func select(_ target: String, field: AXUIElement) -> OSStatus? {
-        guard target == Self.korean else {
+        guard KoreanKeyboardLayout.supportedIDs.contains(target) else {
             if pending { cancel("source_changed"); return -50 }
             missedReturn = nil
             confirmedOutbound = false
-            outboundField = target == Self.english && safari() != nil && source() == Self.korean ? field : nil
+            outbound = nil
+            if target == Self.english, safari() != nil {
+                let leaving = source()
+                if KoreanKeyboardLayout.supportedIDs.contains(leaving) { outbound = (field, leaving) }
+            }
             return nil
         }
         if attempt == nil {
-            let missed = missedReturn.flatMap { now() < $0.until ? $0.field : nil }
-            let previous = outboundField ?? missed
-            outboundField = nil
+            let missed = missedReturn.flatMap { now() < $0.until && $0.source == target ? (field: $0.field, source: $0.source) : nil }
+            let previous = outbound ?? missed
+            outbound = nil
             let wasConfirmed = confirmedOutbound || missed != nil
             missedReturn = nil
             confirmedOutbound = false
@@ -159,13 +162,14 @@ final class SafariInputActivation {
             let directReason: String?
             if previous == nil { directReason = "outbound_not_observed" }
             else if !wasConfirmed { directReason = "round_trip_unconfirmed" }
-            else if previous.map({ CFEqual($0, field) }) != true { directReason = "field_changed" }
+            else if previous?.source != target { directReason = "previous_source_changed" }
+            else if previous.map({ CFEqual($0.field, field) }) != true { directReason = "field_changed" }
             else if source() != Self.english { directReason = "source_changed" }
             else if layout() != Self.english { directReason = "abc_layout_unconfirmed" }
-            else if override() != nil { directReason = "layout_override_present" }
+            else if hasConflictingOverride(for: target) { directReason = "layout_override_present" }
             else if !shortcut.configured { directReason = "shortcut_unavailable" }
             else if !shortcut.canPost() { directReason = "input_unavailable" }
-            else if !previousIsKorean() { directReason = "previous_source_changed" }
+            else if !previousSourceMatches(target) { directReason = "previous_source_changed" }
             else if !webEditor(field) { directReason = "web_editor_unconfirmed" }
             else if focus().map({ CFEqual($0, field) }) != true { directReason = "field_changed" }
             else { directReason = nil }
@@ -174,17 +178,18 @@ final class SafariInputActivation {
                 return nil
             }
             let began = now()
-            attempt = Attempt(field: field, recipient: app, phase: .release, until: began + 0.75,
+            attempt = Attempt(field: field, recipient: app, target: target, phase: .release, until: began + 0.75,
                               limit: began + Self.maximumDuration)
         }
         guard var active = attempt else { return nil }
+        guard active.target == target else { cancel("target_changed"); return -50 }
         if let reason = rejected ?? issue(active) {
             cancel(reason)
             return -50
         }
         switch active.phase {
         case .release:
-            if active.retry && source() == Self.korean {
+            if active.retry && source() == active.target {
                 attempt = nil
                 return noErr
             }
@@ -204,13 +209,13 @@ final class SafariInputActivation {
             guard time - (active.clearSince ?? time) >= 0.025 else { return noErr }
             // After a missed chord, sample the history and target again before
             // arming the next one. A late first switch must never toggle back.
-            guard previousIsKorean() else { cancel("previous_source_changed"); return -50 }
+            guard previousSourceMatches(active.target) else { cancel("previous_source_changed"); return -50 }
             active.phase = .activation
             active.until = now() + 0.42
             attempt = active
             let status = shortcut.request(marker: Self.marker, recipient: active.recipient) { [weak self] in
                 guard let self, let current = self.attempt else { return false }
-                if current.retry && !self.shortcut.switchKeyPosted && self.source() == Self.korean {
+                if current.retry && !self.shortcut.switchKeyPosted && self.source() == current.target {
                     return false
                 }
                 self.rejected = self.issue(current)
@@ -225,15 +230,15 @@ final class SafariInputActivation {
             }
             guard now() >= active.until else { return noErr }
             // Repeating a previous-source shortcut is safe only while the
-            // first one has fully released and ABC still precedes two-set.
+            // first one has fully released and the same Korean mode still precedes ABC in history.
             guard !shortcut.busy && shortcut.switchKeyPosted else { cancel("source_switch_timeout"); return -50 }
             guard source() == Self.english else { cancel("source_changed"); return -50 }
             guard layout() == Self.english else { cancel("abc_layout_unconfirmed"); return -50 }
-            guard override() == nil else { cancel("layout_override_present"); return -50 }
-            guard previousIsKorean() else { cancel("previous_source_changed"); return -50 }
+            guard !hasConflictingOverride(for: active.target) else { cancel("layout_override_present"); return -50 }
+            guard previousSourceMatches(active.target) else { cancel("previous_source_changed"); return -50 }
             if active.retry {
                 cancel("source_switch_timeout")
-                missedReturn = (active.field, now() + 1.5)
+                missedReturn = (active.field, active.target, now() + 1.5)
                 return -50
             }
             failed("safariInputActivation", "source_switch_timeout")
@@ -244,6 +249,20 @@ final class SafariInputActivation {
             active.until = now() + 0.10
             attempt = active
             return noErr
+        }
+    }
+
+    private func hasConflictingOverride(for target: String) -> Bool {
+        guard let overrideID = override() else { return false }
+        // A lingering override for an alternate keyboard can survive a working
+        // ABC selection. Require that it names exactly the mode we left.
+        // Preserve the separately verified two-set eligibility rule.
+        switch target {
+        case KoreanKeyboardLayout.threeSetID: return overrideID != "com.apple.keylayout.3SetHangul"
+        case KoreanKeyboardLayout.threeSet390ID: return overrideID != "com.apple.keylayout.390Hangul"
+        case KoreanKeyboardLayout.gongjinID: return overrideID != "com.apple.keylayout.GJCRomaja"
+        case KoreanKeyboardLayout.hncID: return overrideID != "com.apple.keylayout.HNCRomaja"
+        default: return true
         }
     }
 }

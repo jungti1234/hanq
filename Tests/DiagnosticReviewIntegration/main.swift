@@ -61,8 +61,8 @@ for document in try first.incidents[0].documents.values {
     let rows=document.sections.first(where:{$0.title=="최근 자동 복구 실패 단계와 조건"})?.fields
     check(rows?.count==4 && rows?.first?.value.contains("selection_failed")==true &&
           rows?[1].value.contains("rollback_text_changed")==true &&
-          rows?[2].value.contains("Safari 두벌식 입력기 재활성화")==true && rows?[2].value.contains("source_switch_timeout")==true &&
-          rows?.last?.value.contains("Safari 두벌식 재요청 결과 확인")==true && rows?.last?.value.contains("source_switch_timeout")==true && rows?.last?.label.contains("전환 보완 중단")==true, "both manual phases show the original failure followed by the rollback failure")
+          rows?[2].value.contains("Safari 한국어 입력기 재활성화")==true && rows?[2].value.contains("source_switch_timeout")==true &&
+          rows?.last?.value.contains("Safari 한국어 자판 재요청 결과 확인")==true && rows?.last?.value.contains("source_switch_timeout")==true && rows?.last?.label.contains("전환 보완 중단")==true, "both manual phases show the original failure followed by the rollback failure")
 }
 check(trace.enabled, "review does not disable collection")
 let original = try manifest(directory)

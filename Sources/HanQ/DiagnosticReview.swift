@@ -417,9 +417,9 @@ final class DiagnosticReviewSnapshot {
         if let failures=object["recoveryFailures"] as? [[String:Int]],!failures.isEmpty {
             let stageNames=["retryKorean":"한글 재시도", "retry_korean":"재시도 직전 편집기 조회",
                             "attemptRollback":"롤백", "awaitSelection":"선택 확인", "verifyBuffered":"후속 입력 확인",
-                            "safariReturnSelection":"Safari 두벌식 복귀 경로 선택", "onset.awaitPrefix":"첫 자음 재입력 결과 확인",
+                            "safariReturnSelection":"Safari 한국어 자판 복귀 경로 선택", "onset.awaitPrefix":"첫 자음 재입력 결과 확인",
                             "onset.drain":"첫 자음 후속 키 전달", "onset.gateAcknowledged":"첫 자음 키 통과 확인",
-                            "onset.awaitSelection":"첫 자음 선택 반영 확인", "safariModifierRelease":"Safari 전환 키 놓음 확인", "safariInputActivation":"Safari 두벌식 입력기 재활성화", "safariActivationRetry":"Safari 두벌식 재요청 결과 확인"]
+                            "onset.awaitSelection":"첫 자음 선택 반영 확인", "safariModifierRelease":"Safari 전환 키 놓음 확인", "safariInputActivation":"Safari 한국어 입력기 재활성화", "safariActivationRetry":"Safari 한국어 자판 재요청 결과 확인"]
             let conditionNames=["prefix_text_mismatch":"기한까지 편집기 본문에 예상 조합이 나타나지 않음", "snapshot_unavailable":"편집기 상태를 읽을 수 없음",
                                 "replay_acknowledgment_timeout":"기한까지 재입력 이벤트 통과가 확인되지 않음",
                                 "outbound_not_observed":"직전 Safari 한글→영어 전환 근거가 없음", "round_trip_unconfirmed":"직전 영어 전환 완료가 확인되지 않음", "abc_layout_unconfirmed":"ABC 자판을 확인할 수 없음",
