@@ -10,18 +10,22 @@ extension MismatchRecoveryEngine {
         // Keep the first decision until teardown and the guarded restart consume it.
         if !suspended {
             monitorRestartAllowed = !recovering && !rollingBack &&
-                pending.isEmpty && retained.isEmpty && switchGate?.filter.consuming != true
+                pending.isEmpty && switchGate?.filter.consuming != true
         }
         suspended=true
         NSLog("입력 불일치 감시 중단: kind=%d recovering=%d retained=%d restart=%d",
               kind,recovering ? 1:0,retained.count+pending.count,monitorRestartAllowed ? 1:0)
         InputDiagnostics.shared.record("mismatch.monitor_tap_failed kind=\(kind) restart=\(monitorRestartAllowed)")
-        DispatchQueue.main.async{[weak self] in self?.suspend("tap_disabled")}
+        let epoch=recoveryEpoch
+        DispatchQueue.main.async{[weak self] in
+            guard let self,self.enabled,self.recoveryEpoch==epoch else{return}
+            self.suspend("tap_disabled")
+        }
     }
 
     func prepareIdleMonitorRestart()->Bool {
         guard monitorRestartAllowed,!enabled,tap==nil,!recovering,!rollingBack,
-              pending.isEmpty,retained.isEmpty else{return false}
+              pending.isEmpty else{return false}
         monitorRestartAllowed=false;suspended=false
         cancelDetection()
         InputDiagnostics.shared.record("mismatch.idle_monitor_restart")

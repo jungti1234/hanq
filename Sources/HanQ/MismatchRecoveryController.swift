@@ -11,6 +11,7 @@ final class MismatchRecoveryController: NSObject {
     var now:()->Double = {ProcessInfo.processInfo.systemUptime}
     var restartTimes:[Double]=[]
     var testStartMonitor:(()->Void)?
+    var prepareFreshObservation:()->Bool = { true }
     private var readinessReason=0
     private var startAttempts=0
     private var tapState=0
@@ -44,6 +45,19 @@ final class MismatchRecoveryController: NSObject {
             if tapState==2{reason=7;engine.monitorTapFailed(3);return}
         }
         let instant=now()
+        if engine.suspended,engine.freshObservationRequested {
+            // End all callbacks from the failed epoch before registering again.
+            // The controller’s readiness checks above apply even when tabs survive.
+            guard instant>=retryAt else{reason=11;return}
+            restartTimes.removeAll{instant-$0>=60}
+            guard restartTimes.count<3 else{reason=8;return}
+            guard !engine.recovering,!engine.rollingBack,engine.pending.isEmpty,
+                  engine.switchGate?.filter.consuming != true,engine.canObserve(),
+                  prepareFreshObservation() else{reason=9;return}
+            engine.closeSession()
+            engine.ledger=nil;engine.ledgerAfterRepair=nil
+            engine.freshObservationRequested=false;engine.monitorRestartAllowed=true
+        }
         if !engine.enabled,instant>=retryAt {
             if engine.suspended {
                 restartTimes.removeAll{instant-$0>=60}
@@ -71,7 +85,7 @@ final class MismatchRecoveryController: NSObject {
         }
         engine.incidentTrace.monitor(sample)
     }
-    func stop(){active=false;timer?.invalidate();timer=nil;engine.suspend("hanq_input_stopped");recordMonitor(stage:4,reason:1)}
+    func stop(){engine.freshObservationRequested=false;active=false;timer?.invalidate();timer=nil;engine.suspend("hanq_input_stopped");recordMonitor(stage:4,reason:1)}
     func prepareManualEdit()->Bool {
         guard !engine.recovering else{return false}
         engine.cancelDetection();return true

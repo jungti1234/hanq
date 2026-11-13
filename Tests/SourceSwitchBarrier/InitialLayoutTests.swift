@@ -116,7 +116,7 @@ func runInitialLayoutTests(){
                 let r=Rig(draft,draft.utf16.count);r.request()
                 if !pending{r.advance(2);check(!r.b.busy,"no idle wait for layout")}
                 for code in letters {check(r.sendKey(code) && r.sendKey(code,false),"both physical edges owned")}
-                r.advance(12)
+                r.advance(2)
                 check(r.sent.isEmpty && r.body==draft && r.writes==0,"unsettled layout never releases leading keys or edits draft")
                 r.phase = .ready;r.advance(letters.count*2+5)
                 check(r.sent==letters.flatMap{[Int($0),Int($0)+100]} && r.body==draft+wanted && r.writes==0 && r.saved.isEmpty && !r.b.busy,"full first run once, original intact")
@@ -129,7 +129,7 @@ func runInitialLayoutTests(){
     for prior in ["Fixture title 16","Existing draft!!"] {
         let r=Rig(prior,0);r.original="";r.position=0;r.request();r.advance(2)
         for c:UInt16 in [15,46,0]{check(r.sendKey(c) && r.sendKey(c,false),"all pre-delivery edges captured")}
-        r.advance(12);check(r.body==prior && r.sent.isEmpty,"old representation intact until native layout catches up")
+        r.advance(2);check(r.body==prior && r.sent.isEmpty,"old representation intact until native layout catches up")
         r.phase = .ready;r.advance(15)
         check(r.body=="금" && r.sent==[15,115,46,146,0,100] && r.writes==0 && !r.b.busy,"native editor replaces initial body exactly once")
     }
@@ -143,9 +143,17 @@ func runInitialLayoutTests(){
     do {
         let r=Rig("draft",5);r.nativeKoreanUnderABC=true;r.request();r.advance(2)
         for c:UInt16 in [15,40]{_=r.sendKey(c);_=r.sendKey(c,false)}
-        r.advance(60)
+        r.advance(3);check(r.sent.isEmpty,"first 60ms remains bounded readiness grace");r.advance(2);check(!r.sent.isEmpty,"persistent conflict releases first original by the first poll after 80ms");r.advance(15)
         check(r.body=="draft가" && r.sent==[15,115,40,140] && r.saved.isEmpty && r.writes==0 && !r.b.busy &&
               r.stages.contains("initial_original_resumed"),"persistent layout-only conflict never permanently parks healthy native input")
+    }
+    do {
+        let r=Rig("draft",5);r.request();r.advance(2)
+        for code:UInt16 in [15,40]{_=r.sendKey(code);_=r.sendKey(code,false)}
+        r.advance(12)
+        check(r.sent==[15,115,40,140] && r.body=="draftrk" && r.stages.contains("initial_transport_completed"),
+              "ASCII fallback waits only for transport; stale predicted Korean cannot capture the next key")
+        check(!r.b.busy && !r.sendKey(51) && r.saved.isEmpty && r.writes==0,"fresh edit stays native")
     }
     for cause in ["field","window","draft","caret","source","deadline","shortcut","missing"]{
         let r=Rig("rk",2);r.request();r.advance(2)

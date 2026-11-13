@@ -1300,6 +1300,9 @@ final class MismatchRecoveryEngine:NSObject {
         self.later(0.01){[weak self] in self?.attemptRollback(remaining:remaining-1,requested:true)}
     }
     func park(_ reason:String){
+        freshObservationRequested = recovering && !stopAfterRollback &&
+            reason != "tap_disabled" && reason != "switch_gate_disabled" &&
+            reason != "hanq_input_stopped" && switchGate?.filter.consuming != true
         monitorRestartAllowed=false
         monitorStopReason=6
         failureDiagnostic("park",reason)
@@ -1318,6 +1321,7 @@ final class MismatchRecoveryEngine:NSObject {
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
     @objc func copyPending(){
+        freshObservationRequested=false
         let text=(retained+pending).filter{$0.type == .keyDown}.map{event -> String in
             let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
             guard event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty,
@@ -1344,6 +1348,9 @@ final class MismatchRecoveryEngine:NSObject {
     var monitorFailureCount=0,monitorFailureKind=0,monitorStopReason=0,monitorReceivedEvents=0
     var monitorLastEventAt:Double?
     var monitorRestartAllowed=false
+    // Set by a terminated recovery, never by a registration failure alone.
+    // Retained events are a copy-only archive, never the next session’s queue.
+    var freshObservationRequested=false
     static func supports(_ app:NSRunningApplication?)->Bool {
         guard let app,app.processIdentifier != ProcessInfo.processInfo.processIdentifier else{return false}
         return !app.isTerminated
@@ -1374,7 +1381,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
     }
     func start(){
-        guard !enabled,tap==nil,!suspended,retained.isEmpty,AXIsProcessTrusted() else{return}
+        guard !enabled,tap==nil,!suspended,pending.isEmpty,AXIsProcessTrusted() else{return}
         guard KeyboardStateMirror.shared.start() else{log("state_boundary_failed");return}
         followsFrontmost=true;target=nil;ax=nil
         let mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}

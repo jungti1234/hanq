@@ -572,7 +572,7 @@ final class InputIncidentTrace {
             case "waiting_for_focus":return .focusWait
             case "waiting_for_selection_commit":return .selectionCommitWait
             case "waiting_for_source_commit":return .sourceCommitWait
-            case "editor_diverged_input_resumed","native_select_all_diverged_input_resumed":return .inputResumed
+            case "initial_transport_completed","editor_diverged_input_resumed","native_select_all_diverged_input_resumed":return .inputResumed
             case "editor_insertion_style_matched":return .editorStyleMatched
             case "editor_terminal_lf_matched":return .terminalLFMatched
             case "editor_terminal_lf_style_matched":return .terminalLFStyleMatched

@@ -62,6 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             InputIncidentTrace.shared.decision(.eligibility,.observationAllowed)
             return true
         }
+        controller.prepareFreshObservation = { [weak self] in
+            guard let self,!self.filter.consuming,!self.optionFilter.consuming,
+                  !self.selectionSourceSwitch.isPending else{return false}
+            return self.sourceSwitchBarrier.prepareFreshMismatchObservation()
+        }
         controller.engine.canBeginRepair = { [weak self] in
             guard let self else{return false}
             return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && self.onsetRecovery.prepareManualEdit()

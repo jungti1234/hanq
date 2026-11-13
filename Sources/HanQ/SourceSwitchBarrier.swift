@@ -114,6 +114,7 @@ final class SourceSwitchBarrier {
         }
         unfocusedSwitch=attempt
     }
+    private var resumedOriginalBatch=false
     private var heldStart:HeldStart?
     private struct NativeBatch {
         let field:AXUIElement,window:AXUIElement
@@ -195,6 +196,14 @@ final class SourceSwitchBarrier {
     }
     private var onsetInFlight:[OnsetDeliveryKey:[CGEvent]]=[:]
     private var onsetPendingCount=0
+    // Discard only observation history; a live edit, selection, queued event
+    // or outstanding receipt still belongs to its original transaction.
+    func prepareFreshMismatchObservation()->Bool {
+        guard !busy,!pendingSelectAll,!awaitingSelection,manualEdit==nil,
+              queued.isEmpty,repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay else{return false}
+        resetObservation();externalEditPending=false;cancelUnfocusedSwitch()
+        return true
+    }
     var diagnosticCounts:(queued:Int,awaitingOnset:Int) {(queued.count,onsetPendingCount)}
     /// The main tap precedes the onset gate. A key seen here may be held there,
     /// so do not predict it until that gate reports its actual delivery decision.
@@ -677,7 +686,9 @@ final class SourceSwitchBarrier {
             if alreadyQueued{fail("initial_context_changed");return true}
             return false
         }
-        let limit=candidate.at+1
+        // A layout report is not an editor receipt. Give it a few polls, not
+        // an entire source-switch transaction, to catch up. Never renew on input.
+        let limit=min(candidate.at+1,now()+0.080)
         if !busy{busy=true;transactionField=snap.field;deadline=limit}
         heldStart=HeldStart(snapshot:snap,window:window,until:limit);nextLayoutCheck=now()+0.016
         trace("initial_layout_wait");schedule();return true
@@ -704,6 +715,7 @@ final class SourceSwitchBarrier {
         if !snap.text.isEmpty {
             nativeBatch=NativeBatch(field:snap.field,window:win,layout:phase)
         }
+        resumedOriginalBatch = phase == .conflicting
         heldStart=nil;deadline=now()+1;trace(phase == .ready ? "initial_layout_ready":"initial_original_resumed");return true
     }
     private func recordNativeBatchEdge(_ event:CGEvent) {
@@ -728,12 +740,26 @@ final class SourceSwitchBarrier {
         resetObservation();field=s.field;ledger=MismatchReplayLedger(before:s.text,caret:s.selection.location)
         trace("initial_native_batch_observed");return true
     }
+    // The editor may continue to report ASCII after an ABC-layout fallback.
+    // Once every original has returned through the tap, stale text alone owns
+    // no more input. Do not make the next chord join that completed batch.
+    private func finishFallbackTransportIfDrained()->Bool {
+        guard resumedOriginalBatch,busy,target==nil,heldStart==nil,!pendingSelectAll,
+              !awaitingSelection,!waitingForRepairBoundary,!awaitingReplay,!externalEditPending,
+              queued.isEmpty,repairInFlight.isEmpty,onsetInFlight.isEmpty,isReady() else{return false}
+        resumedOriginalBatch=false;generation+=1;scheduled=false;busy=false
+        transactionField=nil;waitReason=nil;repairWaitStarted=nil
+        // This is a transport completion, not a verified editor state.
+        finishDiagnosticRequest(4);resetObservation();trace("initial_transport_completed")
+        return true
+    }
     /// Called before the normal key filters. Only our own one-at-a-time replay bypasses the queue.
     func receive(_ type:CGEventType,_ event:CGEvent)->Bool {
         if event.getIntegerValueField(.eventSourceUserData)==Self.marker {
             event.setIntegerValueField(.eventSourceUserData,value:0)
             awaitingReplay=false;schedule();return false
         }
+        if finishFallbackTransportIfDrained(){return false}
         beginRepairBoundary(type,event)
         if unfocusedSwitch != nil{observeUnfocusedInput(type,event)}
         if !busy,entry != nil { _=holdFirstIfNeeded(event,alreadyQueued:false) }
@@ -755,7 +781,10 @@ final class SourceSwitchBarrier {
                 return false
             }
         }
-        if type == .keyDown,target != nil,switchSnapshot == nil,
+        // A non-switch modifier starts a new chord. If queued first it would
+        // prevent the following original key from using this escape path.
+        let startsNewInput = type == .keyDown || (type == .flagsChanged && event.getIntegerValueField(.keyboardEventKeycode) != 54)
+        if startsNewInput,target != nil,switchSnapshot == nil,!externalEditPending,manualEdit==nil,
            !pendingSelectAll,!awaitingSelection,
            isReady(),repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay,
            queued.allSatisfy({$0.type == .flagsChanged && $0.getIntegerValueField(.keyboardEventKeycode)==54}),
@@ -781,7 +810,7 @@ final class SourceSwitchBarrier {
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
         cancelUnfocusedSwitch()
         if heldStart != nil{fail("initial_source_changed")}
-        entry=nil;nativeBatch=nil
+        entry=nil;nativeBatch=nil;resumedOriginalBatch=false
         discardInvalidDeferredHistory()
         refreshIdleField()
         if let edit=manualEdit {
@@ -856,6 +885,7 @@ final class SourceSwitchBarrier {
         // The next replay cannot advance until the previous event reaches the
         // main tap. AX work here only delays that acknowledgment.
         guard !awaitingReplay else{wait("waiting_for_replay_receipt");return}
+        if finishFallbackTransportIfDrained(){return}
         if waitingForRepairBoundary {
             guard !externalEditPending,let field,ledger != nil else{fail("repair_not_verified");return}
             if transactionField == nil {transactionField=field}
@@ -972,7 +1002,7 @@ final class SourceSwitchBarrier {
         awaitingReplay=true;deadline=now()+1.0;send(event);schedule()
     }
     func fail(_ reason:String){
-        heldStart=nil;entry=nil
+        heldStart=nil;entry=nil;resumedOriginalBatch=false
         finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
         manualEdit=nil;manualEditSequence+=1
 

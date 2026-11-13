@@ -744,6 +744,23 @@ do {
  check(b.request(ko),"styled web request");b.step();b.step();check(source==ko && !b.busy,"styled web boundary completes without text edits")
  b.fail("test_cleanup")
 }
+// A divergent switch with a right release followed by a second modifier
+// must not capture the letter and edit keys of the user's new chord.
+do {
+ let b=SourceSwitchBarrier();var body="",posted=0,kept=0,settled=0,selected=0
+ b.read={.init(field:field,text:body,selection:NSRange(location:body.utf16.count,length:0))}
+ b.source={en};b.select={_ in selected+=1;return noErr};b.send={_ in posted+=1}
+ b.retained={kept += $0.count};b.cancelledModifiers={settled += $0.count}
+ b.observe(.keyDown,key(0));body="different";check(b.request(ko),"new switch");b.step()
+ let right=key(54);right.type = .flagsChanged
+ check(b.receive(.flagsChanged,right),"mapped release owned")
+ let mod=key(55,.maskCommand);mod.type = .flagsChanged
+ check(!b.receive(.flagsChanged,mod) && !b.busy,"new native chord cancels stale switch before ownership")
+ for code:UInt16 in [11,51,51] {
+    check(!b.receive(.keyDown,key(code)) && !b.receive(.keyUp,key(code)),"new chord and edits remain native")
+ }
+ check(settled==1 && posted==0 && kept==0 && selected==0,"only mapped modifier settled; no late replay or select")
+}
 // A contradictory editor body must not capture the next original key. Settle
 // only suppressed modifier edges; no text replay or source change is permitted.
 for blocked in [false,true] {
@@ -770,8 +787,9 @@ do {
 do {
  let b=SourceSwitchBarrier();var text="",range=NSRange(location:0,length:0),settled=0
  b.read={.init(field:field,text:text,selection:range)};b.source={en};b.cancelledModifiers={settled += $0.count}
- b.observe(.keyDown,key(0));text="external";range=NSRange(location:8,length:0);check(b.request(ko),"unmapped modifier boundary");b.step()
+ b.observe(.keyDown,key(0));text="external";range=NSRange(location:8,length:0);check(b.request(ko),"unmapped modifier boundary")
  let left=key(55,.maskCommand);left.type = .flagsChanged;check(b.receive(.flagsChanged,left),"left Command remains owned by the existing ordered queue")
+ b.step() // contradictory snapshot arrives after the modifier is already owned
  check(b.receive(.keyDown,key(11,.maskCommand)) && b.busy && settled==0,"unmapped modifier is never discarded to resume following input")
  b.fail("test_cleanup")
 }
