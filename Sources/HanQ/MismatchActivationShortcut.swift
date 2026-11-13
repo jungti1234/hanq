@@ -5,6 +5,7 @@ import Carbon
 // A Korean TIS ID can coexist with ABC translation and a missing IME override.
 final class MismatchActivationShortcut {
     private(set) var busy=false
+    private(set) var switchKeyPosted=false
     private var generation=0
     private var release:(()->Void)?
     private lazy var eventSource=CGEventSource(stateID:.privateState)
@@ -26,7 +27,7 @@ final class MismatchActivationShortcut {
     }
     var configured:Bool {guard let (code,flags)=configuration() else{return false};return code==49 && flags == .maskControl}
     deinit{cancel()}
-    func cancel(){generation+=1;release?();release=nil;busy=false}
+    func cancel(){generation+=1;release?();release=nil;busy=false;switchKeyPosted=false}
     func request(marker:Int64,recipient:NSRunningApplication?,valid:@escaping ()->Bool)->OSStatus {
         guard !busy,configured,canPost(),modifiersClear(),valid(),let source=eventSource else{return -50}
         func event(_ code:CGKeyCode,_ down:Bool,_ type:CGEventType,_ flags:CGEventFlags)->CGEvent? {
@@ -37,7 +38,7 @@ final class MismatchActivationShortcut {
               let down=event(49,true,.keyDown,.maskControl),let up=event(49,false,.keyUp,.maskControl) else{return -50}
         let cleanup=releasePosted
         var spaceHeld=false,controlHeld=true
-        busy=true;generation+=1;let token=generation
+        switchKeyPosted=false;busy=true;generation+=1;let token=generation
         release={
             let pid=recipient?.isTerminated==false ? recipient?.processIdentifier:nil
             if spaceHeld{cleanup(up,pid);spaceHeld=false}
@@ -47,7 +48,7 @@ final class MismatchActivationShortcut {
         schedule(0.05){[weak self] in
             guard let self,self.generation==token else{return}
             guard valid(),self.canPost() else{self.cancel();return}
-            spaceHeld=true;self.post(down)
+            spaceHeld=true;self.switchKeyPosted=true;self.post(down)
             self.schedule(0.03){[weak self] in
                 guard let self,self.generation==token else{return}
                 guard valid(),self.canPost() else{self.cancel();return}

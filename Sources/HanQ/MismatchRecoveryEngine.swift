@@ -288,8 +288,8 @@ final class MismatchRecoveryEngine:NSObject {
             self.asyncRequest=nil
             if self.sourceWorkPaused{self.asyncReady=nil;self.deferRecovery(retry);return}
             if self.traceLatency{self.log("async_snapshot_finished",["id":id,"stage":stage,"durationMs":result.durationMs,"focusMs":result.focusMs,"attributesMs":result.attributesMs,"deliveryDelayMs":(ProcessInfo.processInfo.systemUptime-result.completedAt)*1000,"reason":result.reason])}
-            guard self.fastRecoveryContext() else{self.park(stage+"_unsafe_context");return}
-            guard ProcessInfo.processInfo.systemUptime<self.recoveryDeadline else{self.park(stage+"_deadline");return}
+            guard self.fastRecoveryContext() else{self.park(stage+"_unsafe_context",site:stage);return}
+            guard ProcessInfo.processInfo.systemUptime<self.recoveryDeadline else{self.park(stage+"_deadline",site:stage);return}
             guard ProcessInfo.processInfo.systemUptime-result.completedAt<0.05 else{
                 if self.rollingBack{self.rollbackCaretObservedAt=nil}
                 self.log("async_snapshot_discarded",["reason":"stale_delivery","stage":stage])
@@ -305,10 +305,10 @@ final class MismatchRecoveryEngine:NSObject {
         if sourceWorkPaused{deferRecovery(retry);return nil}
         let previousStage=snapshotStage;snapshotStage=stage
         defer{snapshotStage=previousStage}
-        guard ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park(stage+"_deadline");return nil}
+        guard ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park(stage+"_deadline",site:stage);return nil}
         let observed:MismatchSnapshot?
         if asyncRecoveryReads && (testSnapshot==nil || testAsyncRead != nil) {
-            guard fastRecoveryContext() else{park(stage+"_unsafe_context");return nil}
+            guard fastRecoveryContext() else{park(stage+"_unsafe_context",site:stage);return nil}
             if let ready=asyncReady,ready.epoch==recoveryEpoch,ready.stage==stage {
                 asyncReady=nil;unavailableReason=ready.result.reason;observed=ready.result.snapshot
             }else{
@@ -317,14 +317,14 @@ final class MismatchRecoveryEngine:NSObject {
         }else{observed=snapshot()}
         if let snap=observed{
             snapshotWaitStarted=nil
-            guard let field=planElement,CFEqual(snap.element,field) else{park(stage+"_field_changed");return nil}
+            guard let field=planElement,CFEqual(snap.element,field) else{park(stage+"_field_changed",site:stage);return nil}
             return snap
         }
         if rollingBack{rollbackCaretObservedAt=nil}
-        if ["target_not_frontmost","secure_input","secure_text_field","not_supported_text_field","accessibility_permission","focus_changed_during_snapshot"].contains(unavailableReason){park(stage+"_"+unavailableReason);return nil}
+        if ["target_not_frontmost","secure_input","secure_text_field","not_supported_text_field","accessibility_permission","focus_changed_during_snapshot"].contains(unavailableReason){park(stage+"_"+unavailableReason,site:stage);return nil}
         let now=ProcessInfo.processInfo.systemUptime
         if snapshotWaitStarted==nil{snapshotWaitStarted=now;log("snapshot_retry_started",["stage":stage,"reason":unavailableReason])}
-        guard now-(snapshotWaitStarted ?? now)<0.75,now<recoveryDeadline else{park(stage+"_snapshot_timeout");return nil}
+        guard now-(snapshotWaitStarted ?? now)<0.75,now<recoveryDeadline else{park(stage+"_snapshot_timeout",site:stage);return nil}
         later(0.01,retry);return nil
     }
     func post(_ event:CGEvent,at tap:CGEventTapLocation = .cgSessionEventTap) {
@@ -617,7 +617,7 @@ final class MismatchRecoveryEngine:NSObject {
             if perKeyAX {
                 if let snap=sampled ?? snapshot(includeContent:false){
                     guard let element=planElement,CFEqual(snap.element,element) else{park("focus_changed_during_recovery");return Unmanaged.passUnretained(event)}
-                }else if ["target_not_frontmost","secure_input","secure_text_field","not_supported_text_field","accessibility_permission"].contains(unavailableReason){park("unsafe_context_during_recovery");return Unmanaged.passUnretained(event)}
+                }else if ["target_not_frontmost","secure_input","secure_text_field","not_supported_text_field","accessibility_permission"].contains(unavailableReason){park("unsafe_context_during_recovery",condition:unavailableReason);return Unmanaged.passUnretained(event)}
             }else if !fastRecoveryContext(){
                 park("unsafe_context_during_recovery");return Unmanaged.passUnretained(event)
             }
@@ -860,11 +860,11 @@ final class MismatchRecoveryEngine:NSObject {
         guard let current=recoverySnapshot("pre_edit",retry:{[weak self] in self?.replaceAndReplay(candidate,before)}) else{return}
         guard CFEqual(current.element,before.element) else{abort("pre_edit_field_changed");return}
         var candidate=candidate
-        if !candidate.matches(text:current.text,selection:current.selection) {
-            guard currentSource()==recoverySourceID,
-                  let restored=candidate.restoredKoreanPlan(text:current.text,selection:current.selection) else{
+        if let condition=candidate.mismatchCondition(text:current.text,selection:current.selection) {
+            guard currentSource()==recoverySourceID else{abort("pre_edit_mismatch",condition:"source_changed");return}
+            guard let restored=candidate.restoredKoreanPlan(text:current.text,selection:current.selection) else{
                 log("pre_edit_context_failed",["source":currentSource(),"text":current.text,"selection":[current.selection.location,current.selection.length],"expectedRoman":candidate.expected ?? ""])
-                abort("pre_edit_mismatch");return
+                abort("pre_edit_mismatch",condition:condition);return
             }
             log("pre_edit_korean_restored",["text":current.text,"physicalKeys":candidate.replayRoman,"pendingEvents":pending.count])
             candidate=restored;currentPlan=restored
@@ -886,10 +886,10 @@ final class MismatchRecoveryEngine:NSObject {
     func awaitSelection(_ candidate:MismatchRecoveryPlan,_ before:MismatchSnapshot,_ range:NSRange,remaining:Int){
         guard recovering,!rollingBack else{return}
         guard let selected=recoverySnapshot("selection",retry:{[weak self] in self?.awaitSelection(candidate,before,range,remaining:remaining)}) else{return}
-        guard CFEqual(selected.element,before.element) else{abort("selection_context_changed");return}
+        guard CFEqual(selected.element,before.element) else{abort("selection_context_changed",condition:"field_changed");return}
         var candidate=candidate
         if selected.text != before.text {
-            guard let recaptured=candidate.recapturingASCIICase(text:selected.text) else{abort("selection_context_changed");return}
+            guard let recaptured=candidate.recapturingASCIICase(text:selected.text) else{abort("selection_context_changed",condition:"snapshot_text_changed");return}
             candidate=recaptured;currentPlan=recaptured
         }
         if currentSource() != recoverySourceID {
@@ -919,7 +919,7 @@ final class MismatchRecoveryEngine:NSObject {
     func restoreInterruptedSource(_ stage:String,targetSource:String?=nil,resume:@escaping ()->Void){
         if sourceWorkPaused{deferRecovery{[weak self] in self?.restoreInterruptedSource(stage,targetSource:targetSource,resume:resume)};return}
         let targetSource=targetSource ?? recoverySourceID
-        guard interruptedSourceRestores<2,ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park(stage+"_source_restore_exhausted");return}
+        guard interruptedSourceRestores<2,ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park(stage+"_source_restore_exhausted",site:stage);return}
         if systemSwitch.busy{later(0.01){[weak self] in self?.restoreInterruptedSource(stage,targetSource:targetSource,resume:resume)};return}
         interruptedSourceRestores+=1
         log("interrupted_source_restore",["stage":stage,"source":currentSource(),"targetSource":targetSource,"intendedSource":intendedSource,"attempt":interruptedSourceRestores,"pendingEvents":pending.count])
@@ -927,7 +927,7 @@ final class MismatchRecoveryEngine:NSObject {
         // Space can be lost among modifier transitions or toggle the wrong way.
         let result=chooseSource(targetSource)
         log("interrupted_source_direct_selection",["target":targetSource,"result":result,"stage":stage])
-        guard result==noErr else{park(stage+"_source_restore_failed");return}
+        guard result==noErr else{park(stage+"_source_restore_failed",site:stage);return}
         waitSource(targetSource,completion:resume)
     }
     func replayCandidate(_ candidate:MismatchRecoveryPlan){
@@ -1011,10 +1011,16 @@ final class MismatchRecoveryEngine:NSObject {
         awaitKorean(candidate,remaining:remaining)
     }
     func retryKorean(_ candidate:MismatchRecoveryPlan,_ observed:MismatchSnapshot){
-        guard recovering,!rollingBack,let field=planElement,CFEqual(observed.element,field) else{park("retry_context_not_exact_roman");return}
+        guard recovering else{park("recovery_inactive");return}
+        guard !rollingBack else{park("rollback_active");return}
+        guard let field=planElement else{park("plan_field_missing");return}
+        guard CFEqual(observed.element,field) else{park("observed_field_changed");return}
         guard let fresh=recoverySnapshot("retry_korean",retry:{[weak self] in self?.retryKorean(candidate,observed)}) else{return}
-        guard CFEqual(fresh.element,field),fresh.text==observed.text,fresh.selection==observed.selection,
-              currentSource()==recoverySourceID,candidate.matches(text:fresh.text,selection:fresh.selection) else{park("retry_context_not_exact_roman");return}
+        guard CFEqual(fresh.element,field) else{park("field_changed");return}
+        guard fresh.text==observed.text else{park("snapshot_text_changed");return}
+        guard fresh.selection==observed.selection else{park("snapshot_selection_changed");return}
+        guard currentSource()==recoverySourceID else{park("source_changed");return}
+        if let reason=candidate.mismatchCondition(text:fresh.text,selection:fresh.selection){park(reason);return}
         var retry=candidate;retry.captureObserved(text:fresh.text);currentPlan=retry
         // Every replayed key is present in a proved failure rendering. Re-editing
         // this exact range cannot duplicate it; preserve the following queue.
@@ -1030,7 +1036,7 @@ final class MismatchRecoveryEngine:NSObject {
         let retryBudget=koreanRetries==1 ? 0.4+activationBudget+Double(candidate.codes.count)*Self.pacedReplayInterval+0.28:0.4
         guard koreanRetries<2,ProcessInfo.processInfo.systemUptime+retryBudget<recoveryDeadline else{
             log("korean_retry_exhausted",["attempts":koreanRetries+1,"pendingEvents":pending.count])
-            abort("korean_retry_exhausted");return
+            abort("korean_retry_exhausted",condition:koreanRetries>=2 ? "retry_count_exhausted":"retry_time_insufficient");return
         }
         koreanRetries+=1
         log("korean_retry",["retry":koreanRetries,"pendingEvents":pending.count,"roman":retry.roman])
@@ -1156,7 +1162,8 @@ final class MismatchRecoveryEngine:NSObject {
             if recovering{later(0){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining,roman:roman,reopenComposition:reopenComposition,sourceOnly:sourceOnly)}}
             return
         }
-        if MismatchRecoveryPlan.sameEditorText(snap.text,expected.text),snap.selection==expected.selection {
+        let textMatches=MismatchRecoveryPlan.sameEditorText(snap.text,expected.text)
+        if textMatches,snap.selection==expected.selection {
             if reopenComposition,expected.segments.last?.source==recoverySourceID {
                 log("buffer_composition_reopen",["text":snap.text,"postedEvents":postedBuffered])
                 repairBufferedRoman(expected,snap);return
@@ -1212,7 +1219,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         guard remaining>0 else{
             log("buffer_text_failed",["expected":expected.text,"actual":snap.text,"selection":[snap.selection.location,snap.selection.length]])
-            park("buffer_result_not_verified");return
+            park("buffer_result_not_verified",condition:textMatches ? "candidate_caret_mismatch":"snapshot_text_changed");return
         }
         later(0.01){[weak self] in self?.verifyBuffered(expected,before:before,remaining:remaining-1,roman:roman,reopenComposition:reopenComposition,sourceOnly:sourceOnly)}
     }
@@ -1263,22 +1270,25 @@ final class MismatchRecoveryEngine:NSObject {
         if let snap=verifiedSnapshot{log("after_replay_snapshot",["text":snap.text,"source":lastSource,"selection":[snap.selection.location,snap.selection.length]])}
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
-    func abort(_ reason:String){
+    func abort(_ reason:String,condition:String?=nil,site:String = #function){
         guard recovering else{return}
         if rollingBack{return}
         activationShortcut.cancel()
         recoveryEpoch+=1;asyncReady=nil
         rollingBack=true;rollbackReason=reason;plan=nil
         rollbackCaretObservedAt=nil;rollbackFirstEditDelivered=false
-        failureDiagnostic("abort",reason)
+        failureDiagnostic("abort",reason,site:site,condition:condition)
         log("rollback_started",["reason":reason,"originalRoman":currentPlan?.roman ?? "","pendingEvents":pending.count])
         attemptRollback(remaining:15,requested:false)
     }
     func attemptRollback(remaining:Int,requested:Bool){
         guard recovering,rollingBack else{return}
-        guard let candidate=currentPlan,let field=planElement,!replayStarted else{park("rollback_context_not_intact");return}
+        guard let candidate=currentPlan else{park("rollback_context_not_intact",condition:"rollback_plan_missing");return}
+        guard let field=planElement else{park("rollback_context_not_intact",condition:"plan_field_missing");return}
+        guard !replayStarted else{park("rollback_context_not_intact",condition:"rollback_replay_started");return}
         guard let snap=recoverySnapshot("rollback",retry:{[weak self] in self?.attemptRollback(remaining:remaining,requested:requested)}) else{return}
-        guard CFEqual(snap.element,field),snap.text==candidate.expected else{park("rollback_context_not_intact");return}
+        guard CFEqual(snap.element,field) else{park("rollback_context_not_intact",condition:"field_changed");return}
+        guard snap.text==candidate.expected else{park("rollback_context_not_intact",condition:"rollback_text_changed");return}
         let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
         let repairRange=NSRange(location:candidate.caret,length:candidate.roman.utf16.count)
         guard snap.selection==caret || snap.selection==repairRange else{park("rollback_unexpected_selection");return}
@@ -1308,13 +1318,13 @@ final class MismatchRecoveryEngine:NSObject {
         guard remaining>0 else{park("rollback_caret_timeout");return}
         self.later(0.01){[weak self] in self?.attemptRollback(remaining:remaining-1,requested:true)}
     }
-    func park(_ reason:String){
+    func park(_ reason:String,condition:String?=nil,site:String = #function){
         freshObservationRequested = recovering && !stopAfterRollback &&
             reason != "tap_disabled" && reason != "switch_gate_disabled" &&
             reason != "hanq_input_stopped" && switchGate?.filter.consuming != true
         monitorRestartAllowed=false
         monitorStopReason=6
-        failureDiagnostic("park",reason)
+        failureDiagnostic("park",reason,site:site,condition:condition)
         clearSourceInteraction()
         // Focus/text changes cannot be undone safely. Keep the queue in memory and
         // expose it to the user, and never inject it into a different field.
@@ -1371,7 +1381,8 @@ final class MismatchRecoveryEngine:NSObject {
         let reasons=["pre_edit_mismatch","selection_failed","selection_not_applied","selected_text_not_verified","english_selection_failed","korean_selection_failed","source_switch_timeout","delete_not_verified","rollback_context_not_intact","buffer_result_not_verified","delivery_source_timeout","delivery_source_selection_failed","buffer_roman_retry_unavailable","source_menu_focus_changed","menu_source_restore_failed","caps_during_unsettled_source","menu_during_unsettled_source","final_source_context_changed","korean_retry_exhausted","recovery_deadline","paced_replay_unsafe_context","paced_replay_source_changed","paced_replay_allocation_failed","activation_context_changed","activation_boundary_changed","partial_replay_retry_exhausted","rollback_delivery_context_changed","rollback_unexpected_selection","rollback_caret_timeout","rollback_caret_rejected","rollback_source_failed"]
         return reason.hasSuffix("_deadline") ? 20:(reasons.firstIndex(of:reason).map{$0+1} ?? 0)
     }
-    func failureDiagnostic(_ stage:String,_ reason:String) {
+    func failureDiagnostic(_ stage:String,_ reason:String,site:String,condition:String?) {
+        incidentTrace.recoveryFailure(rollback:stage=="abort",site:site,reason:condition ?? reason)
         let code=Self.failureReasonCode(reason)
         // A recurrence can be inspected without restarting into diagnostic
         // mode. Fixed ordinal states only; no editor/text/key/clipboard data.

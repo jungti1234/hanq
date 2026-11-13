@@ -306,6 +306,15 @@ def capture_backlog(value):
         if not isinstance(d,dict) or len(d)>8 or any(k not in ['1','2','3','4','5','6','7','8'] or type(v) is not int or v<=0 for k,v in d.items()):raise ValueError('invalid capture backlog counters')
     return value
 
+def recovery_failures(rows):
+    limits = {'milliseconds': (0, 9_000_000_000_000_000), 'action': (1, 4), 'stage': (0, 67), 'condition': (0, 163)}
+    if not isinstance(rows, list) or len(rows) > 16:
+        raise ValueError('invalid recovery failures')
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != set(limits) or any(type(row[k]) is not int or not lo <= row[k] <= hi for k, (lo, hi) in limits.items()):
+            raise ValueError('invalid recovery failure')
+    return rows
+
 def monitor_status(value):
     keys={'observedAtMilliseconds','stage','reason','tapState','active','enabled','suspended','recovering','rollingBack','restartAllowed','pending','retained','attempts','failures','failureKind','stopReason','receivedEvents'}
     booleans={'active','enabled','suspended','recovering','rollingBack','restartAllowed'}
@@ -628,7 +637,7 @@ def summarize(data):
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,
-            'capture_preservation':preservation,'capture_backlog':backlog,'monitor_status':monitor,
+            'capture_preservation':preservation,'capture_backlog':backlog,'monitor_status':monitor, 'recovery_failures':recovery_failures(data.get('recoveryFailures', [])),
             'observation_wait_totals':observation_totals,'observation_lock_waits':observation_lock_waits,'capture_timing':capture_timing,
             'decision_wait_totals':timing_totals,'decision_lock_waits':lock_waits,'decision_delays':decision_delays,'observation_delays':observation_delays,
             'detection_decision_counts':dict(decision_counts),'correlated_detection_decisions':event_decisions,

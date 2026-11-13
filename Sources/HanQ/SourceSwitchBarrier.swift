@@ -135,8 +135,11 @@ final class SourceSwitchBarrier {
     var source:()->String = InputSourceAccess.currentID
     var ready:()->Bool = {true}
     var select:(String)->OSStatus = InputSourceAccess.select
+    var webActivation: ((String, AXUIElement) -> OSStatus?)?
+    private var rightCommandRequest = false
     var selectionPending:()->Bool = {false}
-    var cancelSelection:()->Void = {}
+    var webActivationLimit: () -> Double? = { nil }
+    var cancelSelection:(String)->Void = { _ in }
     private var switchSnapshot:Snapshot?
     var didSelect:(CGEventTimestamp)->Void = {_ in}
     var send:(CGEvent)->Void = {$0.post(tap:.cgSessionEventTap)}
@@ -198,9 +201,12 @@ final class SourceSwitchBarrier {
     private var onsetPendingCount=0
     // Discard only observation history; a live edit, selection, queued event
     // or outstanding receipt still belongs to its original transaction.
+    var canPrepareFreshMismatchObservation:Bool {
+        !busy && !pendingSelectAll && !awaitingSelection && manualEdit==nil &&
+            queued.isEmpty && repairInFlight.isEmpty && onsetInFlight.isEmpty && !awaitingReplay
+    }
     func prepareFreshMismatchObservation()->Bool {
-        guard !busy,!pendingSelectAll,!awaitingSelection,manualEdit==nil,
-              queued.isEmpty,repairInFlight.isEmpty,onsetInFlight.isEmpty,!awaitingReplay else{return false}
+        guard canPrepareFreshMismatchObservation else{return false}
         resetObservation();externalEditPending=false;cancelUnfocusedSwitch()
         return true
     }
@@ -807,7 +813,8 @@ final class SourceSwitchBarrier {
         guard queued.count<256,let copy=event.copy() else{fail("buffer_limit");return false}
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
-    @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
+    @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,rightCommand:Bool=false,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
+        rightCommandRequest = rightCommand
         cancelUnfocusedSwitch()
         if heldStart != nil{fail("initial_source_changed")}
         entry=nil;nativeBatch=nil;resumedOriginalBatch=false
@@ -947,7 +954,13 @@ final class SourceSwitchBarrier {
                 guard matches(snap) else{waitForMatch(snap);return}
                 switchSnapshot=snap
             }
-            let result=select(target)
+            if rightCommandRequest, webActivationLimit() != nil, let original = switchSnapshot,
+               original.text != snap.text || original.selection != snap.selection {
+                fail("pre_edit_context_changed"); return
+            }
+            let activation = rightCommandRequest ? webActivation?(target, snap.field) : nil
+            let result = activation ?? select(target)
+            if activation != nil, let limit = webActivationLimit() { deadline = max(deadline, limit) }
             if selectionPending(){wait("waiting_for_source_commit");return}
             guard result==noErr,source()==target else{fail("switch_failed");return}
             let snap=switchSnapshot!;switchSnapshot=nil
@@ -1006,7 +1019,7 @@ final class SourceSwitchBarrier {
         finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
         manualEdit=nil;manualEditSequence+=1
 
-        cancelSelection();switchSnapshot=nil
+        cancelSelection(reason);switchSnapshot=nil
         repairInFlight.removeAll()
         onsetInFlight.removeAll();onsetPendingCount=0
         repairWaitStarted=nil;waitReason=nil

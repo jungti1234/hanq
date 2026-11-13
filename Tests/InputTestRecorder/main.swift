@@ -19,6 +19,16 @@ let identifiedTrace=try RecorderTrace.decode(JSONSerialization.data(withJSONObje
 check(identifiedTrace.runID==runID,"anonymous run ID accepted")
 let identifiedRoundtrip=try RecorderTrace.decode(JSONEncoder().encode(identifiedTrace))
 check(identifiedRoundtrip.runID==runID,"run identity survives sanitized roundtrip")
+let failure=["milliseconds":15,"action":2,"stage":29,"condition":74]
+let webFailure=["milliseconds":18,"action":3,"stage":42,"condition":95]
+let directFallback=["milliseconds":19,"action":4,"stage":43,"condition":163]
+let recorded=valid.merging(["recoveryFailures":[failure,webFailure,directFallback]]){_,v in v}
+let decodedFailure=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:recorded))
+check(decodedFailure.recoveryFailures==[failure,webFailure,directFallback],"bounded failure codes survive the recorder")
+for unexpected:Any in [[failure.merging(["text":1]){_,v in v}], [failure.merging(["stage":999]){_,v in v}], Array(repeating:failure,count:17), [["condition":"private"]]] {
+    let invalid=valid.merging(["recoveryFailures":unexpected]){_,v in v}
+    check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:invalid)))==nil,"unrecognized failure payload rejected")
+}
 let unidentified=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid))
 check(unidentified.runID==nil,"old trace remains unmeasured")
 for invalid:Any in ["PRIVATE_RECORDER_TEXT","",NSNull(),42,true] {
@@ -155,7 +165,7 @@ for bad in [timedObs.merging(["waits":[:]]){_,n in n},timedObs.merging(["waits":
 }
 let timerWait=frame.merging(["kind":9,"category":9,"observationTiming":genericTiming]){_,n in n}
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid.merging(["frames":[timerWait]]){_,n in n}))) != nil,"typed timer wait frame accepted")
-for bad in [timerWait.merging(["edge":32]){_,n in n},timerWait.merging(["category":10]){_,n in n},timerWait.merging(["event":1]){_,n in n},observedFrame.merging(["kind":8]){_,n in n}] {
+for bad in [timerWait.merging(["edge":32]){_,n in n},timerWait.merging(["category":11]){_,n in n},timerWait.merging(["event":1]){_,n in n},observedFrame.merging(["kind":8]){_,n in n}] {
  check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:valid.merging(["frames":[bad]]){_,n in n})))==nil,"invalid wait frame or kind mixing rejected")
 }
 print("PASS: \(checks) recorder metadata/privacy, source identity, bounded files, private modes, lifecycle and result checks; no global input or ChatGPT access")

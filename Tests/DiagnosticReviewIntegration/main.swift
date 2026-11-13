@@ -21,7 +21,7 @@ defer { try? fm.removeItem(at: root) }
 let directory = root.appendingPathComponent("source")
 let clock = TestClock()
 let policy = DiagnosticLogRetentionPolicy(maximumAutomaticFiles: 4, maximumAutomaticBytes: 1_000_000, maximumManualBytes: 1_000_000)
-let trace = InputIncidentTrace(destination: directory, persistentOwnership: true, clock: clock.now, retention: policy)
+let trace = InputIncidentTrace(secureInput:{false},destination: directory, persistentOwnership: true, clock: clock.now, retention: policy)
 func manifest(_ directory: URL) throws -> [String: Data] {
     Dictionary(uniqueKeysWithValues: try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).map {
         ($0.lastPathComponent, Data(SHA256.hash(data: try Data(contentsOf: $0))))
@@ -42,6 +42,10 @@ func complete(_ trace: InputIncidentTrace, automatic: Bool = false) {
 trace.context()
 let read = trace.beginRead(.mismatchAX)
 trace.endRead(.mismatchAX, read)
+trace.recoveryFailure(rollback:true,site:"awaitSelection",reason:"selection_failed")
+trace.recoveryFailure(rollback:false,site:"attemptRollback",reason:"rollback_text_changed")
+trace.recordFailure(action:3,site:"safariInputActivation",reason:"source_switch_timeout")
+trace.recordFailure(action:3,site:"safariActivationRetry",reason:"source_switch_timeout")
 trace.mark(); trace.flush()
 let pending = try manifest(directory)
 let pendingFiles = pending.keys.filter { $0.hasPrefix("incident-") }.count
@@ -53,6 +57,13 @@ try snapshot(trace, to: firstURL)
 let first = try DiagnosticReviewSnapshot(directory: firstURL)
 check(fm.fileExists(atPath:firstURL.appendingPathComponent("review-catalog.json").path),"writer supplies a lightweight review catalog")
 check(first.incidents.count == 1 && first.incidents[0].complete, "review waits for the pending real pre/post pair")
+for document in try first.incidents[0].documents.values {
+    let rows=document.sections.first(where:{$0.title=="최근 자동 복구 실패 단계와 조건"})?.fields
+    check(rows?.count==4 && rows?.first?.value.contains("selection_failed")==true &&
+          rows?[1].value.contains("rollback_text_changed")==true &&
+          rows?[2].value.contains("Safari 두벌식 입력기 재활성화")==true && rows?[2].value.contains("source_switch_timeout")==true &&
+          rows?.last?.value.contains("Safari 두벌식 재요청 결과 확인")==true && rows?.last?.value.contains("source_switch_timeout")==true && rows?.last?.label.contains("전환 보완 중단")==true, "both manual phases show the original failure followed by the rollback failure")
+}
 check(trace.enabled, "review does not disable collection")
 let original = try manifest(directory)
 let copyURL = root.appendingPathComponent("copy")

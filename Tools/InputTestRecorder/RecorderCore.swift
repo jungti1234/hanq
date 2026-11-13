@@ -395,6 +395,7 @@ struct RecorderTrace: Codable {
     let schema: Int
     let runID:String?
     let clockOriginMicros:Int?
+    let recoveryFailures:[[String:Int]]?
     let monitorStatus:RecorderMonitorStatus?
     let build: String
     let bestEffort, appReceiptVerified, correlationIsHeuristic, lossCountersMayLag: Bool
@@ -472,7 +473,7 @@ struct RecorderTrace: Codable {
     static func decode(_ data: Data) throws -> RecorderTrace {
         guard data.count <= 4 * 1024 * 1024,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","monitorStatus","shapeBaselines","capturePreservation","captureBacklog"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
+              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
               let rows = object["frames"] as? [[String: Any]], rows.count <= 16384 else { throw RecorderError.invalidTrace }
         if let value=object["capturePreservation"] {
             guard let v=value as? [String:Any],Set(v.keys).subtracting(["closedMilliseconds"])==Set(["deferred","requests","postCapacity","postOmittedFrames","closed","endedOnShutdown"]),let requests=v["requests"] as? [[String:Any]],requests.allSatisfy({Set($0.keys)==Set(["trigger","milliseconds","afterSequence","lane","detail","event","inputOrigin"])}) else{throw RecorderError.invalidTrace}
@@ -568,6 +569,14 @@ struct RecorderTrace: Codable {
                   }) else{throw RecorderError.invalidTrace}
         }
         let value = try JSONDecoder().decode(RecorderTrace.self, from: data)
+        if let failures=value.recoveryFailures {
+            guard failures.count<=16,failures.allSatisfy({ row in
+                Set(row.keys)==Set(["milliseconds","action","stage","condition"]) &&
+                (0...9_000_000_000_000_000).contains(row["milliseconds"] ?? -1) &&
+                (1...4).contains(row["action"] ?? 0) &&
+                (0...67).contains(row["stage"] ?? -1) && (0...163).contains(row["condition"] ?? -1)
+            }) else{throw RecorderError.invalidTrace}
+        }
         guard value.monitorStatus?.valid ?? true else{throw RecorderError.invalidTrace}
         guard value.schema == 1, value.build.range(of: "^(?:[0-9]{1,9}|test)$", options: .regularExpression) != nil,
               (1...8).contains(value.trigger), value.incident > 0, (0...1).contains(value.phase),

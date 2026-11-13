@@ -151,6 +151,17 @@ let expectedRefresh=ProcessInfo.processInfo.environment["HANQ_EXPECT_REFRESH"]==
 var rows:[[String:Any]]=[]
 for mode in ["presentation", "normal", "missing_count", "selected", "invalidated", "wrong_window", "different_field", "fast_presentation", "fast_missing_count"] {
     let c=Case(label:"synthetic prior presentation")
+    let saved: [CGEvent]
+    if mode=="presentation" || mode=="fast_presentation" {
+        let closed=OnsetRecoveryEngine()
+        saved=[key(9,true),key(9,false),key(8,true)]
+        closed.retainedInput=[saved[0]]
+        closed.pending=Array(saved.dropFirst())
+        closed.closeSession()
+        c.e.inheritClosedInput(from:closed)
+    } else {
+        saved=[]
+    }
     c.bundle="org.example.injected-editor"
     c.e.updateQueued=true
     let fast=mode.hasPrefix("fast_")
@@ -184,11 +195,11 @@ for mode in ["presentation", "normal", "missing_count", "selected", "invalidated
     let shouldRepair=["presentation","fast_presentation"].contains(mode) && expectedRefresh
     check((!c.posts.isEmpty)==shouldRepair,"verified replay eligibility: \(mode)")
     check(firstProof==shouldWitness,"first publication proof: \(mode)")
-    check(c.originals==6 && c.e.retainedInput.isEmpty && c.g.held.isEmpty,"originals pass and no input retained: \(mode)")
+    check(c.originals==6 && c.e.retainedInput.count==saved.count && zip(c.e.retainedInput,saved).allSatisfy({ $0.0 === $0.1 }) && c.g.held.isEmpty,"fresh keys pass and prior retained objects stay in order: \(mode)")
     check(shouldRepair ? c.posts.count==4:c.posts.isEmpty,"only verified first pair is replayed: \(mode)")
     check(captures.allSatisfy{(try? RecorderTrace.decode(JSONEncoder().encode($0))) != nil},"strict standard metadata: \(mode)")
     rows.append([
-        "mode":mode,"simulatedIdleMilliseconds":6800,"preKeyWitness":witnessed,"firstPublicationProof":firstProof,
+        "mode":mode,"priorRetained":saved.count,"simulatedIdleMilliseconds":6800,"preKeyWitness":witnessed,"firstPublicationProof":firstProof,
         "repairEdges":c.posts.count,"compositionCommands":c.commands,"selectionWrites":c.selections,
         "originalEdges":c.originals,"sourceReads":c.sourceReads,"snapshotReads":c.snapshotReads,
         "readOnlyFocusReads":c.focusReads,"decisionReasons":decisions.map{$0.category},

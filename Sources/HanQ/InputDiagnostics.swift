@@ -760,6 +760,74 @@ final class InputIncidentTrace {
         let requestOverflow:[Int:Int];let windowOverflow:[Int:Int];let postOverflow:[Int:Int];let discardedOnDisable:[Int:Int]
         let submittedWindows:Int;let completedWindows:Int
     }
+    // Codes are persisted. Append new entries to preserve older recordings.
+    struct RecoveryFailure:Codable {
+        let milliseconds:Int, action:Int, stage:Int, condition:Int
+        static let stages=[
+            "unknown", "activation", "attemptRollback", "awaitKorean",
+            "awaitSelection", "beginSourceMenu", "buffer_verification", "composition_resume",
+            "cycleAndReplay", "deferRecovery", "delivery", "drain",
+            "followFrontmost", "korean_verification", "pollExternalSource", "potentialCapsSourceSwitch",
+            "pre_edit", "prepareFinalActivation", "processEvent", "recoverySnapshot",
+            "releaseReplayHolds", "repairBufferedRoman", "replaceAndReplay", "replayCandidate",
+            "replayPacedCandidate", "requestRecoverySnapshot", "restoreInterruptedSource", "resumeKoreanAfterSourceRestore",
+            "resumeMenuAfterSelection", "retryKorean", "retry_korean", "rollback",
+            "sample", "selection", "setUserSourceIntent", "source_wait",
+            "stop", "suspend", "switchTarget", "verifyBuffered",
+            "waitSource", "safariModifierRelease", "safariInputActivation",
+            "safariReturnSelection", "onset.attemptRollback", "onset.automaticTick", "onset.awaitCompositionCommit",
+            "onset.awaitPrefix", "onset.awaitSelection", "onset.beginCommittedCaretRestoration", "onset.beginRecovery",
+            "onset.commitConsonantComposition", "onset.drain", "onset.event", "onset.finishCommittedReplacement",
+            "onset.gateAcknowledged", "onset.pauseForContext", "onset.post", "onset.replaceAndReplay",
+            "onset.replayPair", "onset.requestRepairSelection", "onset.sampleEarly", "onset.start",
+            "onset.stop", "onset.tick", "onset.verifyCommittedCaretRestoration", "onset.verifyCommittedReplacement",
+            "safariActivationRetry",
+        ]
+        static let conditions=[
+            "unknown", "accessibility_permission", "activation_boundary_changed", "activation_context_changed",
+            "activation_deadline", "another_edit_started", "buffer_allocation_failed", "buffer_limit",
+            "buffer_repair_range_invalid", "buffer_repair_surroundings_changed", "buffer_result_not_verified", "buffer_roman_retry_unavailable",
+            "candidate_caret_mismatch", "candidate_literal_mismatch", "candidate_not_ascii", "candidate_range_invalid",
+            "candidate_roman_mismatch", "candidate_surroundings_changed", "candidate_without_letters", "caps_during_unsettled_source",
+            "composition_resume_exhausted", "deadline", "delivery_deadline", "delivery_source_selection_failed",
+            "delivery_source_timeout", "english_selection_failed", "event_allocation_failed", "expected_korean_unavailable",
+            "external_source_context_changed", "external_source_deadline", "external_source_unsettled", "field_changed",
+            "final_source_context_changed", "focus_changed_during_recovery", "focus_changed_during_snapshot", "frontmost_app_changed",
+            "hanq_input_stopped", "input_unavailable", "korean_retry_exhausted", "korean_selection_failed",
+            "menu_during_unsettled_source", "menu_source_restore_failed", "mouse_during_recovery", "not_supported_text_field",
+            "observed_field_changed", "paced_replay_allocation_failed", "paced_replay_deadline", "paced_replay_source_changed",
+            "paced_replay_unsafe_context", "partial_replay_retry_exhausted", "plan_field_missing", "pre_edit_field_changed",
+            "recovery_deadline", "recovery_inactive", "replay_allocation_failed", "rollback_active",
+            "rollback_caret_rejected", "rollback_caret_timeout", "rollback_delivery_context_changed", "rollback_plan_missing",
+            "rollback_replay_started", "rollback_source_failed", "rollback_text_changed", "rollback_unexpected_selection",
+            "secure_input", "secure_text_field", "select_all_context_changed", "select_all_failed",
+            "selected_text_not_verified", "selection_context_changed", "selection_failed", "selection_not_applied",
+            "selection_retry_failed", "snapshot_selection_changed", "snapshot_text_changed", "snapshot_timeout",
+            "source_changed", "source_interaction_timeout", "source_interaction_work_limit", "source_menu_focus_changed",
+            "source_restore_exhausted", "source_restore_failed", "source_switch_timeout", "source_wait_restore_exhausted",
+            "source_wait_restore_failed", "switch_gate_disabled", "tap_disabled", "target_not_frontmost",
+            "unsafe_context", "unsafe_context_during_recovery", "unsupported_buffered_edit", "unsupported_external_source",
+            "user_stop", "retry_count_exhausted", "retry_time_insufficient",
+            "previous_source_changed", "modifier_release_timeout", "shortcut_unavailable", "focus_changed", "recipient_changed",
+            "input_stopped", "context_interrupted", "repair_deadline",
+            "abc_layout_unconfirmed", "acknowledgment_gate_unavailable", "active_composition", "buffer_post_rejected",
+            "committed_cancel_unverified", "committed_gate_closed", "committed_native_unconfirmed", "committed_pending_context_changed",
+            "committed_result_changed", "committed_result_unreadable", "composition_commit_context_changed", "composition_commit_deadline",
+            "composition_commit_rejected", "composition_commit_source_changed", "early_claim_failed", "early_context_changed",
+            "early_field_changed", "early_field_unavailable", "early_selection_changed", "early_selection_not_writable",
+            "early_source_changed", "event_tap_disabled", "focused_element_unreadable", "gate_lock_timeout",
+            "hanq_input_unavailable", "hold_deadline", "layout_override_present", "manual_edit_busy",
+            "observation_stale", "permission_revoked", "pointer_during_repair", "pre_edit_context_changed",
+            "pre_edit_mismatch", "prefix_confirmation_context_lost", "prefix_not_visible", "prefix_post_rejected",
+            "prefix_text_mismatch", "probe_running", "repair_context_lost", "replay_acknowledgment_timeout",
+            "replay_target_changed", "role_unreadable", "rollback_context_not_intact", "rollback_source_changed",
+            "round_trip_unconfirmed", "secure_field", "selection_deadline", "selection_field_changed",
+            "selection_invalid", "selection_retry_rejected", "selection_source_changed", "selection_unreadable",
+            "shortcut_during_repair", "snapshot_unavailable", "tap_create_failed", "target_changed",
+            "text_unreadable", "unsafe_delete_payload_blocked", "unsupported_repair_plan", "web_editor_unconfirmed",
+            "outbound_not_observed",
+        ]
+    }
     struct Capture:Encodable {
         let schema=1
         let runID:String
@@ -780,6 +848,7 @@ final class InputIncidentTrace {
         var capturePreservation:CapturePreservation?=nil
         var captureBacklog:CaptureBacklog?=nil
         var clockOriginMicros:Int?=nil
+        var recoveryFailures:[RecoveryFailure]?=nil
         var monitorStatus:MonitorStatus?=nil
     }
     private struct Identity:Hashable {let token:UInt64;let type:UInt32;let domain:Int}
@@ -803,6 +872,7 @@ final class InputIncidentTrace {
         return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive,boundedStorage:option.bounded)
     }()
     private let runID=UUID().uuidString
+    private var recentRecoveryFailures:[RecoveryFailure]=[]
     private var monitorStatus:MonitorStatus?
     private let gate:DiagnosticCollectionGate
     private let configured:Bool
@@ -945,6 +1015,7 @@ final class InputIncidentTrace {
                 fields.removeAll();lastEdit = -Double.infinity;lastTrigger = -Double.infinity
                 lastSpaceDown.removeAll();lastSpaceCapture.removeAll()
                 monitorStatus=nil
+                recentRecoveryFailures.removeAll()
                 if active,configured{captures=max(captures,last);_ = gate.activate(paused)}
                 lock.unlock()
                 DispatchQueue.main.async{[weak self] in self?.start();completion?()}
@@ -973,8 +1044,40 @@ final class InputIncidentTrace {
         let start=(position-stored+capacity)%capacity
         var value=Capture(runID:runID,skippedEvents:skippedEvents,skippedAuxiliary:skippedAuxiliary,decisionDelivery:DecisionDelivery(capacity:decisionCapacity,overflow:decisionOverflow,waits:decisionWaits,coalesced:decisionCoalesced),observationDelivery:observationSnapshot(),captureTiming:timing,trigger:reason,incident:incident,phase:phase,discardedOldFrames:overwritten,frames:frames ?? (0..<stored).compactMap{ring[(start+$0)%capacity]},shapeBaselines:shapeSnapshot(),captureBacklog:backlogSnapshot())
         value.clockOriginMicros=Int(max(0,min(origin*1_000_000,9_000_000_000_000_000)))
+        value.recoveryFailures=recentRecoveryFailures.isEmpty ? nil:recentRecoveryFailures
         value.monitorStatus=monitorStatus
         return value
+    }
+    func recoveryFailure(rollback:Bool,site:String,reason:String){
+        recordFailure(action:rollback ? 1:2,site:site,reason:reason)
+    }
+    func recordFailure(action:Int,site:String,reason:String){
+        let generation=gate.generation
+        guard generation>0,!secureInput() else{return}
+        let time=clock()
+        let stage=String(site.prefix(while:{$0 != "("}))
+        let condition=reason.hasPrefix(stage+"_") ? String(reason.dropFirst(stage.count+1)):reason
+        let record=RecoveryFailure(milliseconds:Int(max(0,(time-origin)*1000)),action:action,
+                                   stage:RecoveryFailure.stages.firstIndex(of:stage) ?? 0,
+                                   condition:RecoveryFailure.conditions.firstIndex(of:reason) ?? RecoveryFailure.conditions.firstIndex(of:condition) ?? 0)
+        // A terminal transition is rare and must survive a full event/observation queue.
+        decisionQueue.async{[self] in
+            guard gate.generation==generation else{return}
+            lock.lock();defer{lock.unlock()}
+            // A normal direct switch can recur often. Keep only its latest
+            // eligibility decision so it cannot evict a series of real failures.
+            if action==4 { recentRecoveryFailures.removeAll { $0.action==4 } }
+            if recentRecoveryFailures.count==16 {
+                if let fallback=recentRecoveryFailures.firstIndex(where:{ $0.action==4 }) {
+                    recentRecoveryFailures.remove(at:fallback)
+                } else if action==4 {
+                    return
+                } else {
+                    recentRecoveryFailures.removeFirst()
+                }
+            }
+            recentRecoveryFailures.append(record)
+        }
     }
     func monitor(_ sample:MonitorSample){
         guard enabled else{return}

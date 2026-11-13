@@ -7,6 +7,7 @@ func check(_ value:Bool,_ label:String){checks+=1;if !value{fputs("FAIL: "+label
 func key(_ code:CGKeyCode,_ flags:CGEventFlags=[])->CGEvent {let e=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true)!;e.flags=flags;return e}
 let en="com.apple.keylayout.ABC",ko="com.apple.inputmethod.Korean.2SetKorean"
 let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(456)
+runSafariActivationTests()
 runInitialLayoutTests()
 runNativeObservationTests()
 runBoundaryDiagnosticTests()
@@ -406,7 +407,7 @@ do {
 do {
  let b=SourceSwitchBarrier();var source=ko,range=NSRange(location:0,length:3),pending=false,calls=0,posts=0,cancelled=0
  b.read={.init(field:field,text:"가나다",selection:range)};b.source={source}
- b.selectionPending={pending};b.cancelSelection={pending=false;cancelled+=1}
+ b.selectionPending={pending};b.cancelSelection={_ in pending=false;cancelled+=1}
  b.select={target in calls+=1;if calls==1{pending=true;range=NSRange(location:0,length:0);return AXError.cannotComplete.rawValue};pending=false;source=target;range=NSRange(location:0,length:3);return noErr}
  b.send={_ in posts+=1}
  check(b.request(en),"deferred selected request")

@@ -99,6 +99,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.onBeginCapture = { [weak self] in self?.jamoRepair.inputDidChange() }
         return controller
     }()
+    lazy var safariActivation: SafariInputActivation = {
+        let activation = SafariInputActivation()
+        activation.focus = { [weak self] in self?.selectionSourceSwitch.focus() }
+        activation.usedDirectSwitch = { reason in
+            InputIncidentTrace.shared.recordFailure(action: 4, site: "safariReturnSelection", reason: reason)
+        }
+        activation.failed = { stage, reason in
+            InputIncidentTrace.shared.recordFailure(action: 3, site: stage, reason: reason)
+        }
+        return activation
+    }()
     let inputSourceEvidence=MismatchSourceEvidence()
     let hud = HUDController()
     let inputSource = InputSourceObserver()
@@ -117,6 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         barrier.didConfirmSource = { [weak self] id,timestamp in
             guard let self else{return}
+            self.safariActivation.committed(id)
             self.inputSourceEvidence.didCommit(id,at:timestamp)
             InputIncidentTrace.shared.sourceEvidence(.committed,self.inputSourceEvidence.diagnostic(selected:id))
         }
@@ -142,8 +154,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return access.read(access.system)
         }
         barrier.select = { [weak self] target in self?.selectionSourceSwitch.select(target,asynchronous:true) ?? -50 }
-        barrier.selectionPending = { [weak self] in self?.selectionSourceSwitch.isPending ?? false }
-        barrier.cancelSelection = { [weak self] in self?.selectionSourceSwitch.cancelPending() }
+        barrier.webActivation = { [weak self] target, field in self?.safariActivation.select(target, field: field) }
+        barrier.webActivationLimit = { [weak self] in self?.safariActivation.pendingLimit }
+        barrier.selectionPending = { [weak self] in
+            guard let self else { return false }
+            return self.selectionSourceSwitch.isPending || self.safariActivation.pending
+        }
+        barrier.cancelSelection = { [weak self] reason in
+            self?.safariActivation.cancel(reason)
+            self?.selectionSourceSwitch.cancelPending()
+        }
         barrier.didSelect = { [weak self] timestamp in
             self?.mismatchRecovery.engine.noteUserSourceSwitch(at:timestamp)
         }
@@ -341,6 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         inputSource.onObservation = { [weak self] snapshot in
             guard let self,!self.mismatchRecovery.engine.recovering else{return}
             let id=snapshot?.id ?? "unknown"
+            self.safariActivation.observed(id)
             if id != KoreanKeyboardLayout.twoSetID {self.sourceSwitchBarrier.cancelUnfocusedSwitch()}
             if self.inputSourceEvidence.observe(id) {
                 InputIncidentTrace.shared.sourceEvidence(.observed,self.inputSourceEvidence.diagnostic(selected:id))
@@ -509,7 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshStatus()
     }
 
-    func switchInputSource(to target: String, at timestamp: CGEventTimestamp = 0) -> OSStatus {
+    func switchInputSource(to target: String, at timestamp: CGEventTimestamp = 0, rightCommand: Bool = false) -> OSStatus {
         // The HID gate normally owns these presses. If another event source
         // bypasses that gate, the primary tap must still use the user's intended
         // boundary, not toggle from recovery's temporary English source.
@@ -524,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         inputSourceEvidence.request(target,at:timestamp)
         InputIncidentTrace.shared.sourceEvidence(.requested,inputSourceEvidence.diagnostic(selected:InputSourceAccess.currentID()))
         var priorWindow:SourceSwitchBarrier.SwitchWindow?
-        if sourceSwitchBarrier.request(target,at:timestamp,recordWindow:{priorWindow=$0}) { return noErr }
+        if sourceSwitchBarrier.request(target,at:timestamp,rightCommand:rightCommand,recordWindow:{priorWindow=$0}) { return noErr }
         mismatchRecovery.engine.noteUserSourceSwitch(at: timestamp)
         let result=selectionSourceSwitch.select(target)
         if result==noErr,!selectionSourceSwitch.isPending,InputSourceAccess.currentID()==target {
@@ -689,7 +710,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if let edge = result.edge {
                         if edge == "right-down" {
                             if let target {
-                                let result = owner.switchInputSource(to: target, at: owner.mismatchRecovery.engine.takeSourceSwitchTimestamp(type,event))
+                                let result = owner.switchInputSource(to: target, at: owner.mismatchRecovery.engine.takeSourceSwitchTimestamp(type,event), rightCommand: true)
                                 DispatchQueue.main.async {
                                     owner.inputSource.refresh()
                                     if result != 0 { NSLog("입력 소스 전환 실패: %d", result) }
@@ -775,12 +796,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mismatch=mismatchRecovery.engine
         if let onset=onsetRecovery.engine,
            onset.recovering || onset.rollingBack || onset.waitingForContext ||
-           !onset.pending.isEmpty || !onset.retainedInput.isEmpty || !onset.prefixRemainder.isEmpty ||
+           !onset.pending.isEmpty || onset.hasRetainedInputFromCurrentSession || !onset.prefixRemainder.isEmpty ||
            onset.gate?.ownsInput == true || (onset.gate?.seenCount() ?? 0)<onset.postedToGate { return false }
-        return (!mismatch.suspended || mismatch.monitorRestartAllowed) &&
+        let canResumeClosedRepair = mismatch.suspended && mismatch.freshObservationRequested && mismatch.canObserve()
+        return (!mismatch.suspended || mismatch.monitorRestartAllowed || canResumeClosedRepair) &&
             !mismatch.recovering && !mismatch.rollingBack && mismatch.pending.isEmpty &&
-            mismatch.retained.isEmpty && mismatch.switchGate?.filter.consuming != true &&
-            !sourceSwitchBarrier.busy && !selectionSourceSwitch.isPending && !jamoRepair.isEditing &&
+            mismatch.switchGate?.filter.consuming != true &&
+            sourceSwitchBarrier.canPrepareFreshMismatchObservation && !selectionSourceSwitch.isPending && !jamoRepair.isEditing &&
             !externalKeyboards.isCapturing && !externalKeyboards.consuming && !filter.consuming && !optionFilter.consuming
     }
 

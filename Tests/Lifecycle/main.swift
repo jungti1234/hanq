@@ -40,10 +40,31 @@ do {
     func resume() {app.resumeAfterTimeout(ready:{true},settings:settings,register:{starts+=1;app.enabled=true})}
     let held=CGEvent(keyboardEventSource:nil,virtualKey:1,keyDown:true)!
     app.mismatchRecovery.engine.retained=[held]
-    precondition(!app.scheduleTimeoutRestart(now:1) && app.mismatchRecovery.engine.retained.first === held)
-    app.mismatchRecovery.engine.retained=[]
+    let closedOnset=OnsetRecoveryEngine()
+    let first=CGEvent(keyboardEventSource:nil,virtualKey:2,keyDown:true)!
+    let second=CGEvent(keyboardEventSource:nil,virtualKey:2,keyDown:false)!
+    closedOnset.pending=[first]
+    closedOnset.closeSession()
+    let freshOnset=OnsetRecoveryEngine()
+    freshOnset.inheritClosedInput(from:closedOnset)
+    app.onsetRecovery.engine=freshOnset
+    precondition(app.canRestartIdleMapping && freshOnset.retainedInput.first === first)
+    freshOnset.pending=[second]
+    precondition(!app.canRestartIdleMapping)
+    freshOnset.pending=[];freshOnset.retainedInput.append(second)
+    precondition(!app.canRestartIdleMapping)
+    app.onsetRecovery.engine=nil
+    precondition(app.canRestartIdleMapping)
+    app.mismatchRecovery.engine.pending=[held]
+    precondition(!app.canRestartIdleMapping)
+    app.mismatchRecovery.engine.pending=[]
     app.mismatchRecovery.engine.suspended=true
     precondition(!app.canRestartIdleMapping)
+    app.mismatchRecovery.engine.freshObservationRequested=true
+    precondition(app.canRestartIdleMapping)
+    app.stopMapping(afterIdleTimeout:true)
+    precondition(app.mismatchRecovery.engine.freshObservationRequested && app.mismatchRecovery.engine.suspended)
+    app.mismatchRecovery.engine.freshObservationRequested=false
     app.mismatchRecovery.engine.monitorRestartAllowed=true
     precondition(app.canRestartIdleMapping)
     app.stopMapping(afterIdleTimeout:true)
@@ -51,6 +72,7 @@ do {
     precondition(app.scheduleTimeoutRestart(now:2) && !app.scheduleTimeoutRestart(now:3))
     resume();resume()
     precondition(starts==1 && app.koreanEnabled && !app.hanjaEnabled)
+    precondition(app.mismatchRecovery.engine.retained.count==1 && app.mismatchRecovery.engine.retained.first === held)
     app.stopMapping()
     precondition(!app.scheduleTimeoutRestart(now:61) && app.scheduleTimeoutRestart(now:62))
     app.stopMapping();resume();precondition(starts==1)

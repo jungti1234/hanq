@@ -27,8 +27,7 @@ final class OnsetRecoveryController: NSObject {
         let old=engine
         old?.closeSession()
         let next=OnsetRecoveryEngine()
-        next.retainedInput=(old?.retainedInput ?? [])+(old?.pending ?? [])
-        old?.pending=[];old?.retainedInput=[]
+        if let old { next.inheritClosedInput(from: old) }
         next.canBeginRepair = { [weak self] in self?.canBeginRepair() ?? false }
         next.unfocusedKeyCheck = { [weak self] in self?.unfocusedKeyCheck($0,$1) ?? .noSwitch }
         next.willBeginRepair = { [weak self] in self?.willBeginRepair() }

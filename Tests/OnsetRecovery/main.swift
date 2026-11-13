@@ -425,6 +425,18 @@ if ProcessInfo.processInfo.arguments.contains("--test-editor-transitions") {
     old.emergencyStop("tap_disabled")
     time=0.5;c.tick();testCheck(launches==1,"backoff prevents tight restart loop")
     time=1;c.tick();testCheck(launches==2 && c.engine!.enabled && c.engine!.pending.isEmpty && c.engine!.retainedInput.count==1)
+    let active=c.engine!
+    let kept=active.retainedInput[0]
+    testCheck(!active.hasRetainedInputFromCurrentSession,"closed inputs do not own the new observation")
+    active.testSource={onsetKoreanID}
+    let field=AXUIElementCreateApplication(54321)
+    let baseline=OnsetSnapshot(element:field,text:"",selection:NSRange(location:0,length:0))
+    active.publishPassedBaseline(baseline)
+    testCheck(active.publishedPassedBaselines.count==1 && active.retainedInput[0] === kept,"new observation with unchanged retained event")
+    let blocked=CGEvent(keyboardEventSource:nil,virtualKey:3,keyDown:false)!
+    active.retainedInput.append(blocked)
+    active.publishPassedBaseline(OnsetSnapshot(element:field,text:"x",selection:NSRange(location:1,length:0)))
+    testCheck(active.hasRetainedInputFromCurrentSession && active.publishedPassedBaselines.count==1,"same-session undelivered input still blocks")
     old.didStop?();testCheck(!c.failed,"old engine callback cannot stop replacement")
     ready=false;c.tick();time=10;c.tick();testCheck(launches==2,"wait for restored permission")
     ready=true;c.tick();testCheck(launches==3)

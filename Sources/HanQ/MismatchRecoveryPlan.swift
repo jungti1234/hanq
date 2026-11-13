@@ -133,16 +133,19 @@ struct MismatchRecoveryPlan {
         return ns.replacingCharacters(in:NSRange(location:caret,length:0),with:roman)
     }
     func matches(text:String,selection:NSRange)->Bool {
+        mismatchCondition(text:text,selection:selection)==nil
+    }
+    func mismatchCondition(text:String,selection:NSRange)->String? {
         let ns=text as NSString
         let range=NSRange(location:caret,length:roman.utf16.count)
-        guard hasLetters,caret>=0,range.location+range.length<=ns.length,
-              selection==NSRange(location:caret+range.length,length:0),
-              sameObservedSurroundings(ns.replacingCharacters(in:range,with:"")) else{return false}
+        guard hasLetters else{return "candidate_without_letters"}
+        guard caret>=0,caret<=ns.length,range.length<=ns.length-caret else{return "candidate_range_invalid"}
+        guard selection==NSRange(location:caret+range.length,length:0) else{return "candidate_caret_mismatch"}
+        guard sameObservedSurroundings(ns.replacingCharacters(in:range,with:"")) else{return "candidate_surroundings_changed"}
         let inserted=ns.substring(with:range)
-        if let literal=verifiedReplacement{return inserted==literal}
-        // Case is irrelevant only within the new ASCII run, never surrounding text.
-        guard inserted.utf8.allSatisfy({(32...126).contains($0)}) else{return false}
-        return inserted.lowercased()==roman.lowercased()
+        if let literal=verifiedReplacement{return inserted==literal ? nil:"candidate_literal_mismatch"}
+        guard inserted.utf8.allSatisfy({(32...126).contains($0)}) else{return "candidate_not_ascii"}
+        return inserted.lowercased()==roman.lowercased() ? nil:"candidate_roman_mismatch"
     }
 }
 

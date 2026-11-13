@@ -112,6 +112,18 @@ final class OnsetRecoveryEngine:NSObject {
     var resumeObservedAt:Double?
     var resumeField:AXUIElement?
     var retainedInput:[CGEvent]=[]
+    // Only events inherited from a terminated engine are outside this session.
+    // A live focus pause still owns any events it appends after this boundary.
+    private var inheritedRetainedCount = 0
+    var hasRetainedInputFromCurrentSession: Bool { retainedInput.count > inheritedRetainedCount }
+
+    func inheritClosedInput(from previous: OnsetRecoveryEngine) {
+        retainedInput = previous.retainedInput + previous.pending
+        inheritedRetainedCount = retainedInput.count
+        previous.retainedInput = []
+        previous.pending = []
+        previous.inheritedRetainedCount = 0
+    }
     var recoveryEpoch=0
     var transientReadFailure:Bool {
         ["not_supported_text_field","role_unreadable","focused_element_unreadable","text_unreadable","selection_unreadable","selection_invalid"].contains(unavailableReason)
@@ -150,7 +162,7 @@ final class OnsetRecoveryEngine:NSObject {
         onset.cancel();currentPlan=nil;planElement=nil
         // All posted events are acknowledged above. Only an empty delivery
         // state may stop carrying the previous replay into a new observation.
-        if pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty {
+        if pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty {
             replayStarted=false
         }
         lastEditable=snap;publishPassedBaseline(snap)
@@ -187,7 +199,7 @@ final class OnsetRecoveryEngine:NSObject {
     var publishedPassedBaselines:[(revision:Int,snapshot:OnsetSnapshot)]=[]
     var publishedPassedRevision=0
     func publishPassedBaseline(_ snap:OnsetSnapshot?){
-        guard enabled,!recovering,pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,
+        guard enabled,!recovering,pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty,
               let layout=currentLayout(),let snap,snap.selection.length==0 else{gate?.configurePassedBaseline(nil);return}
         if let last=publishedPassedBaselines.last,CFEqual(last.snapshot.element,snap.element),InputFocusAccess.sameText(last.snapshot.text,snap.text),last.snapshot.selection==snap.selection {
             gate?.configurePassedBaseline(last.revision,sourceID:layout.sourceID);return
@@ -202,7 +214,7 @@ final class OnsetRecoveryEngine:NSObject {
     // A focus pause may hide the original field from snapshot(). Refresh only
     // its read-only baseline after every issued event has crossed the gate.
     func refreshAcknowledgedPassedBaseline(){
-        guard enabled,!recovering,!rollingBack,pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,
+        guard enabled,!recovering,!rollingBack,pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty,
               gate?.healthy() ?? true,gate.map({$0.seenCount()>=postedToGate}) ?? true,
               currentSource()==repairSourceID,let field=planElement,let snap=originalSnapshot(field),snap.selection.length==0 else{return}
         lastEditable=snap;publishPassedBaseline(snap)
@@ -221,7 +233,7 @@ final class OnsetRecoveryEngine:NSObject {
     func samplePassed(_ snap:OnsetSnapshot?)->Bool {
         guard let gate,let p=gate.passedObservation(),!p.keys.isEmpty else{return false}
         guard canBeginRepair(),currentSource()==p.first.sourceID,currentLayout() != nil,
-              pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
+              pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty,!replayStarted,
               gate.seenCount()>=postedToGate else{decisionTrace.onsetDecision(.history,.guardFailed,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_guard_failed",hasSnapshot:snap != nil);gate.discardPassed(reason:.guard_failed);return false}
         guard let snap else{
             // A lone passed key is not a pending repair. Keep the existing
@@ -323,7 +335,7 @@ final class OnsetRecoveryEngine:NSObject {
     func sampleDeferred(_ snap:OnsetSnapshot?)->Bool {
         guard let gate,let first=gate.deferredReservation() else{return false}
         guard canBeginRepair(),currentSource()==first.sourceID,let layout=currentLayout(),
-              pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
+              pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty,!replayStarted,
               gate.seenCount()>=postedToGate else{cancelDeferredObservation();return false}
         guard let snap else{
             if !transientReadFailure{cancelDeferredObservation()}
@@ -360,7 +372,7 @@ final class OnsetRecoveryEngine:NSObject {
         if deferredTime != first?.time {deferredTime=first?.time;deferredBaseline=earlyBaseline;deferredField=earlyObservedField}
         collectHeld();pending.append(contentsOf:gate?.cancelHold(preserveUnclaimed:true) ?? [])
         guard gate?.healthy() ?? true,!recovering,!replayStarted,pending.isEmpty,prefixRemainder.isEmpty,
-              retainedInput.isEmpty,gate.map({$0.seenCount()>=postedToGate}) ?? true else {
+              !hasRetainedInputFromCurrentSession,gate.map({$0.seenCount()>=postedToGate}) ?? true else {
             pauseForContext("early_field_unavailable");return false
         }
         onset.cancel();currentPlan=nil;planElement=nil
@@ -369,7 +381,7 @@ final class OnsetRecoveryEngine:NSObject {
         return true
     }
     func observeUnclaimedOnset(_ first:OnsetInputGate.Reservation,_ snap:OnsetSnapshot){
-        guard pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,!replayStarted,
+        guard pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty,!replayStarted,
               gate?.observeUnclaimed(first)==true else{abandonUneditedReservation();return}
         decisionTrace.onsetDecision(.reservation,.reservationReleased,firstTime:first.time)
         // A new field or its first isolated character cannot distinguish live
@@ -431,7 +443,7 @@ final class OnsetRecoveryEngine:NSObject {
     private let sceneProbeRequested=ProcessInfo.processInfo.arguments.contains("--diagnose-onset-scene")
     func observeSceneProbe(){
         guard sceneProbeRequested,InputDiagnostics.shared.isEnabled,!sceneProbeFinished,enabled,
-              !recovering,!waitingForContext,pending.isEmpty,retainedInput.isEmpty,
+              !recovering,!waitingForContext,pending.isEmpty,!hasRetainedInputFromCurrentSession,
               canBeginRepair(),AXIsProcessTrusted(),!IsSecureEventInputEnabled(),
               let target,!target.isTerminated,let ax,
               focusAccess.currentPID()==target.processIdentifier,
@@ -632,7 +644,7 @@ final class OnsetRecoveryEngine:NSObject {
         }
         func ready()->Bool {
             guard enabled,!recovering,!waitingForContext,!replayStarted,
-                  pending.isEmpty,retainedInput.isEmpty,prefixRemainder.isEmpty,
+                  pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty,
                   unacknowledgedPosts.isEmpty,(gate?.seenCount() ?? 0)>=postedToGate,
                   gate?.reservation()==nil,gate?.deferredReservation()==nil,gate?.passedObservation()==nil,
                   canBeginRepair(),(testAccessibilityReady?() ?? (AXIsProcessTrusted() && !IsSecureEventInputEnabled())) else{return false}
@@ -663,9 +675,10 @@ final class OnsetRecoveryEngine:NSObject {
         }
         return value
     }
-    func emergencyStop(_ reason:String){
+    func emergencyStop(_ reason:String,site:String = #function){
         traceSafety(.stop,reason:reason)
         guard enabled || recovering || waitingForContext else{return}
+        if recovering || waitingForContext { decisionTrace.recordFailure(action:2,site:"onset."+site,reason:reason) }
         recoveryEpoch+=1;waitingForContext=false;firstPublication=nil
         retainPrefixRemainder()
         gate?.stop();collectHeld()
@@ -1048,7 +1061,10 @@ final class OnsetRecoveryEngine:NSObject {
     func awaitPrefix(deadline:Double,rollback:Bool){
         guard recovering,rollingBack==rollback,gate?.healthy() ?? true else{return}
         collectHeld()
-        guard let candidate=currentPlan,let expected=candidate.expected,let snap=snapshot(),let field=planElement,CFEqual(snap.element,field),currentSource()==repairSourceID else{park("prefix_confirmation_context_lost");return}
+        guard let candidate=currentPlan, let expected=candidate.expected, let field=planElement else { park("rollback_plan_missing"); return }
+        guard let snap=snapshot() else { park(unavailableReason.isEmpty ? "snapshot_unavailable" : unavailableReason); return }
+        guard CFEqual(snap.element,field) else { park("field_changed"); return }
+        guard currentSource()==repairSourceID else { park("source_changed"); return }
         let observation="\(snap.text)|\(snap.selection)|\(gate?.seenCount() ?? -1)"
         if observation != lastPrefixObservation {
             lastPrefixObservation=observation
@@ -1056,16 +1072,25 @@ final class OnsetRecoveryEngine:NSObject {
         }
         let joined=candidate.observedReplayText ?? candidate.replayedText
         let caret=NSRange(location:candidate.caret+(joined ?? candidate.roman).utf16.count,length:0)
-        let replacementReady=snap.selection==caret && (gate.map{$0.seenCount()>=postedToGate} ?? true)
         let acceptable=(joined.map{[$0]} ?? ([candidate.roman]+candidate.onsetVariants)).map{
             (candidate.before as NSString).replacingCharacters(in:NSRange(location:candidate.caret,length:0),with:$0)
         }
-        if acceptable.contains(where:{candidate.bodyMatches(snap.text,$0)}) && replacementReady {
+        let textMatches=acceptable.contains(where:{candidate.bodyMatches(snap.text,$0)})
+        let caretMatches=snap.selection==caret
+        let replacementReady=caretMatches && (gate.map{$0.seenCount()>=postedToGate} ?? true)
+        if textMatches && replacementReady {
             log("prefix_visible",["text":snap.text]);deliveryPrefixConfirmed=true
             drain([],rollback:rollback)
             return
         }
-        guard ProcessInfo.processInfo.systemUptime<deadline else{park("prefix_not_visible");return}
+        guard ProcessInfo.processInfo.systemUptime<deadline else {
+            let condition: String
+            if !textMatches { condition="prefix_text_mismatch" }
+            else if !caretMatches { condition="candidate_caret_mismatch" }
+            else { condition="replay_acknowledgment_timeout" }
+            park(condition)
+            return
+        }
         scheduleRecovery(0.002){[weak self] in self?.awaitPrefix(deadline:deadline,rollback:rollback)}
     }
     func drain(_ prefix:[CGEvent],rollback:Bool=false){
@@ -1138,11 +1163,12 @@ final class OnsetRecoveryEngine:NSObject {
         }
         if stopAfterRollback{stopAfterRollback=false;closeSession()}
     }
-    func abort(_ reason:String){
+    func abort(_ reason:String,site:String = #function){
         guard recovering else{return}
         if let candidate=currentPlan,candidate.isCommittedLate,!replayStarted {cancelCommittedSelection(candidate);return}
         if rollingBack{return}
         rollingBack=true;rollbackReason=reason
+        decisionTrace.recordFailure(action:1,site:"onset."+site,reason:reason)
         log("rollback_started",["reason":reason,"originalRoman":currentPlan?.roman ?? "","pendingEvents":pending.count])
         attemptRollback(remaining:15,requested:false)
     }
@@ -1166,13 +1192,14 @@ final class OnsetRecoveryEngine:NSObject {
         guard remaining>0 else{park("rollback_caret_timeout");return}
         scheduleRecovery(0.01){[weak self] in self?.attemptRollback(remaining:remaining-1,requested:true)}
     }
-    func park(_ reason:String){
+    func park(_ reason:String,site:String = #function){
         if reason=="rollback_context_not_intact",rollbackReason=="selection_context_changed",transientReadFailure {
             pauseForContext(reason);return
         }
-        parkTerminal(reason)
+        parkTerminal(reason,site:site)
     }
-    func parkTerminal(_ reason:String){
+    func parkTerminal(_ reason:String,site:String = #function){
+        decisionTrace.recordFailure(action:2,site:"onset."+site,reason:reason)
         diagnosticHistory.finish(5,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         traceSafety(.parked,reason:reason)
         retainPrefixRemainder()

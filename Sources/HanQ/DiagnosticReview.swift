@@ -414,6 +414,36 @@ final class DiagnosticReviewSnapshot {
                 .init(label: label, value: sources[key].map { $0.sorted().map { sourceNames[$0] ?? "미확인" }.joined(separator: " · ") } ?? "미측정")
             }))
         }
+        if let failures=object["recoveryFailures"] as? [[String:Int]],!failures.isEmpty {
+            let stageNames=["retryKorean":"한글 재시도", "retry_korean":"재시도 직전 편집기 조회",
+                            "attemptRollback":"롤백", "awaitSelection":"선택 확인", "verifyBuffered":"후속 입력 확인",
+                            "safariReturnSelection":"Safari 두벌식 복귀 경로 선택", "onset.awaitPrefix":"첫 자음 재입력 결과 확인",
+                            "onset.drain":"첫 자음 후속 키 전달", "onset.gateAcknowledged":"첫 자음 키 통과 확인",
+                            "onset.awaitSelection":"첫 자음 선택 반영 확인", "safariModifierRelease":"Safari 전환 키 놓음 확인", "safariInputActivation":"Safari 두벌식 입력기 재활성화", "safariActivationRetry":"Safari 두벌식 재요청 결과 확인"]
+            let conditionNames=["prefix_text_mismatch":"기한까지 편집기 본문에 예상 조합이 나타나지 않음", "snapshot_unavailable":"편집기 상태를 읽을 수 없음",
+                                "replay_acknowledgment_timeout":"기한까지 재입력 이벤트 통과가 확인되지 않음",
+                                "outbound_not_observed":"직전 Safari 한글→영어 전환 근거가 없음", "round_trip_unconfirmed":"직전 영어 전환 완료가 확인되지 않음", "abc_layout_unconfirmed":"ABC 자판을 확인할 수 없음",
+                                "layout_override_present":"입력기 자판 오버라이드가 남아 있음", "web_editor_unconfirmed":"편집 가능한 웹 입력칸을 확인할 수 없음",
+                                "snapshot_text_changed":"재조회한 본문이 달라짐", "snapshot_selection_changed":"재조회한 선택 범위가 달라짐",
+                                "source_changed":"입력 소스가 복구 대상과 다름", "field_changed":"입력칸이 달라짐",
+                                "candidate_caret_mismatch":"커서가 예상 위치와 다름", "candidate_surroundings_changed":"주변 본문이 달라짐",
+                                "candidate_roman_mismatch":"입력 구간이 예상 영문과 다름", "candidate_literal_mismatch":"입력 구간이 확인된 문자열과 다름",
+                                "deadline":"확인 기한 경과", "selection_failed":"선택 범위 설정 실패", "rollback_text_changed":"롤백 대상 본문이 달라짐",
+                                "previous_source_changed":"시스템의 직전 입력 소스가 두벌식으로 확인되지 않음",
+                                "modifier_release_timeout":"전환 중 보조 키가 계속 눌려 있음", "shortcut_unavailable":"입력 소스 전환 단축키를 시작할 수 없음",
+                                "source_switch_timeout":"기한 안에 목표 입력 소스가 확인되지 않음", "focus_changed":"전환 중 입력칸이 달라짐",
+                                "recipient_changed":"입력을 받을 앱이 달라짐", "input_unavailable":"입력 전달 권한 또는 보안 입력 조건 불충족"]
+            let fields=failures.suffix(16).compactMap { row -> DiagnosticReviewField? in
+                guard let time=row["milliseconds"],let action=row["action"],let stage=row["stage"],let condition=row["condition"],
+                      InputIncidentTrace.RecoveryFailure.stages.indices.contains(stage),
+                      InputIncidentTrace.RecoveryFailure.conditions.indices.contains(condition) else{return nil}
+                let operation=[1:"롤백 시작", 2:"보관 후 중단", 3:"전환 보완 중단", 4:"기본 전환 사용"][action] ?? "중단"
+                let step=InputIncidentTrace.RecoveryFailure.stages[stage],reason=InputIncidentTrace.RecoveryFailure.conditions[condition]
+                let detail=conditionNames[reason].map{"\($0) (\(reason))"} ?? reason
+                return .init(label:"기록 시작 후 \(time)ms · \(operation)",value:"\(stageNames[step] ?? step) · \(detail)")
+            }
+            if !fields.isEmpty {sections.append(.init(title:"최근 자동 복구 실패 단계와 조건",fields:fields))}
+        }
         if let status=object["monitorStatus"] as? [String:Any],let current=status["current"] as? [String:Any] {
             let reasons=[0:"실행 가능",1:"감시 제어 꺼짐",2:"입력 사용 불가",3:"별도 시험 감시 실행 중",4:"손쉬운 사용 권한 없음",5:"보안 입력",6:"실행 옵션으로 꺼짐",7:"입력 탭 비활성",8:"재등록 횟수 제한",9:"안전 조건으로 재등록 보류",10:"감시 등록 실패",11:"재시도 간격 대기"]
             func state(_ key:String)->String{(current[key] as? Bool).map{$0 ? "예":"아니요"} ?? "미측정"}
