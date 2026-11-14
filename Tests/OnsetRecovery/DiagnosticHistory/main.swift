@@ -35,6 +35,21 @@ check(evidence.last?.whole==3 && evidence.last?.insertion==3 && evidence.last?.u
 let middle=probe("좌우",1)
 middle.observe(snapshot("좌ㄱㅏ우",3),passed:passed(),source:onsetKoreanID,at:10.12)
 check(evidence.last?.whole==7 && evidence.last?.insertion==2 && evidence.last?.selection==3,"surrounding draft isolates inserted span without storing positions")
+let quoted = probe("\"뒤", 0)
+quoted.observe(snapshot("ㄱ\"뒤", 1), passed: passed([15]), source: onsetKoreanID, at: 10.04)
+check(evidence.last?.insertionEndRelation == 1, "first jamo caret at insertion end")
+quoted.observe(snapshot("가\"뒤", 1), passed: passed(), source: onsetKoreanID, at: 10.12)
+check(evidence.last?.insertionEndRelation == 1, "composed syllable before quote")
+quoted.observe(snapshot("가\"뒤", 2), passed: passed(), source: onsetKoreanID, at: 10.13)
+check(evidence.last?.insertionEndRelation == 2, "caret crossed one existing unit")
+quoted.observe(snapshot("가\"뒤", 3), passed: passed(), source: onsetKoreanID, at: 10.14)
+check(evidence.last?.insertionEndRelation == 3, "other distance remains distinct")
+let supplementary = probe("🙂뒤", 2)
+supplementary.observe(snapshot("🙂가뒤", 3), passed: passed(), source: onsetKoreanID, at: 10.12)
+check(evidence.last?.insertionEndRelation == 1, "UTF-16 baseline after surrogate pair")
+let selected = OnsetSnapshot(element: field, text: "🙂가뒤", selection: NSRange(location: 3, length: 1))
+supplementary.observe(selected, passed: passed(), source: onsetKoreanID, at: 10.13)
+check(evidence.last?.insertionEndRelation == 0, "noncollapsed selection has no caret")
 let replaced=probe("기존 초안")
 replaced.observe(snapshot("ㄱㅏ"),passed:passed(),source:onsetKoreanID,at:10.12)
 check(evidence.last?.draft==3 && evidence.last?.whole==2,"whole-body replacement is not described as insertion into old draft")
@@ -87,6 +102,8 @@ for capture in saved{
     }
     check(true,"strict recorder accepts observer and trigger")
 }
+trace.mark();trace.flush()
+check(saved.contains { $0.trigger == .manual && $0.frames.contains { $0.onsetObservation?.insertionEndRelation == 2 } }, "manual capture preserves earlier overshoot")
 let encoded=try! JSONEncoder().encode(saved.first{$0.frames.contains{$0.kind == .onsetObservation}}!)
 let text=String(data:encoded,encoding:.utf8)!
 for secret in ["ㄱ","가","좌우","기존 초안","ᄀ","keycode","sourceID","selectionLocation"]{check(!text.contains(secret),"encoded capture contains no raw payload: \(secret)")}

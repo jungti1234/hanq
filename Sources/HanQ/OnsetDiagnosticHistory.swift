@@ -70,13 +70,25 @@ final class OnsetDiagnosticHistory {
         else{baselineState=1}
         let expected=Self.expected(keys,source:first.sourceID)
         var whole=0,draft=0,insertion=0,selection=0,unicode=0
+        var insertionEndRelation = 0
         if let snapshot,snapshot.text.utf16.count<=4096 {
             whole=Self.relation(snapshot.text,expected)
             selection=Self.selection(snapshot)
             unicode=Self.unicode(snapshot)
             if let before=baseline?.snapshot {
                 if InputFocusAccess.literalTextEqual(before.text,snapshot.text){draft=1}
-                else if let inserted=Self.inserted(before,after:snapshot){draft=2;insertion=Self.relation(inserted,expected)}
+                else if let inserted = Self.inserted(before, after: snapshot) {
+                    draft = 2
+                    insertion = Self.relation(inserted, expected)
+                    if (1...3).contains(selection) {
+                        let end = before.selection.location + inserted.utf16.count
+                        switch snapshot.selection.location - end {
+                        case 0: insertionEndRelation = 1
+                        case 1: insertionEndRelation = 2
+                        default: insertionEndRelation = 3
+                        }
+                    }
+                }
                 else{draft=3}
             }
         }
@@ -84,6 +96,7 @@ final class OnsetDiagnosticHistory {
             history:passed?.first.time==first.time ? 1:2,whole:whole,draft:draft,insertion:insertion,
             selection:selection,unicode:unicode,samples:samples,coalesced:coalesced,
             firstKeyAgeMicros:Self.age(time-first.time),firstEventTimestampMicros:Int(min(first.eventTimestamp/1000,9_000_000_000_000_000)),baselineAgeMicros:baseline.map{Self.age(first.time-$0.completed)})
+        value.insertionEndRelation = insertionEndRelation
         let capture = !captured && keys.count==2
         if let last,value.sameState(last),!capture,time-lastEmission<0.25{coalesced=min(coalesced+1,1_000_000)}
         else {

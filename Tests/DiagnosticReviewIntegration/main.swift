@@ -40,6 +40,15 @@ func complete(_ trace: InputIncidentTrace, automatic: Bool = false) {
     trace.flush(); trace.finishCaptureWindowsForTest(); trace.flush()
 }
 trace.context()
+let onsetRead = trace.beginRead(.onsetAX)
+let marked = InputIncidentFocusEvidence(markedRangeState: .empty, path: 1, role: 2, route: 1,
+                                       ownerRelation: 1, elementRelation: 2, withinRead: 1)
+trace.endRead(.onsetAX, onsetRead, outcome: .success, focus: marked)
+trace.onsetObservation(.init(episode: 1, phase: 1, reason: 0, keys: 2, baseline: 2, history: 1,
+                             whole: 6, draft: 2, insertion: 3, selection: 3, unicode: 6, samples: 3,
+                             coalesced: 0, firstKeyAgeMicros: 100000, firstEventTimestampMicros: 1,
+                             baselineAgeMicros: 1000, insertionEndRelation: 2))
+trace.flush()
 let read = trace.beginRead(.mismatchAX)
 trace.endRead(.mismatchAX, read)
 trace.recoveryFailure(rollback:true,site:"awaitSelection",reason:"selection_failed")
@@ -64,6 +73,9 @@ for document in try first.incidents[0].documents.values {
           rows?[2].value.contains("Safari 한국어 입력기 재활성화")==true && rows?[2].value.contains("source_switch_timeout")==true &&
           rows?.last?.value.contains("Safari 한국어 자판 재요청 결과 확인")==true && rows?.last?.value.contains("source_switch_timeout")==true && rows?.last?.label.contains("전환 보완 중단")==true, "both manual phases show the original failure followed by the rollback failure")
 }
+let reviewedLabels = try first.incidents[0].documents.values.flatMap { $0.sections.flatMap { $0.fields.map(\.label) } }
+check(reviewedLabels.contains("첫 자음 조합 범위 · 빈 범위"), "manual review shows marked-range classification")
+check(reviewedLabels.contains { $0.contains("삽입 끝보다 한 UTF-16 단위 뒤") }, "manual review shows caret crossing")
 check(trace.enabled, "review does not disable collection")
 let original = try manifest(directory)
 let copyURL = root.appendingPathComponent("copy")

@@ -3,12 +3,17 @@
 ONSET_RELATIONS=['unmeasured','first_exact','split_pair_exact','composed_pair_exact','first_prefix','split_pair_prefix','composed_pair_prefix','different']
 def onset_observation(value):
     bounds={'episode':(1,1_000_000_000),'phase':(1,3),'reason':(0,6),'keys':(1,2),'baseline':(0,4),'history':(1,2),'whole':(0,7),'draft':(0,3),'insertion':(0,7),'selection':(0,5),'unicode':(0,6),'samples':(1,1_000_000),'coalesced':(0,1_000_000),'firstKeyAgeMicros':(0,60_000_000),'firstEventTimestampMicros':(0,9_000_000_000_000_000)}
-    if not isinstance(value,dict) or set(value)-{'baselineAgeMicros'}!=set(bounds):raise ValueError('invalid onset observation fields')
+    if not isinstance(value,dict) or set(value)-{'baselineAgeMicros','insertionEndRelation'}!=set(bounds):raise ValueError('invalid onset observation fields')
     if any(type(value[k]) is not int or not lo<=value[k]<=hi for k,(lo,hi) in bounds.items()):raise ValueError('invalid onset observation code')
     if 'baselineAgeMicros' in value and (type(value['baselineAgeMicros']) is not int or not 0<=value['baselineAgeMicros']<=60_000_000):raise ValueError('invalid onset baseline age')
     if (value['baseline'] in [2,3])!=('baselineAgeMicros' in value) or value['coalesced']>value['samples'] or (value['draft']!=2 and value['insertion']!=0):raise ValueError('invalid onset observation relation')
     if not (value['reason']==0 if value['phase']==1 else 1<=value['reason']<=(4 if value['phase']==2 else 6)):raise ValueError('invalid onset observation phase')
-    return dict(value,whole_name=ONSET_RELATIONS[value['whole']],insertion_name=ONSET_RELATIONS[value['insertion']],
+    if 'insertionEndRelation' in value:
+        relation = value['insertionEndRelation']
+        if (type(relation) is not int or not 0 <= relation <= 3 or
+                (relation and (value['draft'] != 2 or value['selection'] not in (1, 2, 3)))):
+            raise ValueError('invalid insertion end relation')
+    return dict(value, insertion_end_name=['unknown', 'at_end', 'one_utf16_after', 'other'][value['insertionEndRelation']] if 'insertionEndRelation' in value else 'unrecorded',whole_name=ONSET_RELATIONS[value['whole']],insertion_name=ONSET_RELATIONS[value['insertion']],
         baseline_name=['field_unknown','missing','pre_key_fresh','pre_key_old','post_key_only'][value['baseline']],
         draft_name=['unmeasured','equal','surroundings_preserved','surroundings_differ'][value['draft']],
         history_name=['','gate_present','retained_after_gate_end'][value['history']],
@@ -55,10 +60,56 @@ def summarize_storage_document(data):
     return dict(build=data['build'],storage_after_write=storage_status(data['status']))
 
 
+def caret_crossings(observations, key_events, skipped_main):
+    """Locate a measured one-unit overshoot between observed main-lane key downs."""
+    result = []
+    events = sorted((key for key in key_events if key['kind'] == 1 and key['lane'] == 'main'
+                     and key['edge'] in (1, 3)), key=lambda key: key['observedAtMicros'])
+    starts = collections.defaultdict(list)
+    for index, key in enumerate(events):
+        starts[key['timestampMicros']].append(index)
+    previous = {}
+    for row in observations:
+        if row['phase'] != 1:
+            continue
+        episode = row['episode']
+        relation = row.get('insertionEndRelation')
+        prior = previous.get(episode)
+        previous[episode] = row
+        if relation != 2 or (prior and prior.get('insertionEndRelation') == 2):
+            continue
+        match = dict(episode=episode, sequence=row['sequence'], milliseconds=row['milliseconds'],
+                     previous_relation=prior['insertion_end_name'] if prior else 'unobserved',
+                     observed_keydown_ordinal=None, event=None)
+        result.append(match)
+        start_time = row['firstEventTimestampMicros']
+        indices = starts.get(start_time, [])
+        if skipped_main or not start_time or len(indices) != 1 or not prior or prior.get('insertionEndRelation') != 1:
+            continue
+        window = []
+        for key in events[indices[0]:]:
+            if key['milliseconds'] > row['milliseconds']:
+                break
+            # Observation times are rounded down to milliseconds. A tie has no reliable order.
+            if (key['milliseconds'] == row['milliseconds'] or key['edge'] != 1 or
+                    key['inputOrigin'] != 1 or key['key_class_name'] != 'letter_position'):
+                window = []
+                break
+            window.append(key)
+        # Multiple presses between samples or a tie at the previous sample cannot isolate a key.
+        if (window and window[-1]['milliseconds'] != prior['milliseconds'] and
+                sum(key['milliseconds'] >= prior['milliseconds'] for key in window) <= 1):
+            match.update(observed_keydown_ordinal=len(window), event=window[-1]['event'])
+    return result
+
+
 def focus_evidence(value):
     limits={'path':3,'role':10,'route':2,'ownerRelation':3,'elementRelation':3,'withinRead':3}
-    if not isinstance(value,dict) or set(value)!=set(limits) or any(type(value[k]) is not int or not (1 if k=='path' else 0)<=value[k]<=limit for k,limit in limits.items()):raise ValueError('invalid focus evidence')
-    return dict(value,path_name=['','onset','synchronous_mismatch','idle_mismatch_worker'][value['path']],
+    if not isinstance(value,dict) or set(value)-{'markedRangeState'}!=set(limits) or any(type(value[k]) is not int or not (1 if k=='path' else 0)<=value[k]<=limit for k,limit in limits.items()):raise ValueError('invalid focus evidence')
+    state = value.get('markedRangeState')
+    if 'markedRangeState' in value and (value['path'] != 1 or type(state) is not int or not 0 <= state <= 3):
+        raise ValueError('invalid marked range state')
+    return dict(value,marked_range_name=['skipped','unavailable','empty','active'][state] if state is not None else 'unrecorded',path_name=['','onset','synchronous_mismatch','idle_mismatch_worker'][value['path']],
                 role_name=['unmeasured','unavailable','text_area','text_field','combo_box','web_area','group','button','window','application','other'][value['role']],
                 route_name=['unmeasured','system','application_fallback'][value['route']],
                 owner_relation=['unmeasured','target','other','unavailable'][value['ownerRelation']],
@@ -632,7 +683,8 @@ def summarize(data):
             'callback_work_timelines':work_timelines(work_rows,shape_rows),'work_interval_evidence':work_rows,
             'snapshot_focus_observations':focus_rows,'snapshot_read_outcomes':read_rows,'snapshot_read_outcome_counts':dict(collections.Counter(r['lane']+':'+r['outcome'] for r in read_rows)),
             'space_observations':None if preservation is None else [dict(r,reason={1:'rapid_space_downs',2:'space_consumed',3:'hanq_replay_marker',4:'repeat_flag'}[r['detail']],interpretation='observation_only_not_duplicate_text_or_root_cause') for r in preservation['requests'] if r['trigger']==7],
-            'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'onset_observations':onset_observation_rows,'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
+            'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'onset_observations':onset_observation_rows,
+            'caret_crossings':caret_crossings(onset_observation_rows, key_rows, data.get('skippedEvents', {}).get('2', 0)),'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'unfocused_switch_layout_samples':unfocused_layout_samples,
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,

@@ -156,8 +156,9 @@ struct RecorderShapeBaseline:Codable {
 
 struct RecorderFocusEvidence:Codable {
     let path,role,route,ownerRelation,elementRelation,withinRead:Int
+    var markedRangeState: Int? = nil
     static let keys=Set(["path","role","route","ownerRelation","elementRelation","withinRead"])
-    var valid:Bool {(1...3).contains(path) && (0...10).contains(role) && (0...2).contains(route) && (0...3).contains(ownerRelation) && (0...3).contains(elementRelation) && (0...3).contains(withinRead)}
+    var valid:Bool {(markedRangeState.map { path == 1 && (0...3).contains($0) } ?? true) && (1...3).contains(path) && (0...10).contains(role) && (0...2).contains(route) && (0...3).contains(ownerRelation) && (0...3).contains(elementRelation) && (0...3).contains(withinRead)}
 }
 
 struct RecorderOnsetDetail:Codable {
@@ -189,6 +190,7 @@ struct RecorderOnsetObservation:Codable,Equatable {
     var firstKeyAgeMicros:Int
     var firstEventTimestampMicros:Int
     var baselineAgeMicros:Int?
+    var insertionEndRelation: Int? = nil
     static let required=Set(["episode","phase","reason","keys","baseline","history","whole","draft","insertion","selection","unicode","samples","coalesced","firstKeyAgeMicros","firstEventTimestampMicros"])
     var valid:Bool {
         (1...1_000_000_000).contains(episode) && (1...3).contains(phase) &&
@@ -200,7 +202,8 @@ struct RecorderOnsetObservation:Codable,Equatable {
         (0...60_000_000).contains(firstKeyAgeMicros) && (0...9_000_000_000_000_000).contains(firstEventTimestampMicros) &&
         (baselineAgeMicros.map{(0...60_000_000).contains($0)} ?? true) &&
         ((baseline==2 || baseline==3) == (baselineAgeMicros != nil)) &&
-        (draft==2 || insertion==0)
+        (draft==2 || insertion==0) &&
+            (insertionEndRelation.map { (0...3).contains($0) && ($0 == 0 || (draft == 2 && (1...3).contains(selection))) } ?? true)
     }
     func sameState(_ other:Self)->Bool {
         var a=self,b=other
@@ -209,7 +212,7 @@ struct RecorderOnsetObservation:Codable,Equatable {
         return a==b
     }
     static func parse(_ object:[String:Any])->Self? {
-        guard Set(object.keys).subtracting(["baselineAgeMicros"])==required,object.values.allSatisfy({value in
+        guard Set(object.keys).subtracting(["baselineAgeMicros", "insertionEndRelation"])==required,object.values.allSatisfy({value in
             guard let n=value as? NSNumber else{return false}
             return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
         }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
@@ -218,7 +221,9 @@ struct RecorderOnsetObservation:Codable,Equatable {
     var summary:String {
         let relation=["미측정","첫 키와 전체 일치","분리된 첫 두 키와 전체 일치","조합된 첫 두 키와 전체 일치","첫 키와 앞부분 일치","분리된 첫 두 키와 앞부분 일치","조합된 첫 두 키와 앞부분 일치","불일치"]
         let prior=["미확인","기록 없음","입력 전 기록 있음","입력 전 기록 오래됨","입력 후 기록만 있음"]
-        return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion]) · 삽입 주체 미확인"
+        let ends = ["판정 불가", "삽입 끝", "삽입 끝보다 한 UTF-16 단위 뒤", "그 밖의 위치"]
+        let caret = insertionEndRelation.map { " · 커서 " + ends[$0] } ?? ""
+        return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion])\(caret) · 삽입 주체 미확인"
     }
 }
 
@@ -522,7 +527,7 @@ struct RecorderTrace: Codable {
                 if let detail=value["detail"],!RecorderOnsetDetail.accepts(detail){return false}
             }
             if row.keys.contains("focusEvidence") {
-                guard let value=row["focusEvidence"] as? [String:Any],Set(value.keys)==RecorderFocusEvidence.keys,
+                guard let value=row["focusEvidence"] as? [String:Any],Set(value.keys).subtracting(["markedRangeState"])==RecorderFocusEvidence.keys,
                       value.values.allSatisfy({ raw in
                           guard let n=raw as? NSNumber else{return false}
                           return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)

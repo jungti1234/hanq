@@ -761,11 +761,13 @@ final class OnsetRecoveryEngine:NSObject {
         var incidentMeasured=false
         let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
         var focusRead:InputIncidentFocusProbe.Read?
+        var markedRangeState = InputIncidentMarkedRange.skipped
         let oldFocusObserver=focusAccess.observeFocus
         defer{
             focusAccess.observeFocus=oldFocusObserver
             let allowed=incidentMeasured && !["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason)
-            let focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:1)
+            var focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:1)
+            focus?.markedRangeState = markedRangeState
             InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus)
         }
         if let testSnapshot{return testSnapshot()}
@@ -789,9 +791,9 @@ final class OnsetRecoveryEngine:NSObject {
         guard OnsetEditableRole.supports(role) else{unavailableReason="not_supported_text_field";return nil}
         // Respect an editor's explicit active composition; unsupported attributes
         // remain unknown, as in the original compatibility probe.
-        if !recovering,let markedValue=context[2],CFGetTypeID(markedValue)==AXValueGetTypeID() {
-            var marked=CFRange()
-            if AXValueGetValue(markedValue as! AXValue,.cfRange,&marked),marked.location>=0,marked.length>0 {
+        if !recovering {
+            markedRangeState = InputIncidentMarkedRange.classify(context[2])
+            if markedRangeState == .active {
                 unavailableReason="active_composition";return nil
             }
         }

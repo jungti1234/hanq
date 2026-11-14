@@ -9,6 +9,23 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_caret_crossing_uses_observed_key_order(self):
+        def key(ms, event):
+            return dict(kind=1, lane='main', edge=1, inputOrigin=1, key_class_name='letter_position',
+                        milliseconds=ms, observedAtMicros=ms*1000, timestampMicros=ms*1000+1, event=event)
+        keys = [key(100, 7), key(138, 11)]
+        base = dict(phase=1, episode=1, sequence=1, milliseconds=110, insertionEndRelation=1,
+                    insertion_end_name='at_end', firstEventTimestampMicros=100001)
+        crossed = dict(base, sequence=2, milliseconds=179, insertionEndRelation=2,
+                       insertion_end_name='one_utf16_after')
+        rows = [base, crossed, dict(crossed, phase=2), dict(crossed, sequence=4)]
+        result, = summary.caret_crossings(rows, keys, 0)
+        self.assertEqual((result['observed_keydown_ordinal'], result['event']), (2, 11))
+        for events, skipped in [(keys[1:], 0), (keys, 1), (keys+[key(175, 12)], 0), (keys+[key(179, 12)], 0),
+                                (keys+[dict(key(140, 12), key_class_name='pointer', edge=3)], 0)]:
+            self.assertIsNone(summary.caret_crossings(rows, events, skipped)[0]['observed_keydown_ordinal'])
+        self.assertEqual(summary.caret_crossings([dict(base, insertionEndRelation=None)], keys, 0), [])
+
     def test_nested_routing_points_are_bounded_and_private(self):
         work=dict(beganAtMicros=100,endedAtMicros=30000,clockValid=True,cpuState=1,cpuMicros=2000,
                   routingCheckpoints=[dict(stage=1,elapsedMicros=2000,cpuState=1,cpuMicros=500),dict(stage=5,elapsedMicros=26000,cpuState=1,cpuMicros=1500)])

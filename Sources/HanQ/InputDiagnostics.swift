@@ -254,7 +254,30 @@ struct InputIncidentAXEvidence:Codable,Equatable {
 
 // Fixed focus observations from existing reads only. No role strings, AX objects,
 // PIDs, coordinates or content cross the diagnostic queue.
+enum InputIncidentMarkedRange: Int, Codable {
+    case skipped = 0, unavailable, empty, active
+
+    static func classify(_ value: CFTypeRef?) -> Self {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return .unavailable }
+        let ax = value as! AXValue
+        var range = CFRange()
+        guard AXValueGetType(ax) == .cfRange, AXValueGetValue(ax, .cfRange, &range),
+              range.location >= 0, range.length >= 0 else { return .unavailable }
+        return range.length == 0 ? .empty : .active
+    }
+
+    var label: String {
+        switch self {
+        case .skipped: return "조회 생략"
+        case .unavailable: return "미지원·조회 불가"
+        case .empty: return "빈 범위"
+        case .active: return "활성 범위"
+        }
+    }
+}
+
 struct InputIncidentFocusEvidence:Codable,Equatable {
+    var markedRangeState: InputIncidentMarkedRange? = nil
     let path:Int // 1 onset, 2 synchronous mismatch, 3 idle mismatch worker
     let role:Int // 0 unmeasured, 1 unavailable, 2 text area, 3 text field, 4 combo, 5 web area, 6 group, 7 button, 8 window, 9 application, 10 other
     let route:Int // 0 unmeasured, 1 system, 2 application fallback
@@ -403,6 +426,7 @@ final class InputIncidentTrace {
         var firstKeyAgeMicros:Int
         var firstEventTimestampMicros:Int
         var baselineAgeMicros:Int?
+        var insertionEndRelation: Int? = nil
         static let required=Set(["episode","phase","reason","keys","baseline","history","whole","draft","insertion","selection","unicode","samples","coalesced","firstKeyAgeMicros","firstEventTimestampMicros"])
         var valid:Bool {
             (1...1_000_000_000).contains(episode) && (1...3).contains(phase) &&
@@ -414,7 +438,8 @@ final class InputIncidentTrace {
             (0...60_000_000).contains(firstKeyAgeMicros) && (0...9_000_000_000_000_000).contains(firstEventTimestampMicros) &&
             (baselineAgeMicros.map{(0...60_000_000).contains($0)} ?? true) &&
             ((baseline==2 || baseline==3) == (baselineAgeMicros != nil)) &&
-            (draft==2 || insertion==0)
+            (draft==2 || insertion==0) &&
+            (insertionEndRelation.map { (0...3).contains($0) && ($0 == 0 || (draft == 2 && (1...3).contains(selection))) } ?? true)
         }
         func sameState(_ other:Self)->Bool {
             var a=self,b=other
@@ -423,7 +448,7 @@ final class InputIncidentTrace {
             return a==b
         }
         static func parse(_ object:[String:Any])->Self? {
-            guard Set(object.keys).subtracting(["baselineAgeMicros"])==required,object.values.allSatisfy({value in
+            guard Set(object.keys).subtracting(["baselineAgeMicros", "insertionEndRelation"])==required,object.values.allSatisfy({value in
                 guard let n=value as? NSNumber else{return false}
                 return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
             }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
@@ -432,7 +457,9 @@ final class InputIncidentTrace {
         var summary:String {
             let relation=["미측정","첫 키와 전체 일치","분리된 첫 두 키와 전체 일치","조합된 첫 두 키와 전체 일치","첫 키와 앞부분 일치","분리된 첫 두 키와 앞부분 일치","조합된 첫 두 키와 앞부분 일치","불일치"]
             let prior=["미확인","기록 없음","입력 전 기록 있음","입력 전 기록 오래됨","입력 후 기록만 있음"]
-            return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion]) · 삽입 주체 미확인"
+            let ends = ["판정 불가", "삽입 끝", "삽입 끝보다 한 UTF-16 단위 뒤", "그 밖의 위치"]
+            let caret = insertionEndRelation.map { " · 커서 " + ends[$0] } ?? ""
+            return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion])\(caret) · 삽입 주체 미확인"
         }
     }
     struct BoundaryEvidence:Codable,Equatable {

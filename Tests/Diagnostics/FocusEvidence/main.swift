@@ -10,6 +10,15 @@ func sample(_ element:AXUIElement?,role:String?="AXGroup",route:Int=1,owner:pid_
  if element != nil{read.observedRole(role)}
  return read
 }
+func axRange(_ location: Int, _ length: Int) -> AXValue {
+    var range = CFRange(location: location, length: length)
+    return AXValueCreate(.cfRange, &range)!
+}
+check(InputIncidentMarkedRange.classify(nil) == .unavailable, "missing AX attribute")
+check(InputIncidentMarkedRange.classify("invalid" as CFString) == .unavailable, "unexpected AX type")
+check(InputIncidentMarkedRange.classify(axRange(-1, 0)) == .unavailable, "invalid range is unknown")
+check(InputIncidentMarkedRange.classify(axRange(0, 0)) == .empty, "zero-length range")
+check(InputIncidentMarkedRange.classify(axRange(0, 1)) == .active, "active composition")
 let first=probe.finish(sample(a),generation:1,path:1)!
 check(first.role==6 && first.elementRelation==1 && first.ownerRelation==1,"failed group role retains first focus observation")
 let same=probe.finish(sample(a),generation:1,path:1)!
@@ -41,8 +50,9 @@ let began=ProcessInfo.processInfo.systemUptime
 for path in 1...3 {
  let lane:InputIncidentTrace.Lane=path==1 ? .onsetAX:.mismatchAX
  let span=trace.beginRead(lane)
- let focus=InputIncidentFocusProbe().finish(sample(a,role:"PRIVATE_ROLE_SENTINEL"),generation:1,path:path)
- trace.endRead(lane,span,outcome:.unsupportedTextField,focus:focus)
+ var focus=InputIncidentFocusProbe().finish(sample(a,role:"PRIVATE_ROLE_SENTINEL"),generation:1,path:path)
+ if path == 1 { focus?.markedRangeState = .active }
+ trace.endRead(lane,span,outcome:path == 1 ? .activeComposition : .unsupportedTextField,focus:focus)
 }
 trace.mark()
 check(ProcessInfo.processInfo.systemUptime-began<0.1,"focus metadata never waits for writer lock")

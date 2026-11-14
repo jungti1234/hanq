@@ -330,6 +330,10 @@ final class DiagnosticReviewSnapshot {
                 let lane=integer(frame["lane"]) == 6 ? "첫 자음" : "불일치"
                 counts["\(lane) 조회: \(label)",default:0]+=1
                 if let focus=frame["focusEvidence"] as? [String:Any] {
+                    if let code = integer(focus["markedRangeState"]), integer(focus["path"]) == 1,
+                       let state = InputIncidentMarkedRange(rawValue: code) {
+                        counts["첫 자음 조합 범위 · " + state.label, default: 0] += 1
+                    }
                     let roles=["역할 미측정","역할 조회 불가","텍스트 영역","텍스트 필드","콤보 상자","웹 영역","그룹","버튼","창","앱","기타 역할"]
                     let relations=["요소 미확인","첫 관측·관측 공백 뒤","같은 요소","다른 요소"]
                     if let role=integer(focus["role"]),roles.indices.contains(role),
