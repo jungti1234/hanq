@@ -716,6 +716,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard let snap=observed else{resetCompositionObservation();incidentTrace.decision(.sample,.snapshotUnavailable);return}
         lastSampleSnapshot=snap
         sourceChanged(currentSource(),snap)
+        plan?.observeSelectionReplacement(text:snap.text,selection:snap.selection)
         if incidentTrace.enabled {
             let (identity,owner,window,epoch)=incidentTrace.fieldRegistry.identify(snap.element,owner:target?.processIdentifier ?? 0,window:snap.incidentGeneration==incidentTrace.collectionGeneration ? snap.incidentWindow:nil,generation:incidentTrace.collectionGeneration)
             var evidence=snap.incidentGeneration==incidentTrace.collectionGeneration ? (snap.incidentAX ?? InputIncidentAXEvidence()):InputIncidentAXEvidence()

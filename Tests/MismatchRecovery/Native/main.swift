@@ -6,10 +6,14 @@ final class Fixture:NSObject,NSApplicationDelegate {
     var view=NSTextView(frame:NSRect(x:0,y:0,width:640,height:220))
     var window:NSWindow!
     var original:TISInputSource?
+    var originalID=""
     var originalRoman:Bool?
+    var previousApp:NSRunningApplication?
     var added:[TISInputSource]=[]
-    struct Case { let id:String; let mixed:Bool; var word=false;var action="";var flags:CGEventFlags=[];var suffix="ab" }
-    var cases:[Case] = CommandLine.arguments.contains("--english-case")
+    struct Case { let id:String; let mixed:Bool; var word=false;var action="";var flags:CGEventFlags=[];var suffix="ab";var replacement=false;var wholeSelection=false }
+    var cases:[Case] = CommandLine.arguments.contains("--selected-replacement-history")
+        ? KoreanKeyboardLayout.supportedIDs.flatMap{id in [Case(id:id,mixed:false,replacement:true),Case(id:id,mixed:false,replacement:true,wholeSelection:true)]}
+        : CommandLine.arguments.contains("--english-case")
         ? KoreanKeyboardLayout.supportedIDs.flatMap{id in [Case(id:id,mixed:false,action:"caps-on",flags:[],suffix:"ab"),Case(id:id,mixed:false,action:"caps-on",flags:.maskShift,suffix:"AB"),Case(id:id,mixed:false,action:"caps-on",flags:.maskAlphaShift,suffix:"AB"),Case(id:id,mixed:false,action:"caps-on",flags:[.maskShift,.maskAlphaShift],suffix:"AB")]}
         : (CommandLine.arguments.contains("--source-interactions") || (CommandLine.arguments.contains("--source-interactions-single") || CommandLine.arguments.contains("--source-interactions-idle")))
         ? KoreanKeyboardLayout.supportedIDs.flatMap{id in ((CommandLine.arguments.contains("--source-interactions-single") || CommandLine.arguments.contains("--source-interactions-idle")) ? ["caps-on","menu-English"]:["caps-on","caps-off","menu-English","menu-Korean"]).map{Case(id:id,mixed:false,action:$0)}}
@@ -20,7 +24,9 @@ final class Fixture:NSObject,NSApplicationDelegate {
     var posts=0
     func applicationDidFinishLaunching(_ n:Notification){
         original=TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()
+        originalID=InputSourceAccess.currentID()
         originalRoman=try? RomanSwitchController.isEnabled()
+        previousApp=NSWorkspace.shared.frontmostApplication
         if CommandLine.arguments.contains("--source-interactions") || (CommandLine.arguments.contains("--source-interactions-single") || CommandLine.arguments.contains("--source-interactions-idle")) {
             for id in KoreanKeyboardLayout.supportedIDs {
                 guard let list=TISCreateInputSourceList([kTISPropertyInputSourceID as String:id] as CFDictionary,true)?.takeRetainedValue() as? [TISInputSource],let source=list.first else{finish(false,"missing matrix input source");return}
@@ -36,10 +42,19 @@ final class Fixture:NSObject,NSApplicationDelegate {
     }
     func finish(_ ok:Bool,_ message:String){
         timer?.invalidate();owner?.closeSession()
-        if let original{TISSelectInputSource(original)}
-        if let originalRoman{try? RomanSwitchController.setEnabled(originalRoman)}
-        for source in added{TISDisableInputSource(source)}
-        print(ok ? "PASS: \(message)":"FAIL: \(message)");fflush(stdout);exit(ok ? 0:1)
+        var restored=true
+        if let original{restored = TISSelectInputSource(original)==noErr && InputSourceAccess.currentID()==originalID}
+        if let originalRoman{
+            do{try RomanSwitchController.setEnabled(originalRoman);restored = (try RomanSwitchController.isEnabled())==originalRoman && restored}
+            catch{restored=false}
+        }
+        for source in added{
+            if TISDisableInputSource(source) != noErr{restored=false}
+            if let raw=TISGetInputSourceProperty(source,kTISPropertyInputSourceIsEnabled),CFBooleanGetValue(Unmanaged<CFBoolean>.fromOpaque(raw).takeUnretainedValue()){restored=false}
+        }
+        print("RESTORE: source=\(InputSourceAccess.currentID()) original=\(originalID) temporarySources=\(added.count) verified=\(restored)")
+        if NSApp.isActive,let previousApp,previousApp.processIdentifier != getpid(){previousApp.activate(options:[])}
+        print(ok && restored ? "PASS: \(message)":"FAIL: \(message); restoration=\(restored)");fflush(stdout);exit(ok && restored ? 0:1)
     }
     func next(){
         guard !cases.isEmpty else{finish(true,"all five native IMEs repaired original key + queued vowel/final without source substitution");return}
@@ -68,7 +83,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
         if (CommandLine.arguments.contains("--source-interactions-single") || CommandLine.arguments.contains("--source-interactions-idle")){keys=Array(keys.prefix(1))}
         var expected=item.word ? "알트탭":((CommandLine.arguments.contains("--source-interactions-single") || CommandLine.arguments.contains("--source-interactions-idle")) ? "ㄱ":"간")
         if CommandLine.arguments.contains("--source-interactions-idle"){expected="ㄱ"}
-        let initialCount=item.word || !item.action.isEmpty ? keys.count:(item.mixed ? 2:1)
+        let initialCount=item.replacement ? 2:(item.word || !item.action.isEmpty ? keys.count:(item.mixed ? 2:1))
         let p=MismatchRecoveryEngine(),field=AXUIElementCreateApplication(getpid())
         owner=p;p.enabled=true;p.target=NSRunningApplication.current;p.planElement=field
         p.testSnapshot={ [weak self] in
@@ -141,7 +156,21 @@ final class Fixture:NSObject,NSApplicationDelegate {
         var candidate=MismatchRecoveryPlan(before:"앞🙂뒤",caret:3,sourceID:id)
         _ = candidate.append(code:keys[0],shift:false)
         if !item.action.isEmpty {for code in keys.dropFirst(){_ = candidate.append(code:code,shift:false)}}
-        if item.mixed {
+        if item.replacement {
+            // Model a selected draft whose AX result stays unchanged for two
+            // passed keys. Only the fixture owns this text. The subsequent
+            // recovery uses the real Apple IME and target-PID key delivery.
+            view.unmarkText();view.string=item.wholeSelection ? "OLD🙂":"앞🙂OLD뒤"
+            view.setSelectedRange(item.wholeSelection ? NSRange(location:0,length:view.string.utf16.count):NSRange(location:3,length:3))
+            p.locked=field;p.lastSource=id
+            for code in keys.prefix(initialCount){for down in [true,false]{
+                let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;event.flags=[]
+                guard p.event(down ? .keyDown:.keyUp,event) != nil else{finish(false,"selected observation consumed original input");return}
+            }}
+            guard let observed=p.plan,observed.codes.count==initialCount else{finish(false,"selected replacement lost its prefix");return}
+            candidate=observed
+            view.string=candidate.expected!;view.setSelectedRange(NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0))
+        } else if item.mixed {
             for code in keys[1..<initialCount]{_ = candidate.append(code:code,shift:false)}
             let mixed=MismatchRecoveryPlan.character(keys[0],false)! + MismatchKeyboardLayout.render(keys:keys[1..<initialCount].map{($0,false)},sourceID:id)!
             let observed="앞🙂"+mixed+"뒤",range=NSRange(location:3+mixed.utf16.count,length:0)
@@ -150,7 +179,7 @@ final class Fixture:NSObject,NSApplicationDelegate {
         } else {
             view.unmarkText();view.string=candidate.expected!;view.setSelectedRange(NSRange(location:3+candidate.roman.utf16.count,length:0))
         }
-        p.beginRecovery(candidate,p.testSnapshot!()!)
+        if !item.replacement{p.beginRecovery(candidate,p.testSnapshot!()!)}
         for code in item.action.isEmpty ? Array(keys.dropFirst(initialCount)):following {
             for down in [true,false]{
                 let event=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:down)!;event.flags=item.flags
@@ -163,12 +192,20 @@ final class Fixture:NSObject,NSApplicationDelegate {
             if !p.recovering {
                 self.timer?.invalidate()
                 let eventCount=(keys.count+(item.action.isEmpty ? 0:following.count)+staleDowns)*2
-                guard self.view.string=="앞🙂"+expected+"뒤",self.view.selectedRange()==NSRange(location:3+expected.utf16.count,length:0),!p.suspended,p.retained.isEmpty,p.pending.isEmpty,self.posts==eventCount,InputSourceAccess.currentID()==finalSource else{self.finish(false,"\(id) \(item.action): text=\(self.view.string), posts=\(self.posts), suspended=\(p.suspended), retained=\(p.retained.count), source=\(InputSourceAccess.currentID()) intended=\(p.intendedSource)");return}
-                print("PASS:",id,item.action.isEmpty ? (item.mixed ? "mixed prefix":"ASCII prefix"):item.action,"expected=\(expected); \(eventCount/2) down/up pairs, source=\(finalSource)");fflush(stdout)
+                let expectedBody=(candidate.before as NSString).replacingCharacters(in:NSRange(location:candidate.caret,length:0),with:expected)
+                guard self.view.string==expectedBody,self.view.selectedRange()==NSRange(location:candidate.caret+expected.utf16.count,length:0),!p.suspended,p.retained.isEmpty,p.pending.isEmpty,self.posts==eventCount,InputSourceAccess.currentID()==finalSource else{self.finish(false,"\(id) \(item.action): text=\(self.view.string), posts=\(self.posts), suspended=\(p.suspended), retained=\(p.retained.count), source=\(InputSourceAccess.currentID()) intended=\(p.intendedSource)");return}
+                print("PASS:",id,item.replacement ? (item.wholeSelection ? "whole selection":"middle selection"):(item.action.isEmpty ? (item.mixed ? "mixed prefix":"ASCII prefix"):item.action),"expected=\(expected); \(eventCount/2) down/up pairs, source=\(finalSource)");fflush(stdout)
                 p.closeSession();DispatchQueue.main.asyncAfter(deadline:.now()+0.1){self.next()}
             } else if ProcessInfo.processInfo.systemUptime-self.began>8{self.finish(false,"timeout: \(id)")}
         }
     }
+}
+if CommandLine.arguments.contains("--check-permissions") {
+    print("postPermission=\(CGPreflightPostEventAccess())")
+    exit(CGPreflightPostEventAccess() ? 0:2)
+}
+guard CGPreflightPostEventAccess() else {
+    fputs("UNAVAILABLE: native fixture needs keyboard posting permission\n",stderr);exit(2)
 }
 let app=NSApplication.shared;app.setActivationPolicy(.regular)
 let fixture=Fixture();app.delegate=fixture;app.run()

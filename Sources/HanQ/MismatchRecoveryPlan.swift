@@ -13,6 +13,10 @@ struct MismatchRecoveryPlan {
     // physical keys are already queued. Preserve those keys without treating
     // a new or changed selection as the same completion transaction.
     var pendingCompletion:(text:String,selection:NSRange)?
+    // The first key can replace a user selection before AX reports any output.
+    // Keep its original snapshot only while that exact selection is unchanged.
+    // This is observation history, never proof that the selected text was edited.
+    var pendingSelectionReplacement:(text:String,selection:NSRange)?
     var codes: [(UInt16, Bool)] = []
     static let punctuation: [UInt16:(String,String)] = [18:("1","!"),19:("2","@"),20:("3","#"),21:("4","$"),23:("5","%"),22:("6","^"),26:("7","&"),28:("8","*"),25:("9","("),29:("0",")"),27:("-","_"),24:("=","+"),33:("[","{"),30:("]","}"),42:("\\","|"),41:(";",":"),39:("'","\""),43:(",","<"),47:(".",">"),44:("/","?"),50:("`","~"),49:(" "," ")]
     static func character(_ code:UInt16,_ shift:Bool)->String? {
@@ -67,6 +71,16 @@ struct MismatchRecoveryPlan {
         shape.codes=codes;shape.roman=roman
         return shape.mixedInsertion(text:text,selection:selection) != nil
     }
+    func hasPendingSelectionReplacement(text:String,selection:NSRange)->Bool {
+        guard let pending=pendingSelectionReplacement,selection.length>0,
+              pending.selection==selection else{return false}
+        return pending.text.utf16.elementsEqual(text.utf16)
+    }
+    mutating func observeSelectionReplacement(text:String,selection:NSRange) {
+        // An intervening observation ends this allowance even without a key.
+        // Returning to the old selection later must begin a new replacement.
+        if !hasPendingSelectionReplacement(text:text,selection:selection){pendingSelectionReplacement=nil}
+    }
     static func next(previous:MismatchRecoveryPlan?,text:String,selection:NSRange,code:UInt16,shift:Bool,sourceID:String=KoreanKeyboardLayout.twoSetID)->MismatchRecoveryPlan? {
         let ns=text as NSString
         guard selection.location>=0,selection.length>=0,selection.location<=ns.length,
@@ -75,6 +89,7 @@ struct MismatchRecoveryPlan {
         // that range so the first wrong-language character remains observable.
         let replacingSelection=ns.replacingCharacters(in:selection,with:"")
         var candidate=MismatchRecoveryPlan(before:replacingSelection,caret:selection.location,sourceID:sourceID)
+        candidate.pendingSelectionReplacement=selection.length>0 ? (text,selection):nil
         if let previous,previous.sourceID==sourceID {
             // An address field can append and select an autocomplete suffix.
             // Keep the typed prefix only when removing that selection leaves
@@ -88,11 +103,14 @@ struct MismatchRecoveryPlan {
                 ? previous.observedPrefix(text:text,selection:selection)
                 : previous.verifiedReplacement==nil && (sameCompletion || previous.matches(text:replacingSelection,
                     selection:NSRange(location:selection.location,length:0)))
-            if continues {
+            if previous.hasPendingSelectionReplacement(text:text,selection:selection) {
+                candidate=previous
+            } else if continues {
                 candidate=previous
                 let inserted=NSRange(location:previous.caret,length:selection.location-previous.caret)
                 candidate.before=(replacingSelection as NSString).replacingCharacters(in:inserted,with:"")
                 candidate.pendingCompletion=selection.length>0 ? (text,selection):nil
+                candidate.pendingSelectionReplacement=nil
             } else if previous.ambiguousWholePrefix(text:text,selection:selection) {
                 // The complete displayed body could be our earlier keys OR a
                 // restored draft. Losing their surroundings does not authorize
@@ -100,6 +118,7 @@ struct MismatchRecoveryPlan {
                 // Keep the original coordinates. If they reappear, the ordinary
                 // full-context verifier can recover every key.
                 candidate=previous
+                candidate.pendingSelectionReplacement=nil
             }
         }
         guard candidate.append(code:code,shift:shift) else{return nil}

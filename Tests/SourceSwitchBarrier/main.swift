@@ -9,6 +9,7 @@ let en="com.apple.keylayout.ABC",ko="com.apple.inputmethod.Korean.2SetKorean"
 let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(456)
 runSafariActivationTests()
 runInitialLayoutTests()
+runSelectedReplacementBarrierTests()
 runNativeObservationTests()
 runBoundaryDiagnosticTests()
 runRoutingWorkTests()
