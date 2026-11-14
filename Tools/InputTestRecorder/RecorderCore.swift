@@ -24,7 +24,7 @@ struct RecorderEventEvidence:Codable {
     var creatorClass:Int?=nil
     var autoRepeat:Bool?=nil
     static let keys=Set(["observedAtMicros","timestampMicros","keyClass"])
-    var valid:Bool {[observedAtMicros,timestampMicros].allSatisfy{(0...9_000_000_000_000_000).contains($0)} && (1...6).contains(keyClass) && (creatorClass == nil)==(autoRepeat == nil) && (creatorClass.map{keyClass==1 && (1...3).contains($0)} ?? true)}
+    var valid:Bool {[observedAtMicros,timestampMicros].allSatisfy{(0...9_000_000_000_000_000).contains($0)} && (1...6).contains(keyClass) && (creatorClass == nil)==(autoRepeat == nil) && (creatorClass.map{(1...2).contains(keyClass) && (1...3).contains($0)} ?? true)}
 }
 struct RecorderCallbackCheckpoint:Codable {
     let stage,elapsedMicros,cpuState:Int;let cpuMicros:Int?
@@ -478,8 +478,35 @@ struct RecorderTrace: Codable {
     static func decode(_ data: Data) throws -> RecorderTrace {
         guard data.count <= 4 * 1024 * 1024,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
+              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog","keyboardOrigin"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
               let rows = object["frames"] as? [[String: Any]], rows.count <= 16384 else { throw RecorderError.invalidTrace }
+        if let raw = object["keyboardOrigin"] {
+            func integer(_ raw: Any?, in range: ClosedRange<Int>) -> Int? {
+                guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                      n.doubleValue == Double(n.intValue), range.contains(n.intValue) else { return nil }
+                return n.intValue
+            }
+            let keys: Set<String> = ["firstSequence", "deviceDown", "quartzDown", "repeatDown", "reportedProcessDown", "outcome"]
+            guard object["trigger"] as? Int == 1, let sample = raw as? [String: Any],
+                  Set(sample.keys) == ["status", "bursts"], let status = integer(sample["status"], in: 1...5),
+                  let bursts = sample["bursts"] as? [[String: Any]], bursts.count <= 256,
+                  status == 1 || bursts.isEmpty else { throw RecorderError.invalidTrace }
+            var available = Set(rows.compactMap { row -> Int? in
+                guard row["kind"] as? Int == 1, row["lane"] as? Int == 1, row["edge"] as? Int == 1,
+                      (row["eventEvidence"] as? [String: Any])?["keyClass"] as? Int == 2 else { return nil }
+                return row["sequence"] as? Int
+            })
+            for burst in bursts {
+                guard Set(burst.keys) == keys, let first = integer(burst["firstSequence"], in: 1...Int.max),
+                      available.remove(first) != nil,
+                      let d = integer(burst["deviceDown"], in: 0...512),
+                      let q = integer(burst["quartzDown"], in: 1...16384),
+                      integer(burst["repeatDown"], in: 0...q) != nil,
+                      integer(burst["reportedProcessDown"], in: 0...q) != nil,
+                      let outcome = integer(burst["outcome"], in: 0...2),
+                      outcome == 0 || (outcome == 1 ? d == q : d < q) else { throw RecorderError.invalidTrace }
+            }
+        }
         if let value=object["capturePreservation"] {
             guard let v=value as? [String:Any],Set(v.keys).subtracting(["closedMilliseconds"])==Set(["deferred","requests","postCapacity","postOmittedFrames","closed","endedOnShutdown"]),let requests=v["requests"] as? [[String:Any]],requests.allSatisfy({Set($0.keys)==Set(["trigger","milliseconds","afterSequence","lane","detail","event","inputOrigin"])}) else{throw RecorderError.invalidTrace}
         }

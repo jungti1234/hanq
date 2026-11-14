@@ -30,7 +30,7 @@ check(rows.count==2 && rows[1].frames.contains{$0.kind == .state},"post preserve
 for capture in rows {check((try? RecorderTrace.decode(JSONEncoder().encode(capture))) != nil,"strict roundtrip accepts trigger7 and space provenance")}
 let data=try JSONEncoder().encode(rows[0]);let text=String(decoding:data,as:UTF8.self)
 check(!text.contains("123456789") && !text.contains("keyboardEventKeycode"),"raw creator PID and key values excluded")
-for changes:[String:Any] in [["creatorClass":4],["creatorClass":NSNull()],["autoRepeat":1],["pid":123456789],["keyClass":2]] {
+for changes:[String:Any] in [["creatorClass":4],["creatorClass":NSNull()],["autoRepeat":1],["pid":123456789],["keyClass":3]] {
     var object=try JSONSerialization.jsonObject(with:data) as! [String:Any]
     var frames=object["frames"] as! [[String:Any]]
     var e=frames[0]["eventEvidence"] as! [String:Any]

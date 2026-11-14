@@ -540,7 +540,7 @@ final class InputIncidentTrace {
             case 36,48,51,53,76,117,123...126:keyClass=3 // editing/navigation
             default:keyClass=6 // other
             }}
-            if keyClass==1 {
+            if keyClass==1 || keyClass==2 {
                 let creator=event.getIntegerValueField(.eventSourceUnixProcessID)
                 creatorClass=creator<=0 ? 1:(creator==Int64(getpid()) ? 2:3)
                 autoRepeat=event.getIntegerValueField(.keyboardEventAutorepeat) != 0
@@ -855,7 +855,14 @@ final class InputIncidentTrace {
             "outbound_not_observed",
         ]
     }
+    struct KeyboardBurst: Codable {
+        let firstSequence, deviceDown, quartzDown, repeatDown, reportedProcessDown, outcome: Int
+    }
+    struct KeyboardSample: Codable { let status: Int; let bursts: [KeyboardBurst] }
+    // Set only by the production app, before the trace starts. Called on the metadata worker.
+    var keyboardSample: (([Frame], Int) -> KeyboardSample?)?
     struct Capture:Encodable {
+        var keyboardOrigin: KeyboardSample? = nil
         let schema=1
         let runID:String
         let build=Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test"
@@ -913,6 +920,7 @@ final class InputIncidentTrace {
     private let observationCapacity:Int,readCapacity:Int
     private let eventCredits:DispatchSemaphore,metadataCredits:DispatchSemaphore,shapeCredits:DispatchSemaphore,readCredits:DispatchSemaphore
     private let observationOverflowSignals:[DispatchSemaphore],observationOmittedSignals:[DispatchSemaphore]
+    private var lastKeyboardDownLoss: Double?
     private var observationProcessed:[Int:Int]=[:],observationOverflow:[Int:Int]=[:],observationOmitted:[Int:Int]=[:],observationCoalesced:[Int:Int]=[:]
     private let captureCredits=Trigger.allCases.map{_ in DispatchSemaphore(value:16)}
     private let captureOverflowSignals=Trigger.allCases.map{_ in DispatchSemaphore(value:0)}
@@ -1072,6 +1080,11 @@ final class InputIncidentTrace {
         var value=Capture(runID:runID,skippedEvents:skippedEvents,skippedAuxiliary:skippedAuxiliary,decisionDelivery:DecisionDelivery(capacity:decisionCapacity,overflow:decisionOverflow,waits:decisionWaits,coalesced:decisionCoalesced),observationDelivery:observationSnapshot(),captureTiming:timing,trigger:reason,incident:incident,phase:phase,discardedOldFrames:overwritten,frames:frames ?? (0..<stored).compactMap{ring[(start+$0)%capacity]},shapeBaselines:shapeSnapshot(),captureBacklog:backlogSnapshot())
         value.clockOriginMicros=Int(max(0,min(origin*1_000_000,9_000_000_000_000_000)))
         value.recoveryFailures=recentRecoveryFailures.isEmpty ? nil:recentRecoveryFailures
+        if reason == .manual, let origin = value.clockOriginMicros, let keyboardSample {
+            // Counter drains may lag the loss. Restart comparison after the entire window ages out.
+            let missing = lastKeyboardDownLoss.map { clock() - $0 <= 60 } ?? false
+            value.keyboardOrigin = missing ? KeyboardSample(status: 5, bursts: []) : keyboardSample(value.frames, origin)
+        }
         value.monitorStatus=monitorStatus
         return value
     }
@@ -1208,6 +1221,9 @@ final class InputIncidentTrace {
     // Called under the measured capture lock only.
     private func mergeObservationCounters(_ counters:([Int:Int],[Int:Int])){
         let (over,omissions)=counters
+        if [1, 5].contains(where: { over[observationCode(.event, .hid, $0)] != nil }) {
+            lastKeyboardDownLoss = clock()
+        }
         for (code,count) in over{observationOverflow[code,default:0]+=count}
         for (code,count) in omissions{observationOmitted[code,default:0]+=count}
         for (code,count) in over.merging(omissions,uniquingKeysWith:+){

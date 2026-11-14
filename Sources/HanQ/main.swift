@@ -259,8 +259,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hasDiagnosticLogs=false
     let menuStatus = NSMenuItem(title: "준비 중", action: nil, keyEquivalent: "")
 
+    private let keyboardObserverLock = NSLock()
+    private var keyboardObserver: KeyboardOriginDiagnostics?
+
+    private func configureKeyboardObservation() {
+        let trace = InputIncidentTrace.shared
+        let generation = trace.collectionGeneration
+        let next = generation > 0 ? KeyboardOriginDiagnostics { trace.collectionGeneration == generation } : nil
+        next?.start()
+        keyboardObserverLock.lock()
+        let previous = keyboardObserver
+        keyboardObserver = next
+        keyboardObserverLock.unlock()
+        previous?.stop()
+    }
+
+    private func stopKeyboardObservation() {
+        keyboardObserverLock.lock()
+        let previous = keyboardObserver
+        keyboardObserver = nil
+        keyboardObserverLock.unlock()
+        previous?.stop()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         InputDiagnostics.shared.start()
+        configureKeyboardObservation()
+        InputIncidentTrace.shared.keyboardSample = { [weak self] frames, origin in
+            guard let self else { return nil }
+            self.keyboardObserverLock.lock()
+            let observer = self.keyboardObserver
+            self.keyboardObserverLock.unlock()
+            return observer?.snapshot(frames, origin: origin)
+        }
         InputIncidentTrace.shared.start()
         InputIncidentTrace.shared.observeStorage{[weak self] in
             DispatchQueue.main.async{self?.refreshDiagnosticLogAvailability()}
@@ -935,7 +966,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let active = !InputIncidentTrace.shared.enabled
         UserDefaults.standard.set(active,forKey:InputIncidentPreferences.key)
         changingInputDiagnostics=true
+        stopKeyboardObservation()
         InputIncidentTrace.shared.setCollectionEnabled(active){[weak self] in
+            self?.configureKeyboardObservation()
             self?.changingInputDiagnostics=false;self?.refreshStatus()
             self?.continueInterruptionFeedback()
         }
@@ -1157,6 +1190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hud.hide()
         stopMapping()
         InputIncidentTrace.shared.stopAndFlush()
+        stopKeyboardObservation()
     }
 }
 

@@ -381,6 +381,18 @@ final class DiagnosticReviewSnapshot {
         var coverage = [DiagnosticReviewField(label: "기록 당시 앱 빌드", value: build),
                         .init(label: "캐시된 손쉬운 사용 권한", value: permission),
                         field("최근 관측 덮어쓰기 수", object["discardedOldFrames"])]
+        if let sample = object["keyboardOrigin"] as? [String: Any], let status = integer(sample["status"]) {
+            let names = [1: "조회 가능", 2: "입력 모니터링 권한 필요", 3: "내장 키보드 식별 불가",
+                         4: "장치 열기 실패", 5: "관측 공백"]
+            let bursts = sample["bursts"] as? [[String: Int]] ?? []
+            coverage.append(.init(label: "내장 키보드 비교", value: names[status] ?? "미측정"))
+            let unusual = bursts.filter { ($0["quartzDown"] ?? 0) > 1 || $0["deviceDown"] != $0["quartzDown"] }
+            for burst in unusual.suffix(8) {
+                guard let seq = burst["firstSequence"], let d = burst["deviceDown"], let q = burst["quartzDown"] else { continue }
+                let verdict = [0: "판정 보류", 1: "횟수 일치", 2: "Quartz 쪽 추가 관측"][burst["outcome"] ?? 0] ?? "미측정"
+                coverage.append(.init(label: "문자키 누름 #\(seq)", value: "내장 \(d)회 · Quartz \(q)회 · \(verdict) · 자동 반복 \(burst["repeatDown"] ?? 0)회 · 생성 프로세스 표기 \(burst["reportedProcessDown"] ?? 0)회"))
+            }
+        }
         if let preservation = object["capturePreservation"] as? [String: Any] {
             coverage.append(field("후속 관측 초과 수", preservation["postOmittedFrames"]))
             if let ended = preservation["endedOnShutdown"] as? Bool, ended {

@@ -282,7 +282,7 @@ HUD_STAGES={1:'requested',2:'ordered',3:'first_appkit_draw',4:'suppressed',5:'un
 def event_evidence(value):
     if not isinstance(value,dict) or set(value)-{'creatorClass','autoRepeat'}!={'observedAtMicros','timestampMicros','keyClass'} or any(type(value[k]) is not int for k in ['observedAtMicros','timestampMicros','keyClass']):raise ValueError('invalid event evidence fields')
     if value['keyClass'] not in KEY_CLASSES or any(not 0<=value[k]<=9_000_000_000_000_000 for k in ['observedAtMicros','timestampMicros']):raise ValueError('invalid event evidence values')
-    if ('creatorClass' in value)!=('autoRepeat' in value) or ('creatorClass' in value and (value['keyClass']!=1 or type(value['creatorClass']) is not int or value['creatorClass'] not in [1,2,3] or type(value['autoRepeat']) is not bool)):raise ValueError('invalid space provenance')
+    if ('creatorClass' in value)!=('autoRepeat' in value) or ('creatorClass' in value and (value['keyClass'] not in (1,2) or type(value['creatorClass']) is not int or value['creatorClass'] not in [1,2,3] or type(value['autoRepeat']) is not bool)):raise ValueError('invalid space provenance')
     return value
 
 def switch_timelines(sources,controls,keys,hud,shapes):
@@ -398,6 +398,35 @@ def boundary_evidence(value):
                 start_relation=['unknown','prediction_before_report','equal','prediction_after_report'][value['start']],end_relation=['unknown','prediction_before_report','equal','prediction_after_report'][value['end']],
                 change_name=['first','unchanged','report_only','prediction_only','both'][value['change']],resolution_name=BOUNDARY_RESOLUTIONS[value['resolution']],
                 seed_name=BOUNDARY_CAUSES[value['seed']],mutation_name=BOUNDARY_CAUSES[value['mutation']],interpretation='observed_relation_changes_only_not_editor_internal_IME_or_causal_fault_proof')
+
+def keyboard_origin(data):
+    if 'keyboardOrigin' not in data:
+        return None
+    sample = data['keyboardOrigin']
+    states = ['ready', 'listen_permission_unavailable', 'no_single_internal_keyboard', 'open_failed', 'coverage_interrupted']
+    if (data.get('trigger') != 1 or type(sample) is not dict or set(sample) != {'status', 'bursts'}
+            or type(sample['status']) is not int or not 1 <= sample['status'] <= len(states)
+            or type(sample['bursts']) is not list or len(sample['bursts']) > 256
+            or (sample['status'] != 1 and sample['bursts'])):
+        raise ValueError('invalid keyboard observation')
+    keys = {'firstSequence', 'deviceDown', 'quartzDown', 'repeatDown', 'reportedProcessDown', 'outcome'}
+    frames = {f.get('sequence'): f for f in data['frames']}
+    results = []
+    for b in sample['bursts']:
+        if type(b) is not dict or set(b) != keys or any(type(x) is not int for x in b.values()):
+            raise ValueError('invalid keyboard burst')
+        q, d, outcome = b['quartzDown'], b['deviceDown'], b['outcome']
+        frame = frames.pop(b['firstSequence'], {})
+        if not (b['firstSequence'] > 0 and 1 <= q <= 16384 and 0 <= d <= 512
+                and 0 <= b['repeatDown'] <= q and 0 <= b['reportedProcessDown'] <= q
+                and (outcome == 0 or outcome == 1 and d == q or outcome == 2 and d < q)
+                and (frame.get('kind'), frame.get('lane'), frame.get('edge')) == (1, 1, 1)
+                and (frame.get('eventEvidence') or {}).get('keyClass') == 2):
+            raise ValueError('inconsistent keyboard burst')
+        results.append(dict(b, milliseconds=frame['milliseconds'],
+                            comparison=['inconclusive', 'same_count', 'quartz_excess'][outcome]))
+    return dict(status=states[sample['status']-1], bursts=results)
+
 
 def summarize(data):
     if data.get('schema') != 1 or not isinstance(data.get('frames'), list):
@@ -672,7 +701,7 @@ def summarize(data):
         for lane,milliseconds in stages.items():
             if lane!='hid' and milliseconds>=stages['hid']:
                 transport_max[lane]=max(transport_max[lane],milliseconds-stages['hid'])
-    return {'build':data.get('build'),'diagnostic_run_id':run_id,'clock_origin_micros':clock_origin,'incident':data.get('incident'),'phase':data.get('phase'),
+    return {'keyboard_origin':keyboard_origin(data),'build':data.get('build'),'diagnostic_run_id':run_id,'clock_origin_micros':clock_origin,'incident':data.get('incident'),'phase':data.get('phase'),
             'trigger':triggers.get(data['trigger'],'unknown'),'frames':len(data['frames']),
             'recovery_detections':None if preservation is None else [dict(r,lane_name=lanes[r['lane']],reason={1:'roman_mismatch',2:'mixed_insertion',3:'decomposed_jamo',4:'interrupted_composition',5:'fragmented_composition',6:'verified_replacement',7:'first_consonant',8:'late_sequence',9:'committed_late_sequence',10:'unspecified_mismatch'}[r['detail']],interpretation='detector_branch_only_not_root_cause') for r in preservation['requests'] if r['trigger']==6],
             'discarded_old_frames':data.get('discardedOldFrames'),'best_effort':True,
