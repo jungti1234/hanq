@@ -16,6 +16,11 @@ preserved. The added Space down/publication/up is1370/1380/1400ms. Literal
 editor publications are independent of the product's composition implementation.
 Each non-expiry case also checks that the schedule is not silently loosened.
 
+The engine starts with prefix recovery enabled, without an activation argument.
+The runner also repeats the plan checks and recorded-timing case with the
+permission-recovery launch argument. Legacy controls explicitly disable the
+new path inside the fixture; normal cases never assign its enabled state.
+
 The28 cases cover:
 
 - Prefix correction only after the actual Space is visible and all keys are up;
@@ -26,7 +31,8 @@ The28 cases cover:
   asynchronous/uncertain responses;25ms stability before releasing held input.
 - Original following keys delivered once in order, or retained on changed body,
   caret, source, front target or secure state and on an unapplied selection.
-- Existing Space recovery when the prefix candidate is OFF or unavailable.
+- Existing Space recovery when the fixture explicitly disables the new path
+  for a legacy control, or native range replacement is unavailable.
   Immediate and delayed native completion must deliver the original Space up
   exactly once, whether it naturally passes or is retained and drained.
 

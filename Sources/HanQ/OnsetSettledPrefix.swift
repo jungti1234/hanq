@@ -4,7 +4,7 @@ import AppKit
 // the exact first pair while its original pre-key representation is still valid.
 extension OnsetRecoveryEngine {
     func observeSettledPrefixPublication(_ p:OnsetInputGate.PassedInput,_ snap:OnsetSnapshot) {
-        guard prefixCandidateEnabled else{return}
+        guard settledPrefixEnabled else{return}
         if settledPrefixPublication?.first.time != p.first.time {settledPrefixPublication=nil}
         guard settledPrefixPublication==nil,firstPublication==nil,
               ProcessInfo.processInfo.systemUptime-p.first.time>=OnsetFirstPublication.observationLimit,
@@ -23,7 +23,7 @@ extension OnsetRecoveryEngine {
         }
     }
     func sampleSettledPrefix(_ p:OnsetInputGate.PassedInput,_ snap:OnsetSnapshot)->Bool {
-        guard prefixCandidateEnabled,settledPrefixPublication?.matches(p,snap)==true else{return false}
+        guard settledPrefixEnabled,settledPrefixPublication?.matches(p,snap)==true else{return false}
         // Empty marked ranges and elapsed idle time do not prove Korean commit.
         // Wait for the user's actual terminal Space and the exact complete body.
         guard p.keys.last?.0==49 else{return true}

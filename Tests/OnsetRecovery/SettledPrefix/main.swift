@@ -7,7 +7,7 @@ let body="ㄱㅏ나다라마바사 "
 func plan(_ keys:[(UInt16,Bool)]=codes,_ text:String=body,_ selection:NSRange?=nil,_ source:String=onsetKoreanID)->OnsetRecoveryPlan? {
  OnsetRecoveryEngine.settledPrefixPlan(keys:keys,text:text,selection:selection ?? NSRange(location:text.utf16.count,length:0),sourceID:source)
 }
-check(!OnsetRecoveryEngine().prefixCandidateEnabled,"off by default")
+check(OnsetRecoveryEngine().settledPrefixEnabled,"enabled without a launch option, including permission recovery")
 let p=plan()!;check(p.roman=="ㄱㅏ","only pair");check(p.replayedText=="가","one syllable");check(p.before=="나다라마바사 ","suffix untouched");check(p.restoredCaret==8,"end mapped")
 check(plan(Array(codes.dropLast()),"ㄱㅏ나다라마바사")==nil,"idle is not commit")
 check(plan(codes,"가나다라마바사 ")==nil,"already composed")

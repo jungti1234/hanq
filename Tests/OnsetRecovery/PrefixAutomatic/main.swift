@@ -51,7 +51,7 @@ final class Runner:NSObject,NSApplicationDelegate {
  }
  func actual()->OnsetSnapshot?{let hook=e.testSnapshot;e.testSnapshot=nil;defer{e.testSnapshot=hook};return e.snapshot()}
  func start(){
-  e.prefixCandidateEnabled = !args.contains("--control") && !args.contains("--native-control");e.prefixCoordinator.trace={[weak self] in self?.note($0)};e.start()
+  if args.contains("--control") || args.contains("--native-control"){e.settledPrefixEnabled=false};e.prefixCoordinator.trace={[weak self] in self?.note($0)};e.start()
   e.testSetRange = { [weak self] element,range in
    guard let self else{return .failure}
    self.selectionWrites+=1

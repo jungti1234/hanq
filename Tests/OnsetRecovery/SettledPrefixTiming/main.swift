@@ -29,13 +29,13 @@ final class Case {
     var writes=0,selections=0,legacyWrites=0,legacySelections=0,commands=0,originals=0,spaceUpPassed=0,spaceUpHeld=0
     var posts=[(UInt16,Bool)](),traces=[String](),events=[[String:Any]]()
     var start=0.0,maxLateness=0.0,restoreAt:Double?,readDelayed=false,raced=false
-    var legacy:Bool{["default-off","legacy-delayed","no-witness","range-unsupported"].contains(mode)}
-    var legacyEarly:Bool{["default-off","legacy-delayed","no-witness"].contains(mode)}
+    var legacy:Bool{["legacy-control","legacy-delayed","no-witness","range-unsupported"].contains(mode)}
+    var legacyEarly:Bool{["legacy-control","legacy-delayed","no-witness"].contains(mode)}
     var hasQueued:Bool{["queued-next","caret-unapplied","caret-changed","source-after-write","focus-after-write","secure-after-write","body-after-write"].contains(mode)}
     init(_ mode:String){
         self.mode=mode;g=OnsetInputGate(marker:e.marker)
-        check(!e.prefixCandidateEnabled,"\(mode): product remains opt-in")
-        e.prefixCandidateEnabled = !["default-off","legacy-delayed"].contains(mode)
+        check(e.settledPrefixEnabled,"\(mode): product is enabled without launch options")
+        if ["legacy-control","legacy-delayed"].contains(mode){e.settledPrefixEnabled=false}
         e.enabled=true;e.gate=g;g.beat();e.testSource={self.source};e.testTargetBundleID={"fixture.editor"}
         e.testCanSelect={true};e.testCanReplaceText={true}
         e.testSnapshot={
@@ -183,7 +183,7 @@ final class Case {
         start=first.time;events[0]["ms"]=0.0
         for (ms,action) in sorted.dropFirst(){at(ms,action)}
         check(e.firstPublication==nil,"\(mode): 195ms must not authorize 150ms fast proof")
-        let proofExpected = !["default-off","legacy-delayed","normal","no-witness"].contains(mode)
+        let proofExpected = !["legacy-control","legacy-delayed","normal","no-witness"].contains(mode)
         check((e.settledPrefixPublication != nil)==proofExpected,"\(mode): late proof needs opt-in and independent pre-key witness")
         check(text==(mode=="normal" ? joined:split),"\(mode): all already delivered suffix remains")
         // Empty marked range / idle are deliberately insufficient, even ON.
@@ -211,7 +211,7 @@ final class Case {
                 }
             }
         }
-        let negative=["no-space","space-not-published","held-space","default-off","legacy-delayed","normal","no-witness","wrong-body","moved-caret","selected","source","field","expired","claim-race","range-unsupported"].contains(mode)
+        let negative=["no-space","space-not-published","held-space","legacy-control","legacy-delayed","normal","no-witness","wrong-body","moved-caret","selected","source","field","expired","claim-race","range-unsupported"].contains(mode)
         let stopped=hasQueued && mode != "queued-next"
         let finishBy=ProcessInfo.processInfo.systemUptime+0.35
         while e.recovering && e.enabled && ProcessInfo.processInfo.systemUptime<finishBy{
@@ -224,7 +224,7 @@ final class Case {
             check(text==joined+" " && selection==NSRange(location:8,length:0),"\(mode): original Space recovery body and caret")
             check(posts.count==spaceUpHeld && (!legacyEarly || spaceUpPassed+posts.count==1),"\(mode): original Space up delivered exactly once, passed or drained")
             if mode=="legacy-delayed"{check(spaceUpHeld==1 && spaceUpPassed==0,"delayed legacy replacement genuinely exercises retained Space up")}
-            if mode=="default-off"{check(spaceUpPassed==1 && spaceUpHeld==0,"immediate legacy replacement preserves naturally passed Space up")}
+            if mode=="legacy-control"{check(spaceUpPassed==1 && spaceUpHeld==0,"immediate legacy replacement preserves naturally passed Space up")}
             check(e.enabled && !e.recovering && !g.ownsInput && e.pending.isEmpty && e.retainedInput.isEmpty,"\(mode): original Space path drains completely")
         }else if negative {
             untouched("rejected boundary")
@@ -254,7 +254,7 @@ final class Case {
         e.closeSession()
     }
 }
-let modes=["recorded","editor-without-menu","async-caret","delayed","uncertain","empty-baseline","queued-next","no-space","space-not-published","held-space","default-off","legacy-delayed","normal","no-witness","wrong-body","moved-caret","selected","source","field","expired","claim-race","range-unsupported","caret-unapplied","caret-changed","source-after-write","focus-after-write","secure-after-write","body-after-write"]
+let modes=["recorded","editor-without-menu","async-caret","delayed","uncertain","empty-baseline","queued-next","no-space","space-not-published","held-space","legacy-control","legacy-delayed","normal","no-witness","wrong-body","moved-caret","selected","source","field","expired","claim-race","range-unsupported","caret-unapplied","caret-changed","source-after-write","focus-after-write","secure-after-write","body-after-write"]
 let chosen=CommandLine.arguments.dropFirst().first
 for mode in modes where chosen==nil || chosen==mode {
     let before=failures;Case(mode).run();print("CASE \(mode): \(failures==before ? "PASS":"FAIL")")

@@ -57,7 +57,8 @@ final class OnsetRecoveryEngine:NSObject {
             log("observation_subscription",["notification":name,"result":result.rawValue])
         }
     }
-    var prefixCandidateEnabled=ProcessInfo.processInfo.arguments.contains("--enable-settled-prefix-candidate")
+    // Always on in the app; mutable only for isolated legacy-control fixtures.
+    var settledPrefixEnabled=true
     lazy var prefixCoordinator=OnsetPrefixCoordinator(self)
     var gate:OnsetInputGate?
     var gateThread:OnsetGateThread?
@@ -735,7 +736,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard enabled else{return}
         guard AXIsProcessTrusted() else{emergencyStop("permission_revoked");return}
         gate?.beat();collectHeld()
-        if prefixCandidateEnabled {
+        if settledPrefixEnabled {
             if prefixCoordinator.busy {prefixCoordinator.tick();return}
         }
         if waitingForContext{resumeIfReady();return}
@@ -883,6 +884,7 @@ final class OnsetRecoveryEngine:NSObject {
         focusHandoff.beginDiagnosticObservation()
         gate.beat();gateThread=OnsetGateThread(gate)
         enabled=true;recovering=false;lastEditable=nil;pending=[];locked=nil;lastText=nil;lastSource=InputSourceAccess.currentID();focusHandoff.reset();focusLayoutWindow=nil;focusHandoff.sceneCacheEnabled=false
+        InputDiagnostics.shared.record("onset.configuration settledPrefix=\(settledPrefixEnabled)")
         log("session_start",["toolVersion":"0.1.19","build":20,"mode":"first_consonant","targetPID":target.processIdentifier,"source":lastSource])
         timer=Timer.scheduledTimer(withTimeInterval:0.02,repeats:true){[weak self] _ in self?.automaticTick()}
         gateThread?.start()
@@ -1244,7 +1246,7 @@ final class OnsetRecoveryEngine:NSObject {
         parkTerminal(reason,site:site)
     }
     func parkTerminal(_ reason:String,site:String = #function){
-        if prefixCandidateEnabled{prefixCoordinator.recordStop(reason);prefixCoordinator.close()}
+        if settledPrefixEnabled{prefixCoordinator.recordStop(reason);prefixCoordinator.close()}
         decisionTrace.recordFailure(action:2,site:"onset."+site,reason:reason)
         diagnosticHistory.finish(5,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         traceSafety(.parked,reason:reason)
@@ -1262,7 +1264,7 @@ final class OnsetRecoveryEngine:NSObject {
         closeSession()
     }
     func closeSession(){
-        if prefixCandidateEnabled{prefixCoordinator.close()}
+        if settledPrefixEnabled{prefixCoordinator.close()}
         diagnosticHistory.finish(5,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         traceSafety(.sessionEnd)
         recoveryEpoch+=1;waitingForContext=false;firstPublication=nil

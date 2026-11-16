@@ -136,4 +136,9 @@ for group in SettledPrefix SettledPrefixTiming; do
     if [[ "$group" == SettledPrefixTiming ]]; then fixture_compiler+=(-D PREFIX_TIMING_TEST); fi
     "${fixture_compiler[@]}" -target arm64-apple-macosx13.0 -module-cache-path .build/hanq/module-cache Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift "Tests/OnsetRecovery/$group/main.swift" -o "$stage/$group"
     hanq_test_run "$stage/$group"
+    if [[ "$group" == SettledPrefix ]]; then
+        hanq_test_run "$stage/$group" --permission-recovery
+    else
+        hanq_test_run "$stage/$group" recorded --permission-recovery
+    fi
 done

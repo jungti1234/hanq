@@ -312,6 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 preferences.set(true, forKey: "didInitializeLaunchAtLogin")
             }
         }
+        InputDiagnostics.shared.record("main.login enabled=\(SMAppService.mainApp.status == .enabled)")
         // Preserve the macOS Caps Lock setting, including on first launch.
         // Discard any pending automatic enable left by an older build.
         preferences.removeObject(forKey: "pendingInitialRomanSwitchEnable")
