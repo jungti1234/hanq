@@ -5,6 +5,31 @@ import AppKit
 // Raw snapshots/keys stay in bounded memory; only fixed comparisons leave it.
 final class OnsetDiagnosticHistory {
     typealias Evidence = InputIncidentTrace.OnsetObservation
+    struct Read {
+        var field:AXUIElement?
+        var marked=InputIncidentMarkedRange.skipped
+        var range:CFRange?
+        var outcome=0,markedResult=0
+        mutating func observeMarkedResult(_ raw:CFTypeRef?,error:AXError) {
+            switch error {
+            case .success:markedResult=InputIncidentMarkedRange.classify(raw) == .unavailable ? 5:1
+            case .attributeUnsupported:markedResult=2
+            case .cannotComplete:markedResult=3
+            case .noValue:markedResult=4
+            default:markedResult=6
+            }
+        }
+        mutating func observeMarked(_ raw:CFTypeRef?) {
+            marked=InputIncidentMarkedRange.classify(raw)
+            range=nil
+            if marked == .active,let raw {
+                var value=CFRange()
+                if AXValueGetValue(raw as! AXValue,.cfRange,&value){range=value}
+            }
+        }
+    }
+    private var previousReadField:AXUIElement?
+    private var previousMarked=InputIncidentMarkedRange.skipped
     struct Prior {let snapshot:OnsetSnapshot;let completed:Double}
     private var prior:[Prior]=[]
     private var seed:[Prior]=[]
@@ -19,7 +44,7 @@ final class OnsetDiagnosticHistory {
     var emit:(Evidence,Bool)->Void = {_,_ in}
     var active:Bool {first != nil}
     var retainedSnapshots:Int {prior.count+seed.count+(baseline == nil ? 0:1)}
-    func reset(){prior=[];seed=[];first=nil;field=nil;baseline=nil;keys=[];last=nil;samples=0;coalesced=0;captured=false}
+    func reset(){previousReadField=nil;previousMarked = .skipped;prior=[];seed=[];first=nil;field=nil;baseline=nil;keys=[];last=nil;samples=0;coalesced=0;captured=false}
     func remember(_ snapshot:OnsetSnapshot,at time:Double){
         prior.removeAll{time-$0.completed>2 || time<$0.completed}
         guard snapshot.text.utf16.count<=4096,time.isFinite else{return}
@@ -31,21 +56,24 @@ final class OnsetDiagnosticHistory {
     }
     func finish(_ reason:Int,at time:Double){
         if var value=last,let first {
+            value.runtime=nil
             value.phase=3;value.reason=reason;value.samples=samples;value.coalesced=coalesced
             value.firstKeyAgeMicros=Self.age(time-first.time)
             emit(value,false)
         }
+        previousReadField=nil;previousMarked = .skipped
         first=nil;field=nil;baseline=nil;seed=[];keys=[];last=nil;samples=0;coalesced=0;captured=false
     }
     func notification(_ reason:Int,at time:Double){
         guard var value=last,let first,time>=first.time,time-first.time<=2 else{return}
+        value.runtime=nil
         value.phase=2;value.reason=reason;value.firstKeyAgeMicros=Self.age(time-first.time)
         value.samples=samples;value.coalesced=coalesced;emit(value,false)
     }
     // Called only on the main observation path with reads the engine already made.
     // The first pair survives gate rejection for at most two seconds. Subsequent
     // text may match a prefix, but that never proves which operation inserted it.
-    func observe(_ snapshot:OnsetSnapshot?,passed:OnsetInputGate.PassedInput?,source:String,at time:Double){
+    func observe(_ snapshot:OnsetSnapshot?,passed:OnsetInputGate.PassedInput?,source:String,at time:Double,read:Read?=nil,runtime:InputIncidentTrace.OnsetRuntime?=nil){
         prior.removeAll{time-$0.completed>2 || time<$0.completed}
         if let first,time<first.time || time-first.time>2{finish(1,at:time)}
         if let first,source != first.sourceID{finish(2,at:time);prior=[]}
@@ -97,6 +125,38 @@ final class OnsetDiagnosticHistory {
             selection:selection,unicode:unicode,samples:samples,coalesced:coalesced,
             firstKeyAgeMicros:Self.age(time-first.time),firstEventTimestampMicros:Int(min(first.eventTimestamp/1000,9_000_000_000_000_000)),baselineAgeMicros:baseline.map{Self.age(first.time-$0.completed)})
         value.insertionEndRelation = insertionEndRelation
+        if var runtime {
+            runtime.publicationWindow = time-first.time<OnsetFirstPublication.observationLimit ? 1:2
+            runtime.observedKeys = min(65535,passed?.first.time==first.time ? (passed?.keys.count ?? 0):0)
+            runtime.heldKeys = min(65535,passed?.first.time==first.time ? (passed?.pressed.count ?? 0):0)
+            runtime.readOutcome=read?.outcome ?? 0
+            runtime.marked=read?.marked.rawValue ?? 0
+            runtime.markedResult=read?.markedResult ?? 0
+            if let observedField=read?.field {
+                runtime.focusRelation=previousReadField.map{CFEqual($0,observedField) ? 2:3} ?? 1
+                if runtime.focusRelation==2,let mark=read?.marked {
+                    switch (previousMarked,mark) {
+                    case (.empty,.empty):runtime.markedTransition=1
+                    case (.active,.active):runtime.markedTransition=2
+                    case (.empty,.active):runtime.markedTransition=3
+                    case (.active,.empty):runtime.markedTransition=4
+                    default:break // Missing reads break continuity, never imply end.
+                    }
+                }
+                // Relation to a fresh PRE-KEY caret, not a native replacement range
+                // or proof of which text is currently being composed.
+                let anchor=seed.last{CFEqual($0.snapshot.element,observedField) && $0.completed<first.time && first.time-$0.completed<=0.75}
+                if let anchor,anchor.snapshot.selection.length==0,let range=read?.range {
+                    let caret=anchor.snapshot.selection.location
+                    if range.location>caret{runtime.markedAnchor=2}
+                    else if range.length>caret-range.location{runtime.markedAnchor=1}
+                    else{runtime.markedAnchor=3}
+                }
+                previousReadField=observedField
+                previousMarked=read?.marked ?? .skipped
+            }else{previousReadField=nil;previousMarked = .skipped}
+            value.runtime=runtime
+        }
         let capture = !captured && keys.count==2
         if let last,value.sameState(last),!capture,time-lastEmission<0.25{coalesced=min(coalesced+1,1_000_000)}
         else {

@@ -44,10 +44,12 @@ let onsetRead = trace.beginRead(.onsetAX)
 let marked = InputIncidentFocusEvidence(markedRangeState: .empty, path: 1, role: 2, route: 1,
                                        ownerRelation: 1, elementRelation: 2, withinRead: 1)
 trace.endRead(.onsetAX, onsetRead, outcome: .success, focus: marked)
+var runtime=InputIncidentTrace.OnsetRuntime()
+runtime.marked=2;runtime.readOutcome=1;runtime.publicationWindow=2;runtime.observedKeys=3
 trace.onsetObservation(.init(episode: 1, phase: 1, reason: 0, keys: 2, baseline: 2, history: 1,
                              whole: 6, draft: 2, insertion: 3, selection: 3, unicode: 6, samples: 3,
                              coalesced: 0, firstKeyAgeMicros: 100000, firstEventTimestampMicros: 1,
-                             baselineAgeMicros: 1000, insertionEndRelation: 2))
+                             baselineAgeMicros: 1000, insertionEndRelation: 2, runtime:runtime))
 trace.flush()
 let read = trace.beginRead(.mismatchAX)
 trace.endRead(.mismatchAX, read)
@@ -76,6 +78,7 @@ for document in try first.incidents[0].documents.values {
 let reviewedLabels = try first.incidents[0].documents.values.flatMap { $0.sections.flatMap { $0.fields.map(\.label) } }
 check(reviewedLabels.contains("첫 자음 조합 범위 · 빈 범위"), "manual review shows marked-range classification")
 check(reviewedLabels.contains { $0.contains("삽입 끝보다 한 UTF-16 단위 뒤") }, "manual review shows caret crossing")
+check(reviewedLabels.contains { $0.contains("첫 표시 기한 초과") && $0.contains("편집기 내부 콜백 미관측") }, "manual review explains runtime and missing native coverage")
 check(trace.enabled, "review does not disable collection")
 let original = try manifest(directory)
 let copyURL = root.appendingPathComponent("copy")

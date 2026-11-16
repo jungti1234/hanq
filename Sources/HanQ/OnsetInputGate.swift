@@ -50,6 +50,9 @@ final class OnsetInputGate {
         reentryFrames=[];reentryDropped=0
         return (frames,dropped)
     }
+    #if PREFIX_HISTORY_TEST
+    var testAcceptedMarker:Int64?
+    #endif
     private var passedBaselineRevision:Int?
     private var passedBaselineSource=""
     // A known field permits observation only. It never reserves or holds input.
@@ -252,7 +255,11 @@ final class OnsetInputGate {
         }
         // Old-session replay must pass, but cannot acknowledge this session or
         // be captured again as physical input.
-        if Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)){route = .replayMarker;return Unmanaged.passUnretained(event)}
+        var acceptedFixture=false
+        #if PREFIX_HISTORY_TEST
+        acceptedFixture=testAcceptedMarker != nil && event.getIntegerValueField(.eventSourceUserData)==testAcceptedMarker
+        #endif
+        if Self.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) && !acceptedFixture{route = .replayMarker;return Unmanaged.passUnretained(event)}
         if event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{route = .manualMarker;return Unmanaged.passUnretained(event)}
         guard !stopped else{route = .onsetStopped;if type == .keyDown{traceReentry(.key,.stopped)};return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{route = .tapDisabled;fail("tap_disabled");return Unmanaged.passUnretained(event)}
@@ -328,7 +335,7 @@ final class OnsetGateThread {
     func start(){
         guard KeyboardStateMirror.shared.start() else {gate.stop();gate.failed?("state_boundary_failed");return}
         let worker=Thread{[self] in
-            let mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}
+            var mask:CGEventMask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].reduce(0){$0 | (1 << $1.rawValue)}
             guard let tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.tailAppendEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
                 let gate=Unmanaged<OnsetInputGate>.fromOpaque(ref!).takeUnretainedValue()
                 var processed=false

@@ -28,7 +28,7 @@ extension OnsetRecoveryEngine {
     }
     func restoreCommittedCaret(_ candidate:OnsetRecoveryPlan,_ snap:OnsetSnapshot)->Bool {
         guard snap.text==candidate.expected else{return false}
-        let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
+        let caret=NSRange(location:candidate.originalCaret,length:0)
         if snap.selection==caret{return true}
         guard snap.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{return false}
         // Cleanup only our exact selection on the original element. It neither
@@ -42,10 +42,16 @@ extension OnsetRecoveryEngine {
         beginCommittedCaretRestoration(candidate)
     }
     func beginCommittedCaretRestoration(_ candidate:OnsetRecoveryPlan){
+        if prefixCaretRestoring{verifySettledPrefixCaret();return}
         if committedCaretRestoring{verifyCommittedCaretRestoration();return}
+        if candidate.isSettledPrefix {
+            guard let field=planElement,let live=snapshot(),CFEqual(live.element,field),
+                  live.compositionEnded,currentSource()==repairSourceID,
+                  settledPrefixPublication?.isCurrent()==true else{park("prefix_cancel_context_changed");return}
+        }
         guard let field=planElement,let snap=originalSnapshot(field),
               snap.text==candidate.expected else{park("committed_cancel_unverified");return}
-        let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
+        let caret=NSRange(location:candidate.originalCaret,length:0)
         if snap.selection==caret,testReplaceText != nil{log("committed_replacement_cancelled");finishCommittedReplacement(snap);return}
         guard snap.selection==caret || snap.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{park("committed_cancel_unverified");return}
         // A successful range setter is not an acknowledgment. Issue cleanup
@@ -60,9 +66,15 @@ extension OnsetRecoveryEngine {
         guard recovering,!rollingBack,committedCaretRestoring,
               let candidate=currentPlan,candidate.isCommittedLate,let field=planElement else{return}
         guard gate?.healthy() ?? true else{park("committed_gate_closed");return}
+        if candidate.isSettledPrefix {
+            guard let live=snapshot(),CFEqual(live.element,field),live.compositionEnded,
+                  currentSource()==repairSourceID,settledPrefixPublication?.isCurrent()==true else{
+                park("prefix_cancel_context_changed");return
+            }
+        }
         if let restored=originalSnapshot(field){
             guard restored.text==candidate.expected else{park("committed_result_changed");return}
-            let caret=NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0)
+            let caret=NSRange(location:candidate.originalCaret,length:0)
             if restored.selection==caret {
                 if testReplaceText != nil {log("committed_replacement_cancelled");finishCommittedReplacement(restored);return}
                 let now=ProcessInfo.processInfo.systemUptime
@@ -85,6 +97,7 @@ extension OnsetRecoveryEngine {
               gate?.healthy() ?? true,currentSource()==repairSourceID,
               let live=snapshot(),CFEqual(live.element,selected.element),live.text==candidate.expected,
               live.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count) else{cancelCommittedSelection(candidate);return}
+        if candidate.isSettledPrefix && (!live.compositionEnded || settledPrefixPublication?.isCurrent() != true) {cancelCommittedSelection(candidate);return}
         // One request only, including when delivery is uncertain. Read
         // the original target to confirm; never retry the edit or replay keys.
         replayStarted=true;committedReplacementAwaiting=true
@@ -96,6 +109,7 @@ extension OnsetRecoveryEngine {
         verifyCommittedReplacement()
     }
     func verifyCommittedReplacement(){
+        if prefixCaretRestoring{verifySettledPrefixCaret();return}
         if committedCaretRestoring{verifyCommittedCaretRestoration();return}
         guard recovering,!rollingBack,committedReplacementAwaiting,let candidate=currentPlan,candidate.isCommittedLate,
               replayStarted,let field=planElement,let replacement=candidate.replayedText else{return}
@@ -104,7 +118,9 @@ extension OnsetRecoveryEngine {
         if let snap=originalSnapshot(field){
             let expected=(candidate.before as NSString).replacingCharacters(in:NSRange(location:candidate.caret,length:0),with:replacement)
             if snap.text==expected,snap.selection==NSRange(location:candidate.caret+replacement.utf16.count,length:0){
-                log("committed_replacement_confirmed");deliveryPrefixConfirmed=true;finishCommittedReplacement(snap);return
+                log("committed_replacement_confirmed");deliveryPrefixConfirmed=true
+                if candidate.isSettledPrefix {restoreSettledPrefixCaret(snap);return}
+                finishCommittedReplacement(snap);return
             }
             if snap.text != candidate.expected{park("committed_result_changed");return}
             if now>=committedReplacementDeadline {
@@ -128,7 +144,8 @@ extension OnsetRecoveryEngine {
             }
             drain([]);return
         }
-        guard gate?.finishIfEmpty() ?? true else{
+        let released=gate?.finishIfEmpty() ?? true
+        guard released else{
             scheduleRecovery(0.001){[weak self] in guard let self,self.recovering else{return};self.finishCommittedReplacement(snap)};return
         }
         recovering=false;rollingBack=false;replayStarted=false;currentPlan=nil;planElement=nil

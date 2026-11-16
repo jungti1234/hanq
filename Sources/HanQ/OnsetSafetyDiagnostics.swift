@@ -5,6 +5,7 @@ import Foundation
 enum OnsetSafetyDiagnostics {
     enum Stage:String { case stop, pause, resume, parked, sessionEnd, ackWait, ackReady, posted, started }
     static let reasons:Set<String> = [
+        "prefix_plan_missing", "prefix_undo_ticket_changed", "prefix_context_changed", "prefix_result_unreadable", "prefix_caret_refused", "prefix_caret_changed", "prefix_caret_timeout", "prefix_body_changed", "prefix_result_timeout", "prefix_ticket_missing",
         "none", "observation_stale", "hold_deadline", "gate_lock_timeout", "tap_disabled",
         "pointer_during_repair", "shortcut_during_repair", "buffer_limit", "permission_revoked",
         "tap_create_failed", "acknowledgment_gate_unavailable", "replay_acknowledgment_timeout",

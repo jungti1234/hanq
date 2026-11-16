@@ -14,10 +14,13 @@ if !args.contains("--diagnose-input") {
     engine.log("privacy_check",["text":"PRIVATE_ONSET_SAFETY_PAYLOAD","code":40,"events":[event]])
     gate.fail("observation_stale")
     engine.traceSafety(.stop,reason:"acknowledgment_gate_unavailable")
+    engine.traceSafety(.stop,reason:"prefix_caret_refused")
+    engine.traceSafety(.stop,reason:"prefix_result_timeout")
     engine.acknowledgmentClock={10};engine.acknowledgmentWaitBegan=9.75
     engine.traceSafety(.ackWait)
     let path=args[args.firstIndex(of:"--diagnose-input")!+1]
     let text=try! String(contentsOfFile:path,encoding:.utf8)
+    precondition(text.contains("reason=prefix_caret_refused") && text.contains("reason=prefix_result_timeout"))
     precondition(text.contains("reason=other") && !text.contains("PRIVATE_ONSET_SAFETY_PAYLOAD"))
     precondition(text.contains("reason=acknowledgment_gate_unavailable") && text.contains("gateFailure=observation_stale"))
     precondition(text.contains("pending=1 retained=1 prefix=1 posted=3") && text.contains("waitMs=250"))

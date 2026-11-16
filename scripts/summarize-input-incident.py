@@ -1,9 +1,25 @@
 #!/usr/bin/env python3
 
+def onset_runtime(value):
+    bounds={'markedResult':(0,6),'receiverCoverage':(1,1),'readOutcome':(0,17),'marked':(0,3),'markedTransition':(0,4),'markedAnchor':(0,3),'focusRelation':(0,3),'publicationWindow':(1,2),'publicationProof':(0,2),'observedKeys':(0,65535),'heldKeys':(0,65535),'pending':(0,65535),'retainedCurrent':(0,65535),'retainedPrevious':(0,65535),'prefix':(0,65535),'valueSubscription':(0,2),'selectionSubscription':(0,2)}
+    if not isinstance(value,dict) or set(value)!=set(bounds) or any(type(value[k]) is not int or not lo<=value[k]<=hi for k,(lo,hi) in bounds.items()):raise ValueError('invalid onset runtime')
+    m,t=value['marked'],value['markedTransition']
+    if (value['markedAnchor'] and m!=3) or (t and (value['focusRelation']!=2 or m not in (2,3))) or (t in (1,4) and m!=2) or (t in (2,3) and m!=3):raise ValueError('invalid onset runtime relation')
+    return dict(marked_result=['not_read','range','unsupported','cannot_complete','no_value','malformed','other_error'][value['markedResult']],receiver='external_ax_only_native_dom_and_replacement_unobserved',
+        marked=['not_classified','unavailable','empty','active'][m],
+        transition=['unknown','empty_to_empty','active_to_active','empty_to_active','active_to_empty'][t],
+        anchor=['unknown','contains_pre_key_caret','after_pre_key_caret','before_pre_key_caret'][value['markedAnchor']],
+        focus=['unavailable','first_after_gap','same','changed'][value['focusRelation']],
+        publication_window=['','within_150ms','at_or_after_150ms'][value['publicationWindow']],
+        publication_proof=['absent','observed','attempted'][value['publicationProof']],
+        value_subscription=['not_registered','registered','failed'][value['valueSubscription']],
+        selection_subscription=['not_registered','registered','failed'][value['selectionSubscription']],
+        interpretation='sampled_ax_transition_not_native_composition_lifecycle')
+
 ONSET_RELATIONS=['unmeasured','first_exact','split_pair_exact','composed_pair_exact','first_prefix','split_pair_prefix','composed_pair_prefix','different']
 def onset_observation(value):
     bounds={'episode':(1,1_000_000_000),'phase':(1,3),'reason':(0,6),'keys':(1,2),'baseline':(0,4),'history':(1,2),'whole':(0,7),'draft':(0,3),'insertion':(0,7),'selection':(0,5),'unicode':(0,6),'samples':(1,1_000_000),'coalesced':(0,1_000_000),'firstKeyAgeMicros':(0,60_000_000),'firstEventTimestampMicros':(0,9_000_000_000_000_000)}
-    if not isinstance(value,dict) or set(value)-{'baselineAgeMicros','insertionEndRelation'}!=set(bounds):raise ValueError('invalid onset observation fields')
+    if not isinstance(value,dict) or set(value)-{'baselineAgeMicros','insertionEndRelation','runtime'}!=set(bounds):raise ValueError('invalid onset observation fields')
     if any(type(value[k]) is not int or not lo<=value[k]<=hi for k,(lo,hi) in bounds.items()):raise ValueError('invalid onset observation code')
     if 'baselineAgeMicros' in value and (type(value['baselineAgeMicros']) is not int or not 0<=value['baselineAgeMicros']<=60_000_000):raise ValueError('invalid onset baseline age')
     if (value['baseline'] in [2,3])!=('baselineAgeMicros' in value) or value['coalesced']>value['samples'] or (value['draft']!=2 and value['insertion']!=0):raise ValueError('invalid onset observation relation')
@@ -13,7 +29,8 @@ def onset_observation(value):
         if (type(relation) is not int or not 0 <= relation <= 3 or
                 (relation and (value['draft'] != 2 or value['selection'] not in (1, 2, 3)))):
             raise ValueError('invalid insertion end relation')
-    return dict(value, insertion_end_name=['unknown', 'at_end', 'one_utf16_after', 'other'][value['insertionEndRelation']] if 'insertionEndRelation' in value else 'unrecorded',whole_name=ONSET_RELATIONS[value['whole']],insertion_name=ONSET_RELATIONS[value['insertion']],
+    runtime=onset_runtime(value['runtime']) if 'runtime' in value else None
+    return dict(value, runtime_names=runtime, insertion_end_name=['unknown', 'at_end', 'one_utf16_after', 'other'][value['insertionEndRelation']] if 'insertionEndRelation' in value else 'unrecorded',whole_name=ONSET_RELATIONS[value['whole']],insertion_name=ONSET_RELATIONS[value['insertion']],
         baseline_name=['field_unknown','missing','pre_key_fresh','pre_key_old','post_key_only'][value['baseline']],
         draft_name=['unmeasured','equal','surroundings_preserved','surroundings_differ'][value['draft']],
         history_name=['','gate_present','retained_after_gate_end'][value['history']],
@@ -138,7 +155,7 @@ def describe_ax(value):
 
 
 ONSET_SITES={1:'reservation',2:'publication',3:'history',4:'claim'}
-ONSET_REASONS=dict(enumerate(['baseline_missing','baseline_available','publication_blocked','source_changed','representation_missing','representation_unchanged','publication_deadline','history_size','layout_unavailable','first_body_mismatch','partial_prefix_waiting','publication_observed','proof_current','proof_unavailable','history_waiting','history_complete','history_rejected','history_candidate','keys_still_down','claim_rejected','claim_accepted','guard_failed','field_changed','reservation_released','selection_not_writable'],start=1))
+ONSET_REASONS=dict(enumerate(['baseline_missing','baseline_available','publication_blocked','source_changed','representation_missing','representation_unchanged','publication_deadline','history_size','layout_unavailable','first_body_mismatch','partial_prefix_waiting','publication_observed','proof_current','proof_unavailable','history_waiting','history_complete','history_rejected','history_candidate','keys_still_down','claim_rejected','claim_accepted','guard_failed','field_changed','reservation_released','selection_not_writable','settled_prefix_observed','settled_prefix_unconfirmed'],start=1))
 ONSET_DISCOVERY=['unmeasured','context_unavailable','window_unavailable','focus_unavailable','scan_in_progress','no_editor','unique_complete','multiple_editors','incomplete','scan_limit']
 ONSET_REPRESENTATION=['unmeasured','recorded','batch_unavailable','role_or_security','value_unavailable','empty_or_size_limit','count_unavailable','count_mismatch','caret_not_origin','disabled_or_hidden','window_unavailable','window_mismatch','context_unavailable','read_deadline']
 ONSET_LOOKUP=['unmeasured','available','no_same_field_record','no_pre_key_record','pre_key_sample_too_old','clock_invalid','cache_expired','not_ready','front_or_owner_changed','window_unavailable','window_changed','not_ready_after_read','front_changed_after_read']

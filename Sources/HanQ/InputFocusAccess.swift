@@ -169,15 +169,26 @@ final class InputFocusAccess {
         return NSRunningApplication(processIdentifier:pid)
     }
 
-    static func attributes(_ element:AXUIElement,_ names:[String])->[CFTypeRef?] {
+    static func attributes(_ element:AXUIElement,_ names:[String],observed:((String,CFTypeRef?,AXError)->Void)?=nil)->[CFTypeRef?] {
         resolveAttributes(names,batch:{
             var values:CFArray?
             guard AXUIElementCopyMultipleAttributeValues(element,names as CFArray,[],&values) == .success else{return nil}
-            return values as? [AnyObject]
+            let result=values as? [AnyObject]
+            if let observed,let result,result.count==names.count {
+                for (name,value) in zip(names,result) {
+                    var error=AXError.success
+                    if CFGetTypeID(value)==AXValueGetTypeID(),AXValueGetType(value as! AXValue) == .axError {
+                        _ = AXValueGetValue(value as! AXValue,.axError,&error)
+                    }
+                    observed(name,error == .success ? value:nil,error)
+                }
+            }
+            return result
         },single:{ name in
             var value:CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element,name as CFString,&value) == .success else{return nil}
-            return value
+            let error=AXUIElementCopyAttributeValue(element,name as CFString,&value)
+            observed?(name,error == .success ? value:nil,error)
+            return error == .success ? value:nil
         })
     }
 

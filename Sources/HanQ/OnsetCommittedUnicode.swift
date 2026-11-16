@@ -9,6 +9,7 @@ extension OnsetRecoveryEngine {
               let candidate=currentPlan,candidate.isCommittedLate,
               let live=snapshot(),CFEqual(live.element,field),live.text==candidate.expected,
               live.selection==NSRange(location:candidate.caret,length:candidate.roman.utf16.count),
+              (!candidate.isSettledPrefix || (live.compositionEnded && settledPrefixPublication?.isCurrent() == true)),
               (1...32).contains(replacement.utf16.count),
               let source=CGEventSource(stateID:.hidSystemState) else{return false}
         source.userData=compositionCommitMarker

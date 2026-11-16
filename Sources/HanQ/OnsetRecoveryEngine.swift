@@ -2,17 +2,19 @@ import AppKit
 import Carbon
 
 let onsetKoreanID="com.apple.inputmethod.Korean.2SetKorean"
-struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange }
+struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var compositionEnded=false }
 final class OnsetRecoveryEngine:NSObject {
     var decisionTrace=InputIncidentTrace.shared
     let diagnosticHistory=OnsetDiagnosticHistory()
+    var diagnosticRead=OnsetDiagnosticHistory.Read()
+    private var valueSubscription=0,selectionSubscription=0
     private var witnessTraceID:ObjectIdentifier?
     private var witnessDiagnosticGeneration:Int32=0
     func synchronizeWitnessDiagnostics(){
         let generation=decisionTrace.collectionGeneration,traceID=ObjectIdentifier(decisionTrace)
         if witnessTraceID != traceID || witnessDiagnosticGeneration != generation {
             focusHandoff.resetWitnessDiagnostics();witnessTraceID=traceID;witnessDiagnosticGeneration=generation
-            diagnosticHistory.reset()
+            diagnosticHistory.reset();diagnosticRead=OnsetDiagnosticHistory.Read()
         }
         focusHandoff.collectWitnessDiagnostics=generation>0
         diagnosticHistory.emit={ [weak self] value,capture in self?.decisionTrace.onsetObservation(value,capture:capture) }
@@ -47,11 +49,16 @@ final class OnsetRecoveryEngine:NSObject {
             for name in [kAXValueChangedNotification,kAXSelectedTextChangedNotification]{AXObserverRemoveNotification(axObserver,old,name as CFString)}
         }
         observedField=field
+        valueSubscription=0;selectionSubscription=0
         for name in [kAXValueChangedNotification,kAXSelectedTextChangedNotification]{
             let result=AXObserverAddNotification(axObserver,field,name as CFString,Unmanaged.passUnretained(self).toOpaque())
+            if name==kAXValueChangedNotification{valueSubscription=result == .success ? 1:2}
+            else{selectionSubscription=result == .success ? 1:2}
             log("observation_subscription",["notification":name,"result":result.rawValue])
         }
     }
+    var prefixCandidateEnabled=ProcessInfo.processInfo.arguments.contains("--enable-settled-prefix-candidate")
+    lazy var prefixCoordinator=OnsetPrefixCoordinator(self)
     var gate:OnsetInputGate?
     var gateThread:OnsetGateThread?
     var lastEditable:OnsetSnapshot?
@@ -193,7 +200,9 @@ final class OnsetRecoveryEngine:NSObject {
     var passedTime:Double?
     var passedBaseline:OnsetSnapshot?
     var passedField:AXUIElement?
-    func cancelDeferredObservation(){gate?.discardDeferred();deferredTime=nil;deferredBaseline=nil;deferredField=nil;passedTime=nil;passedBaseline=nil;passedField=nil;firstPublication=nil;firstPublicationAttemptedTime=nil}
+    func cancelDeferredObservation(){gate?.discardDeferred();deferredTime=nil;deferredBaseline=nil;deferredField=nil;passedTime=nil;passedBaseline=nil;passedField=nil;firstPublication=nil;settledPrefixPublication=nil;firstPublicationAttemptedTime=nil}
+    var settledPrefixPublication:OnsetFirstPublication?
+    var prefixCaretRestoring=false
     var firstPublication:OnsetFirstPublication?
     var firstPublicationAttemptedTime:Double?
     var publishedPassedBaselines:[(revision:Int,snapshot:OnsetSnapshot)]=[]
@@ -222,7 +231,7 @@ final class OnsetRecoveryEngine:NSObject {
     func observePassedIdentity(){
         guard let p=gate?.passedObservation(),passedTime != p.first.time else{return}
         passedTime=p.first.time
-        firstPublication=nil;firstPublicationAttemptedTime=nil
+        firstPublication=nil;settledPrefixPublication=nil;firstPublicationAttemptedTime=nil
         if let revision=p.baselineRevision {
             guard let baseline=publishedPassedBaselines.first(where:{$0.revision==revision})?.snapshot else{
                 gate?.discardPassed(reason:.baseline_missing);passedBaseline=nil;passedField=nil;return
@@ -239,6 +248,8 @@ final class OnsetRecoveryEngine:NSObject {
             // A lone passed key is not a pending repair. Keep the existing
             // outside/field observation path available when no body is read.
             if p.keys.count==1{return false}
+            if unavailableReason=="active_composition",let proof=settledPrefixPublication,
+               proof.first.time==p.first.time,proof.isCurrent(){return true}
             if !transientReadFailure{gate.discardPassed()};return true
         }
         if let field=passedField,!CFEqual(field,snap.element){decisionTrace.onsetDecision(.history,.fieldChanged,firstTime:p.first.time,keys:p.keys.count);traceReentryObservation("history_field_changed",hasSnapshot:true);gate.discardPassed(reason:.field_changed);return false}
@@ -247,7 +258,9 @@ final class OnsetRecoveryEngine:NSObject {
         if let observed {
             passedBaseline=observed
         }
+        observeSettledPrefixPublication(p,snap)
         if observeFirstPublication(p,snap){return true}
+        if sampleSettledPrefix(p,snap){return true}
         // Record the first actual publication, including a contradictory one,
         // before a later two-key body can become eligible. One key never edits.
         guard p.keys.count>=2 else{return false}
@@ -476,7 +489,7 @@ final class OnsetRecoveryEngine:NSObject {
         if [.leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel].contains(type)
             || (type == .keyDown && !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty) {
             focusHandoff.invalidateEmptyEntries();focusHandoff.reset()
-            firstPublication=nil;firstPublicationAttemptedTime=nil
+            firstPublication=nil;settledPrefixPublication=nil;firstPublicationAttemptedTime=nil
         }
     }
     func observeFocusHandoff(){
@@ -722,6 +735,9 @@ final class OnsetRecoveryEngine:NSObject {
         guard enabled else{return}
         guard AXIsProcessTrusted() else{emergencyStop("permission_revoked");return}
         gate?.beat();collectHeld()
+        if prefixCandidateEnabled {
+            if prefixCoordinator.busy {prefixCoordinator.tick();return}
+        }
         if waitingForContext{resumeIfReady();return}
         if recovering {
             if committedReplacementAwaiting {verifyCommittedReplacement();return}
@@ -757,6 +773,7 @@ final class OnsetRecoveryEngine:NSObject {
         gate?.beat()
     }
     func snapshot()->OnsetSnapshot?{
+        diagnosticRead=OnsetDiagnosticHistory.Read()
         let incidentRead=InputIncidentTrace.shared.beginRead(.onsetAX)
         var incidentMeasured=false
         let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
@@ -768,6 +785,11 @@ final class OnsetRecoveryEngine:NSObject {
             let allowed=incidentMeasured && !["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason)
             var focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:1)
             focus?.markedRangeState = markedRangeState
+            if allowed {
+                diagnosticRead.outcome=InputIncidentTrace.ReadOutcome.snapshot(unavailableReason).rawValue
+                if unavailableReason=="focus_changed_during_snapshot"{diagnosticRead.field=nil;diagnosticRead.range=nil}
+            }
+            else if testSnapshot == nil {diagnosticRead=OnsetDiagnosticHistory.Read()}
             InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus)
         }
         if let testSnapshot{return testSnapshot()}
@@ -784,15 +806,20 @@ final class OnsetRecoveryEngine:NSObject {
         guard let ax,let element=focusedElement(ax,pid:target.processIdentifier) else{
             unavailableReason=focusAccess.lastOwner==target.processIdentifier ? "focused_element_unreadable":"target_not_frontmost";return nil
         }
-        let context=InputFocusAccess.attributes(element,[kAXSubroleAttribute,kAXRoleAttribute]+(recovering ? []:["AXMarkedTextRange"]))
+        if incidentMeasured {diagnosticRead.field=element}
+        let markedObserver:((String,CFTypeRef?,AXError)->Void)? = incidentMeasured ? { [self] name,value,error in
+            if name=="AXMarkedTextRange"{diagnosticRead.observeMarkedResult(value,error:error)}
+        }:nil
+        let context=InputFocusAccess.attributes(element,[kAXSubroleAttribute,kAXRoleAttribute]+(recovering && currentPlan?.isSettledPrefix != true ? []:["AXMarkedTextRange"]),observed:markedObserver)
         if incidentMeasured {focusRead?.observedRole(context[1] as? String)}
         guard context[0] as? String != "AXSecureTextField" else{unavailableReason="secure_field";return nil}
         guard let role=context[1] as? String else{unavailableReason="role_unreadable";return nil}
         guard OnsetEditableRole.supports(role) else{unavailableReason="not_supported_text_field";return nil}
         // Respect an editor's explicit active composition; unsupported attributes
         // remain unknown, as in the original compatibility probe.
-        if !recovering {
+        if !recovering || currentPlan?.isSettledPrefix == true {
             markedRangeState = InputIncidentMarkedRange.classify(context[2])
+            if incidentMeasured {diagnosticRead.observeMarked(context[2])}
             if markedRangeState == .active {
                 unavailableReason="active_composition";return nil
             }
@@ -809,7 +836,7 @@ final class OnsetRecoveryEngine:NSObject {
             let change=incidentShapeProbe.observe(identity:identity,text:text,selection:NSRange(location:range.location,length:range.length),generation:trace.collectionGeneration,ax:evidence)
             trace.shape(.onsetAX,identity:identity,count:text.utf16.count,selected:range.length>0,editing:recovering,change:change)
         } else {incidentShapeProbe.reset()}
-        return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length))
+        return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length),compositionEnded:markedRangeState == .empty)
     }
     func observeAvailability(_ snap:OnsetSnapshot?){
         let availability=snap == nil ? unavailableReason : "tracking"
@@ -898,15 +925,29 @@ final class OnsetRecoveryEngine:NSObject {
             return
         }
         let observed=snapshot();traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
-        if decisionTrace.enabled,!IsSecureEventInputEnabled(){
-            diagnosticHistory.observe(observed,passed:gate?.passedObservation(),source:cachedLayoutID,at:ProcessInfo.processInfo.systemUptime)
-        }else if !decisionTrace.enabled || IsSecureEventInputEnabled(){diagnosticHistory.reset()}
+        if decisionTrace.enabled,!IsSecureEventInputEnabled(),!["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason) {
+            let passed=gate?.passedObservation()
+            var runtime=InputIncidentTrace.OnsetRuntime()
+            runtime.pending=min(65535,pending.count)
+            runtime.retainedPrevious=min(65535,inheritedRetainedCount)
+            runtime.retainedCurrent=min(65535,max(0,retainedInput.count-inheritedRetainedCount))
+            runtime.prefix=min(65535,prefixRemainder.count)
+            runtime.publicationProof=passed.map{row in firstPublication?.first.time==row.first.time ? 1:(firstPublicationAttemptedTime==row.first.time ? 2:0)} ?? 0
+            if axObserver != nil,let field=diagnosticRead.field,let registered=observedField,CFEqual(field,registered) {
+                runtime.valueSubscription=valueSubscription;runtime.selectionSubscription=selectionSubscription
+            }
+            diagnosticHistory.observe(observed,passed:passed,source:cachedLayoutID,at:ProcessInfo.processInfo.systemUptime,read:diagnosticRead,runtime:runtime)
+        }else{diagnosticHistory.reset();diagnosticRead=OnsetDiagnosticHistory.Read()}
         sampleEarly(observed)
     }
 
     func beginRecovery(_ candidate:OnsetRecoveryPlan,_ snap:OnsetSnapshot,deferred:OnsetInputGate.Reservation?=nil,passed:OnsetInputGate.PassedInput?=nil){
         guard canBeginRepair() else{onset.cancel();emergencyStop("manual_edit_busy");return}
-        committedNativeIssued=false
+        committedNativeIssued=false;prefixCaretRestoring=false
+        if candidate.isSettledPrefix {
+            guard snap.compositionEnded,let passed,passed.pressed.isEmpty,
+                  settledPrefixPublication?.matches(passed,snap)==true else{return}
+        }
         if candidate.isObservedReplay {
             guard let passed,passed.pressed.isEmpty,passed.keys.count==candidate.codes.count,
                   zip(passed.keys,candidate.codes).allSatisfy({$0.0==$0.1}),
@@ -943,13 +984,14 @@ final class OnsetRecoveryEngine:NSObject {
             if skipSupersededRepair(candidate,current){return}
             abort("pre_edit_mismatch");return
         }
-        if candidate.supportsReplay || (candidate.isCommittedLate && testReplaceText==nil) {
+        if candidate.supportsReplay || (candidate.isCommittedLate && !candidate.isSettledPrefix && testReplaceText==nil) {
             commitConsonantComposition(candidate,current)
             return
         }
         requestRepairSelection(candidate,current)
     }
     func requestRepairSelection(_ candidate:OnsetRecoveryPlan,_ current:OnsetSnapshot){
+        if candidate.isSettledPrefix && (!current.compositionEnded || settledPrefixPublication?.isCurrent() != true) {park("prefix_composition_unconfirmed");return}
         let range=NSRange(location:candidate.caret,length:candidate.roman.utf16.count)
         selectionRequestAt=ProcessInfo.processInfo.systemUptime;selectionRetried=false
         guard setRange(current.element,range) == .success else{abort("selection_failed");return}
@@ -1009,6 +1051,7 @@ final class OnsetRecoveryEngine:NSObject {
             else{abort("selection_not_applied")}
             return
         }
+        if candidate.isSettledPrefix && (!selected.compositionEnded || settledPrefixPublication?.isCurrent() != true) {park("prefix_composition_changed");return}
         if candidate.isCommittedLate,testReplaceText==nil,committedSelectedText(selected.element) != candidate.roman {
             guard remaining>0,ProcessInfo.processInfo.systemUptime-selectionRequestAt<0.12 else{cancelCommittedSelection(candidate);return}
             scheduleRecovery(0.002){[weak self] in self?.awaitSelection(candidate,before,range,remaining:remaining-1)}
@@ -1201,6 +1244,7 @@ final class OnsetRecoveryEngine:NSObject {
         parkTerminal(reason,site:site)
     }
     func parkTerminal(_ reason:String,site:String = #function){
+        if prefixCandidateEnabled{prefixCoordinator.recordStop(reason);prefixCoordinator.close()}
         decisionTrace.recordFailure(action:2,site:"onset."+site,reason:reason)
         diagnosticHistory.finish(5,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         traceSafety(.parked,reason:reason)
@@ -1218,6 +1262,7 @@ final class OnsetRecoveryEngine:NSObject {
         closeSession()
     }
     func closeSession(){
+        if prefixCandidateEnabled{prefixCoordinator.close()}
         diagnosticHistory.finish(5,at:ProcessInfo.processInfo.systemUptime);diagnosticHistory.reset()
         traceSafety(.sessionEnd)
         recoveryEpoch+=1;waitingForContext=false;firstPublication=nil

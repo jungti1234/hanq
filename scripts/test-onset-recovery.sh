@@ -129,3 +129,11 @@ bash scripts/test-onset-diagnostic-history.sh
 # Key-up observation stays off the synchronous input path; next-down/timer guards remain.
 swiftc Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift -module-cache-path .build/hanq/module-cache Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift Tests/OnsetRecovery/KeyUpObservation/main.swift -o "$stage/keyup-observation"
 hanq_test_run "$stage/keyup-observation"
+
+# Late first-pair proof, initial caret preservation, native history pass-through and racing originals.
+for group in SettledPrefix SettledPrefixTiming; do
+    fixture_compiler=(swiftc)
+    if [[ "$group" == SettledPrefixTiming ]]; then fixture_compiler+=(-D PREFIX_TIMING_TEST); fi
+    "${fixture_compiler[@]}" -target arm64-apple-macosx13.0 -module-cache-path .build/hanq/module-cache Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Onset*.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/KoreanKeyboardLayout.swift "Tests/OnsetRecovery/$group/main.swift" -o "$stage/$group"
+    hanq_test_run "$stage/$group"
+done

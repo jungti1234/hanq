@@ -419,6 +419,41 @@ final class InputIncidentTrace {
     let fieldRegistry=InputIncidentFieldRegistry()
     enum Lane:Int,Codable {case hid=1,main,onset,mismatch,boundary,onsetAX,mismatchAX,sourceBoundary}
     enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison,onsetObservation}
+    // AX samples only. Native input callbacks, DOM transactions and replacement
+    // ranges are not observable from this process; coverage 1 states that limit.
+    struct OnsetRuntime:Codable,Equatable {
+        var receiverCoverage=1
+        var markedResult=0 // 0 not read, 1 range, 2 unsupported, 3 cannotComplete, 4 noValue, 5 malformed, 6 other error
+        var readOutcome=0,marked=0,markedTransition=0,markedAnchor=0,focusRelation=0
+        var publicationWindow=0,publicationProof=0
+        var observedKeys=0,heldKeys=0,pending=0,retainedCurrent=0,retainedPrevious=0,prefix=0
+        var valueSubscription=0,selectionSubscription=0
+        static let keys=Set(["markedResult","receiverCoverage","readOutcome","marked","markedTransition","markedAnchor","focusRelation","publicationWindow","publicationProof","observedKeys","heldKeys","pending","retainedCurrent","retainedPrevious","prefix","valueSubscription","selectionSubscription"])
+        var valid:Bool {
+            receiverCoverage==1 && (0...6).contains(markedResult) && (0...17).contains(readOutcome) && (0...3).contains(marked) &&
+            (0...4).contains(markedTransition) && (0...3).contains(markedAnchor) && (0...3).contains(focusRelation) &&
+            (1...2).contains(publicationWindow) && (0...2).contains(publicationProof) &&
+            [observedKeys,heldKeys,pending,retainedCurrent,retainedPrevious,prefix].allSatisfy{(0...65535).contains($0)} &&
+            (0...2).contains(valueSubscription) && (0...2).contains(selectionSubscription) &&
+            (markedAnchor==0 || marked==3) &&
+            (markedTransition==0 || (focusRelation==2 && (2...3).contains(marked))) &&
+            (![1,4].contains(markedTransition) || marked==2) &&
+            (![2,3].contains(markedTransition) || marked==3)
+        }
+        static func parse(_ object:[String:Any])->Self? {
+            guard Set(object.keys)==keys,object.values.allSatisfy({value in
+                guard let n=value as? NSNumber else{return false}
+                return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
+            }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
+            return value
+        }
+        var summary:String {
+            let results=["미측정","범위 조회됨","속성 미지원","조회 완료 불가","값 없음","범위 형식 오류","기타 조회 오류"]
+            let marks=["판정 생략","미지원·조회 불가","빈 범위","활성 범위"]
+            return "AX 조합 \(marks[marked])/\(results[markedResult]) · 첫 표시 기한 \(publicationWindow==1 ? "이내":"초과") · 통과 키 \(observedKeys)/누름 \(heldKeys) · 현재 보관 \(retainedCurrent)/이전 보관 \(retainedPrevious) · 편집기 내부 콜백 미관측"
+        }
+    }
+
     struct OnsetObservation:Codable,Equatable {
         // Fixed comparisons, not insertion provenance. No text, key values,
         // positions, hashes, application names or editor transaction payloads.
@@ -427,6 +462,7 @@ final class InputIncidentTrace {
         var firstEventTimestampMicros:Int
         var baselineAgeMicros:Int?
         var insertionEndRelation: Int? = nil
+        var runtime: OnsetRuntime? = nil
         static let required=Set(["episode","phase","reason","keys","baseline","history","whole","draft","insertion","selection","unicode","samples","coalesced","firstKeyAgeMicros","firstEventTimestampMicros"])
         var valid:Bool {
             (1...1_000_000_000).contains(episode) && (1...3).contains(phase) &&
@@ -438,7 +474,7 @@ final class InputIncidentTrace {
             (0...60_000_000).contains(firstKeyAgeMicros) && (0...9_000_000_000_000_000).contains(firstEventTimestampMicros) &&
             (baselineAgeMicros.map{(0...60_000_000).contains($0)} ?? true) &&
             ((baseline==2 || baseline==3) == (baselineAgeMicros != nil)) &&
-            (draft==2 || insertion==0) &&
+            (draft==2 || insertion==0) && (runtime?.valid ?? true) &&
             (insertionEndRelation.map { (0...3).contains($0) && ($0 == 0 || (draft == 2 && (1...3).contains(selection))) } ?? true)
         }
         func sameState(_ other:Self)->Bool {
@@ -448,7 +484,10 @@ final class InputIncidentTrace {
             return a==b
         }
         static func parse(_ object:[String:Any])->Self? {
-            guard Set(object.keys).subtracting(["baselineAgeMicros", "insertionEndRelation"])==required,object.values.allSatisfy({value in
+            if let raw=object["runtime"] {
+                guard let fields=raw as? [String:Any],OnsetRuntime.parse(fields) != nil else{return nil}
+            }
+            guard Set(object.keys).subtracting(["baselineAgeMicros", "insertionEndRelation", "runtime"])==required,object.filter({$0.key != "runtime"}).values.allSatisfy({value in
                 guard let n=value as? NSNumber else{return false}
                 return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue==Double(n.intValue)
             }),let data=try? JSONSerialization.data(withJSONObject:object),let value=try? JSONDecoder().decode(Self.self,from:data),value.valid else{return nil}
@@ -459,7 +498,7 @@ final class InputIncidentTrace {
             let prior=["미확인","기록 없음","입력 전 기록 있음","입력 전 기록 오래됨","입력 후 기록만 있음"]
             let ends = ["판정 불가", "삽입 끝", "삽입 끝보다 한 UTF-16 단위 뒤", "그 밖의 위치"]
             let caret = insertionEndRelation.map { " · 커서 " + ends[$0] } ?? ""
-            return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion])\(caret) · 삽입 주체 미확인"
+            return "첫 입력 관측 #\(episode): 기준 \(prior[baseline]), 본문 \(relation[whole]), 추가 범위 \(relation[insertion])\(caret) · 삽입 주체 미확인" + (runtime.map{" · " + $0.summary} ?? "")
         }
     }
     struct BoundaryEvidence:Codable,Equatable {
@@ -497,6 +536,7 @@ final class InputIncidentTrace {
         case publicationDeadline,historySize,layoutUnavailable,firstBodyMismatch,partialPrefixWaiting,publicationObserved
         case proofCurrent,proofUnavailable,historyWaiting,historyComplete,historyRejected,historyCandidate,keysStillDown
         case claimRejected,claimAccepted,guardFailed,fieldChanged,reservationReleased,selectionNotWritable
+        case settledPrefixObserved,settledPrefixUnconfirmed
     }
     // Branch outcomes only; no identifiers, event timestamps, text or cursor positions.
     enum SwitchKeyCheck:Int {case unmeasured, matched, noSwitch, timestampMissing, firstNotSeen, firstDiffers, expired, appChanged, originalWindowMissing, currentWindowMissing, windowChanged, layoutNotReady, firstWindowMissing, firstWindowChanged, matchedPreSwitchWindow
@@ -846,13 +886,14 @@ final class InputIncidentTrace {
             "hanq_input_unavailable", "hold_deadline", "layout_override_present", "manual_edit_busy",
             "observation_stale", "permission_revoked", "pointer_during_repair", "pre_edit_context_changed",
             "pre_edit_mismatch", "prefix_confirmation_context_lost", "prefix_not_visible", "prefix_post_rejected",
-            "prefix_text_mismatch", "probe_running", "repair_context_lost", "replay_acknowledgment_timeout",
+            "prefix_text_mismatch", "prefix_composition_unconfirmed", "prefix_composition_changed",
+            "prefix_cancel_context_changed", "prefix_caret_context_changed", "prefix_caret_restore_failed", "prefix_caret_changed", "prefix_caret_timeout", "probe_running", "repair_context_lost", "replay_acknowledgment_timeout",
             "replay_target_changed", "role_unreadable", "rollback_context_not_intact", "rollback_source_changed",
             "round_trip_unconfirmed", "secure_field", "selection_deadline", "selection_field_changed",
             "selection_invalid", "selection_retry_rejected", "selection_source_changed", "selection_unreadable",
             "shortcut_during_repair", "snapshot_unavailable", "tap_create_failed", "target_changed",
             "text_unreadable", "unsafe_delete_payload_blocked", "unsupported_repair_plan", "web_editor_unconfirmed",
-            "outbound_not_observed",
+            "outbound_not_observed", "prefix_plan_missing", "prefix_undo_ticket_changed", "prefix_context_changed", "prefix_result_unreadable", "prefix_caret_refused", "prefix_body_changed", "prefix_result_timeout", "prefix_ticket_missing"
         ]
     }
     struct KeyboardBurst: Codable {

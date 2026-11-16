@@ -9,6 +9,19 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_onset_runtime_bounds_unknowns_and_old_capture(self):
+        value=dict(markedResult=1,receiverCoverage=1,readOutcome=9,marked=3,markedTransition=3,markedAnchor=2,focusRelation=2,publicationWindow=2,publicationProof=0,observedKeys=3,heldKeys=1,pending=0,retainedCurrent=0,retainedPrevious=4,prefix=0,valueSubscription=1,selectionSubscription=2)
+        parsed=summary.onset_runtime(value)
+        self.assertEqual(parsed['anchor'],'after_pre_key_caret')
+        self.assertEqual(parsed['publication_window'],'at_or_after_150ms')
+        self.assertIn('native_dom_and_replacement_unobserved',parsed['receiver'])
+        for patch in [dict(marked=True),dict(marked=-1),dict(marked=4),dict(markedTransition=4),dict(markedAnchor=4),dict(focusRelation=0),dict(observedKeys=65536),dict(receiverCoverage=2),dict(nativeText='secret'),dict(readOutcome=None)]:
+            with self.assertRaises(ValueError): summary.onset_runtime(dict(value,**patch))
+        self.assertEqual(summary.onset_runtime(dict(value,marked=1,markedTransition=0,markedAnchor=0))['transition'],'unknown')
+        row=dict(episode=1,phase=1,reason=0,keys=2,baseline=1,history=1,whole=2,draft=0,insertion=0,selection=2,unicode=1,samples=1,coalesced=0,firstKeyAgeMicros=195000,firstEventTimestampMicros=1)
+        self.assertIsNone(summary.onset_observation(row)['runtime_names'])
+        self.assertEqual(summary.onset_observation(dict(row,runtime=value))['runtime_names']['marked'],'active')
+
     def test_caret_crossing_uses_observed_key_order(self):
         def key(ms, event):
             return dict(kind=1, lane='main', edge=1, inputOrigin=1, key_class_name='letter_position',
@@ -75,8 +88,10 @@ class IncidentSummaryTests(unittest.TestCase):
         row=dict(sequence=1,milliseconds=80,lane=3,kind=13,event=0,edge=2,category=12,inputOrigin=0,consumed=False,durationMicros=0,count=0,selected=False,field=0,observationTiming=timing,onsetEvidence=dict(keys=1,firstKeyAgeMicros=80000))
         parsed=summary.summarize(dict(schema=1,trigger=1,frames=[row]))['onset_decisions'][0]
         self.assertEqual((parsed['site'],parsed['reason'],parsed['firstKeyAgeMicros']),('publication','publication_observed',80000))
-        for patch in [dict(kind=6),dict(lane=4),dict(edge=5),dict(edge=True),dict(category=True),dict(count=False),dict(text='private'),dict(category=26),dict(event=1),dict(inputOrigin=1),dict(count=1),dict(text='unused',onsetEvidence=dict(keys=1,text='private')),dict(onsetEvidence=dict(keys=True)),dict(onsetEvidence=dict(keys=17)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=-1)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=60000001)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=True)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=None))]:
+        for patch in [dict(kind=6),dict(lane=4),dict(edge=5),dict(edge=True),dict(category=True),dict(count=False),dict(text='private'),dict(category=28),dict(event=1),dict(inputOrigin=1),dict(count=1),dict(text='unused',onsetEvidence=dict(keys=1,text='private')),dict(onsetEvidence=dict(keys=True)),dict(onsetEvidence=dict(keys=17)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=-1)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=60000001)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=True)),dict(onsetEvidence=dict(keys=1,firstKeyAgeMicros=None))]:
             with self.assertRaises(ValueError):summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,**patch)]))
+        for code,name in [(26,'settled_prefix_observed'),(27,'settled_prefix_unconfirmed')]:
+            self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[dict(row,category=code)]))['onset_decisions'][0]['reason'],name)
         self.assertEqual(summary.summarize(dict(schema=1,trigger=1,frames=[]))['onset_decisions'],[])
 
     def test_onset_detail_is_optional_bounded_and_named(self):

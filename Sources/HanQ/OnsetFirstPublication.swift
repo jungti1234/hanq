@@ -3,6 +3,7 @@ import AppKit
 // A witnessed replacement of a prior representation is not a claim that the
 // prior document was empty. It authorizes only later exact whole-body matching.
 struct OnsetFirstPublication {
+    static let observationLimit:Double=0.15
     let first:OnsetInputGate.Reservation
     let field:AXUIElement
     let isCurrent:()->Bool
@@ -35,7 +36,7 @@ extension OnsetRecoveryEngine {
         // never holds a key, treats a label as empty, or writes to the editor.
         guard !InputFocusAccess.literalTextEqual(previous.text,snap.text) else{decision(.representationUnchanged);return false}
         let time=ProcessInfo.processInfo.systemUptime
-        guard time>=first.time,time-first.time<0.15 else{firstPublicationAttemptedTime=first.time;decision(.publicationDeadline);return false}
+        guard time>=first.time,time-first.time<OnsetFirstPublication.observationLimit else{firstPublicationAttemptedTime=first.time;decision(.publicationDeadline);return false}
         guard (1...2).contains(passed.keys.count),passed.keys[0].0==first.code,passed.keys[0].1==first.shift else{firstPublicationAttemptedTime=first.time;decision(.historySize);return false}
         guard let layout=currentLayout() else{firstPublicationAttemptedTime=first.time;decision(.layoutUnavailable);return false}
         let firstOnly=snap.text.utf16.count==1 && snap.selection==NSRange(location:1,length:0)

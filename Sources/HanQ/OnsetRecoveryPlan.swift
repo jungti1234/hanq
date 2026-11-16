@@ -11,12 +11,17 @@ struct OnsetRecoveryPlan {
     var replayedText:String?
     var observedReplayText:String?
     var literalBody=false
+    // Only the first pair is selected; the remaining body stays in `before`.
+    var prefixOriginalCaret:Int?
+    var isSettledPrefix:Bool {prefixOriginalCaret != nil}
+    var originalCaret:Int {prefixOriginalCaret ?? (caret+roman.utf16.count)}
+    var restoredCaret:Int {originalCaret-roman.utf16.count+(replayedText?.utf16.count ?? 0)}
     func bodyMatches(_ value:String,_ expected:String)->Bool {
         literalBody ? value.utf16.elementsEqual(expected.utf16):value==expected
     }
     var isObservedReplay:Bool {observedReplayText != nil && replayedText==nil && (2...16).contains(codes.count)}
     var supportsReplay:Bool {codes.count==1 || isObservedReplay}
-    var isCommittedLate:Bool {replayedText != nil && (2...16).contains(codes.count) && codes.last?.0==49 && codes.last?.1==false}
+    var isCommittedLate:Bool {replayedText != nil && (2...16).contains(codes.count) && (isSettledPrefix || (codes.last?.0==49 && codes.last?.1==false))}
     var expected:String? {
         let ns=before as NSString
         guard caret>=0,caret<=ns.length else{return nil}
@@ -24,6 +29,6 @@ struct OnsetRecoveryPlan {
     }
     func matches(text:String,selection:NSRange)->Bool {
         guard let expected else{return false}
-        return (codes.count>=2 || (allowSingle && codes.count==1)) && bodyMatches(text,expected) && selection==NSRange(location:caret+roman.utf16.count,length:0)
+        return (codes.count>=2 || (allowSingle && codes.count==1)) && bodyMatches(text,expected) && selection==NSRange(location:originalCaret,length:0)
     }
 }
