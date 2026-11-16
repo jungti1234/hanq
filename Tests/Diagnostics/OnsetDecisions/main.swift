@@ -41,14 +41,22 @@ let raw=String(data:encoded,encoding:.utf8)!
 for forbidden in ["sourceID","keycode","clipboard","text\":","com.openai","arbitrary prior"]{check(!raw.contains(forbidden),"no payload \(forbidden)")}
 
 let object=try! JSONSerialization.jsonObject(with:encoded) as! [String:Any]
-func invalid(_ update:(inout [String:Any])->Void){
+func changed(_ update:(inout [String:Any])->Void)->Data{
     var value=object,rows=value["frames"] as! [[String:Any]]
     let index=rows.firstIndex{($0["kind"] as? Int)==13}!
     update(&rows[index]);value["frames"]=rows
-    let data=try! JSONSerialization.data(withJSONObject:value)
-    check((try? RecorderTrace.decode(data))==nil,"invalid onset evidence rejected")
+    return try! JSONSerialization.data(withJSONObject:value)
 }
-invalid{$0["category"]=26};invalid{$0["edge"]=5};invalid{$0["lane"]=4};invalid{$0["event"]=1}
+func invalid(_ update:(inout [String:Any])->Void){
+    check((try? RecorderTrace.decode(changed(update)))==nil,"invalid onset evidence rejected")
+}
+// 26 and 27 are the settled-prefix outcomes, not invalid categories.
+for category in 1...27 {
+    check(InputIncidentTrace.OnsetReason(rawValue:category) != nil,"documented onset reason exists")
+    check((try? RecorderTrace.decode(changed{$0["category"]=category})) != nil,"documented onset reason accepted: \(category)")
+}
+invalid{$0["category"]=0};invalid{$0["category"]=28}
+invalid{$0["edge"]=5};invalid{$0["lane"]=4};invalid{$0["event"]=1}
 invalid{$0["onsetEvidence"]=["keys":true]};invalid{$0["onsetEvidence"]=["keys":17]}
 invalid{$0["onsetEvidence"]=["keys":1,"firstKeyAgeMicros":-1]}
 invalid{$0["onsetEvidence"]=["keys":1,"firstKeyAgeMicros":60_000_001]}
