@@ -9,8 +9,11 @@ import os
 import pathlib
 import plistlib
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -94,6 +97,38 @@ class PreparationTests(unittest.TestCase):
     def check(self):
         return preflight.check(self.output / 'record.json', operations=self.ops)
 
+    def socket_response(self, command, changes=None, payload=None, fragments=False):
+        directory = pathlib.Path(command[-1])
+        result = {'token': directory.name, 'pid': os.getpid(), 'ax': True, 'post': True}
+        if changes:
+            result.update(changes)
+        data = payload if payload is not None else json.dumps(result).encode() + b'\n'
+        acknowledgements = []
+        def send():
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(2)
+                try:
+                    client.connect(str(directory / 'reply.sock'))
+                    if fragments:
+                        for piece in [data[:7], data[7:-1], data[-1:]]:
+                            client.sendall(piece); time.sleep(0.005)
+                    else:
+                        client.sendall(data)
+                    if not data.endswith(b'\n') and len(data)<=8193:
+                        client.shutdown(socket.SHUT_WR)
+                    acknowledgements.append(client.recv(1))
+                except OSError:
+                    acknowledgements.append(b'')
+        thread = threading.Thread(target=send, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        return acknowledgements
+
+    def socket_operations(self):
+        operations = object.__new__(preflight.MacOS)
+        operations.process_identity = lambda pid: (str(self.binary.resolve()), 'same-start')
+        return operations
+
     def test_prepare_stops_before_reset_and_waits_for_gui(self):
         self.assertEqual(self.prepare(), 0)
         self.assertEqual(self.ops.calls, ['stop', 'reset', 'launch', 'settings'])
@@ -139,17 +174,21 @@ class PreparationTests(unittest.TestCase):
         seen=[]
         logs=str(self.root/'fixture-logs')
         def fake_launch(command):
-            self.assertEqual(command[:4], ['/usr/bin/open', '-n', '-g', 'fixture.app'])
+            if command[0] != '/usr/bin/open':
+                return self.command(command)
+            self.assertEqual(command[:4], ['/usr/bin/open', '-n', '-g', str(self.app)])
             flag=command[5];directory=pathlib.Path(command[6]);seen.append(directory)
             self.assertEqual(directory.parent, pathlib.Path('/private/tmp'))
             result={'token':directory.name, 'pid':201, 'ax':True, 'post':True}
             if flag=='--diagnostic-storage-probe':
                 result.update(directory=logs,readiness={'ready':True})
-            path=directory/'result.json';path.write_text(json.dumps(result));path.chmod(0o600)
+                path=directory/'result.json';path.write_text(json.dumps(result));path.chmod(0o600)
+            else:
+                self.socket_response(command)
         self.runner.side_effect=fake_launch
-        ops=object.__new__(preflight.MacOS)
-        self.assertIs(ops.probe('fixture.app')['post'],True)
-        self.assertIs(ops.diagnostic_probe('fixture.app',logs)['readiness']['ready'],True)
+        ops=self.socket_operations()
+        self.assertIs(ops.probe(str(self.app))['post'],True)
+        self.assertIs(ops.diagnostic_probe(str(self.app),logs)['readiness']['ready'],True)
         self.assertEqual(len(seen),2)
         self.assertTrue(all(not path.exists() for path in seen))
 
@@ -279,12 +318,12 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in kill.call_args_list], [101, 100])
 
     def test_fresh_probe_accepts_omitted_ax_when_post_is_denied(self):
-        operations = preflight.MacOS.__new__(preflight.MacOS)
+        operations = self.socket_operations()
         def command(command):
-            directory = pathlib.Path(command[-1])
-            result = {'token': directory.name, 'pid': 201, 'post': False}
-            (directory / 'result.json').write_text(json.dumps(result))
-            (directory / 'result.json').chmod(0o600)
+            if command[0] != '/usr/bin/open':
+                return self.command(command)
+            result = {'token': pathlib.Path(command[-1]).name, 'pid': os.getpid(), 'post': False}
+            self.socket_response(command, payload=json.dumps(result).encode()+b'\n')
             return subprocess.CompletedProcess(command, 0, '', '')
         with mock.patch.object(preflight, 'run', side_effect=command):
             result = operations.probe(str(self.app))
@@ -292,16 +331,62 @@ class PreparationTests(unittest.TestCase):
         self.assertFalse(result['post'])
 
     def test_probe_rejects_wrong_token(self):
-        operations = preflight.MacOS.__new__(preflight.MacOS)
+        operations = self.socket_operations()
         def command(command):
-            directory = pathlib.Path(command[-1])
-            (directory / 'result.json').write_text(json.dumps(
-                {'token': 'another-probe', 'pid': 201, 'post': True, 'ax': True}))
-            (directory / 'result.json').chmod(0o600)
+            if command[0] != '/usr/bin/open':
+                return self.command(command)
+            self.socket_response(command, changes={'token': 'another-probe'})
             return subprocess.CompletedProcess(command, 0, '', '')
         with mock.patch.object(preflight, 'run', side_effect=command):
             with self.assertRaises(preflight.PreflightError):
                 operations.probe(str(self.app))
+
+    def test_socket_accepts_fragmented_reply_and_acknowledges(self):
+        replies = []
+        def launch(command):
+            if command[0] != '/usr/bin/open': return self.command(command)
+            replies.append(self.socket_response(command, fragments=True))
+        self.runner.side_effect = launch
+        result = self.socket_operations().probe(str(self.app))
+        self.assertTrue(result['ax'] and result['post'])
+        end = time.monotonic() + 1
+        while not replies[0] and time.monotonic() < end: time.sleep(0.005)
+        self.assertEqual(replies[0], [b'\x01'])
+
+    def test_socket_rejects_invalid_frame_and_claimed_pid(self):
+        cases = [({'pid': os.getpid()+1}, None), ({'post': 1}, None), ({'ax': 'yes'}, None),
+                 (None, b'[]\n'), (None, b'{broken}\n'), (None, b'{}'),
+                 (None, b'{}\n{}\n'), (None, b'x'*8194), (None, b'\xff\n')]
+        for changes, payload in cases:
+            with self.subTest(changes=changes, payloadBytes=None if payload is None else len(payload)):
+                def launch(command):
+                    if command[0] != '/usr/bin/open': return self.command(command)
+                    self.socket_response(command, changes=changes, payload=payload)
+                self.runner.side_effect = launch
+                with self.assertRaises(preflight.PreflightError):
+                    self.socket_operations().probe(str(self.app))
+
+    def test_socket_rejects_foreign_uid_path_and_changed_process(self):
+        def launch(command):
+            if command[0] != '/usr/bin/open': return self.command(command)
+            self.socket_response(command)
+        self.runner.side_effect = launch
+        with mock.patch.object(preflight, 'permission_peer_identity', return_value=(os.getuid()+1, os.getpid())):
+            with self.assertRaises(preflight.PreflightError): self.socket_operations().probe(str(self.app))
+        operations = self.socket_operations()
+        operations.process_identity = lambda pid: ('/another/HanQ', 'same-start')
+        with self.assertRaises(preflight.PreflightError): operations.probe(str(self.app))
+        operations.process_identity = mock.Mock(side_effect=[(str(self.binary.resolve()), 'old'), (str(self.binary.resolve()), 'new')])
+        with self.assertRaises(preflight.PreflightError): operations.probe(str(self.app))
+
+    def test_old_result_file_does_not_bypass_socket_authentication(self):
+        def launch(command):
+            if command[0] != '/usr/bin/open': return self.command(command)
+            directory = pathlib.Path(command[-1])
+            (directory/'result.json').write_text(json.dumps({'token': directory.name, 'pid': os.getpid(), 'ax': True, 'post': True}))
+        self.runner.side_effect = launch
+        with mock.patch.object(preflight, 'PERMISSION_PROBE_TIMEOUT', 0.05):
+            with self.assertRaises(preflight.PreflightError): self.socket_operations().probe(str(self.app))
 
     def test_process_inventory_ignores_same_name_with_another_bundle_id(self):
         unrelated = self.root / 'unrelated/HanQ.app'

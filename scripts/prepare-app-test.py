@@ -12,7 +12,9 @@ import plistlib
 import re
 import shlex
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -20,6 +22,7 @@ import time
 import uuid
 
 BUNDLE_ID = 'taek.in.hanq'
+PERMISSION_PROBE_TIMEOUT = 5.0
 SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -203,24 +206,67 @@ class MacOS:
         run(['/usr/bin/open', SETTINGS_URL])
 
     def probe(self, app):
+        identity = app_identity(app)
+        executable = str(pathlib.Path(identity['path']) / 'Contents/MacOS/HanQ')
         with private_probe_directory('hanq-permission-') as directory:
-            run(['/usr/bin/open', '-n', '-g', app, '--args', '--permission-probe', directory])
-            result_path = pathlib.Path(directory) / 'result.json'
-            end = time.monotonic() + 5
-            while time.monotonic() < end:
-                if result_path.exists():
-                    result = read_private_json(result_path)
-                    if (result.get('token') != pathlib.Path(directory).name or
-                            type(result.get('pid')) is not int or result['pid'] <= 1 or
-                            type(result.get('post')) is not bool or
-                            (result.get('ax') is not None and type(result['ax']) is not bool)):
-                        raise PreflightError('새 앱의 권한 검사 응답이 유효하지 않습니다.')
-                    # Swift's JSONEncoder omits a nil optional AX value when
-                    # event posting is denied, rather than writing JSON null.
-                    result.setdefault('ax', None)
-                    return result
-                time.sleep(0.05)
-        raise PreflightError('새 앱의 권한 검사 응답 시간이 초과됐습니다.')
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                    listener.bind(str(pathlib.Path(directory) / 'reply.sock'))
+                    listener.listen(1)
+                    deadline = time.monotonic() + PERMISSION_PROBE_TIMEOUT
+                    run(['/usr/bin/open', '-n', '-g', app, '--args', '--permission-probe', directory])
+                    listener.settimeout(max(0.001, deadline - time.monotonic()))
+                    with listener.accept()[0] as peer:
+                        uid, pid = permission_peer_identity(peer)
+                        process = self.process_identity(pid)
+                        if uid != os.getuid() or pid <= 1 or not process or process[0] != executable:
+                            raise PreflightError('권한 검사 응답 프로세스의 소유자·실행 경로가 다릅니다.')
+                        payload = bytearray()
+                        while b'\n' not in payload:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise PreflightError('새 앱의 권한 검사 응답 시간이 초과됐습니다.')
+                            peer.settimeout(remaining)
+                            chunk = peer.recv(8194 - len(payload))
+                            if not chunk:
+                                raise PreflightError('권한 검사 응답이 끝나기 전에 연결이 닫혔습니다.')
+                            payload.extend(chunk)
+                            if len(payload) > 8193:
+                                raise PreflightError('권한 검사 응답 크기가 제한을 초과했습니다.')
+                        if payload.count(b'\n') != 1 or not payload.endswith(b'\n'):
+                            raise PreflightError('권한 검사 응답 경계가 유효하지 않습니다.')
+                        result = json.loads(payload[:-1].decode('utf-8'))
+                        if (not isinstance(result, dict) or result.get('token') != pathlib.Path(directory).name or
+                                type(result.get('pid')) is not int or result['pid'] != pid or
+                                type(result.get('post')) is not bool or
+                                (result.get('ax') is not None and type(result['ax']) is not bool)):
+                            raise PreflightError('새 앱의 권한 검사 응답이 유효하지 않습니다.')
+                        if self.process_identity(pid) != process or app_identity(app) != identity:
+                            raise PreflightError('권한 검사 도중 프로세스 또는 앱의 내용이 바뀌었습니다.')
+                        # Keep the helper alive until authenticated decoding is complete.
+                        # PermissionProbeChannel.send expects this one-byte acknowledgement.
+                        peer.sendall(b'\x01')
+                        result.setdefault('ax', None)
+                        return result
+            except socket.timeout as error:
+                raise PreflightError('새 앱의 권한 검사 응답 시간이 초과됐습니다.') from error
+            except (OSError, UnicodeError, ValueError) as error:
+                raise PreflightError(f'권한 검사 소켓 응답 실패: {error}') from error
+
+
+def permission_peer_identity(peer):
+    """Darwin kernel credentials; never trust the PID supplied by a JSON sender."""
+    library = ctypes.CDLL(None, use_errno=True)
+    getpeereid = library.getpeereid
+    getpeereid.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+    getpeereid.restype = ctypes.c_int
+    uid, gid = ctypes.c_uint(), ctypes.c_uint()
+    if getpeereid(peer.fileno(), ctypes.byref(uid), ctypes.byref(gid)) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    # SOL_LOCAL=0, LOCAL_PEERPID=2 in Darwin sys/un.h.
+    pid = struct.unpack('i', peer.getsockopt(0, 2, struct.calcsize('i')))[0]
+    return uid.value, pid
 
 
 def save_record(path, record):
@@ -311,7 +357,12 @@ def diagnostic_receipt(record, main):
     mode = expected.get('mode', 'preserve')
     diagnostic_flag(mode)
     directory = diagnostic_directory(expected['directory'], create=False)
-    receipt = read_private_json(pathlib.Path(directory) / f".preflight-{expected['token']}.json")
+    try:
+        receipt = read_private_json(pathlib.Path(directory) / f".preflight-{expected['token']}-{main['pid']}.json")
+    except FileNotFoundError:
+        # Older candidates used one nonce file. Its contents must still prove
+        # the exact current PID; a stale file can never authorize a replacement.
+        receipt = read_private_json(pathlib.Path(directory) / f".preflight-{expected['token']}.json")
     if (type(receipt.get('schema')) is not int or receipt['schema'] != 1 or receipt.get('token') != expected['token'] or
             type(receipt.get('pid')) is not int or receipt['pid'] != main['pid'] or
             receipt.get('build') != record['app']['build_number'] or receipt.get('ready') is not True or
@@ -324,6 +375,20 @@ def diagnostic_receipt(record, main):
     except ValueError as error:
         raise PreflightError('진단 실행 식별자가 유효하지 않습니다.') from error
     return receipt
+
+
+def verify_recovery_receipt(record, main, receipt):
+    previous_pid = record.get('launched_pid')
+    if main['pid'] == previous_pid:
+        return None
+    if (type(receipt.get('recoveryFromPID')) is not int or
+            receipt['recoveryFromPID'] != previous_pid):
+        raise PreflightError('진단을 준비한 앱과 권한 복구 재실행의 연결을 확인하지 못했습니다. 다시 prepare하세요.')
+    previous = diagnostic_receipt(record, {'pid': previous_pid})
+    if previous['runID'] == receipt['runID']:
+        raise PreflightError('재실행한 앱의 새 진단 실행 식별자가 없습니다.')
+    return {'from_pid': previous_pid, 'to_pid': main['pid'],
+            'from_run_id': previous['runID'], 'to_run_id': receipt['runID']}
 
 
 def launch_prepared(operations, record):
@@ -482,8 +547,6 @@ def check(record_path, operations=None, require_diagnostics=False):
         main = [item for item in operations.processes() if not item['helper']]
         if len(main) != 1 or main[0]['app'] != identity['path']:
             raise PreflightError('준비한 경로의 한Q만 실행 중이어야 합니다.')
-        if 'diagnostics' in record and main[0]['pid'] != record.get('launched_pid'):
-            raise PreflightError('진단을 준비한 앱 프로세스가 바뀌었습니다. 다시 prepare하세요.')
         result = operations.probe(identity['path'])
         ensure_same_app(identity)
         current_main = [item for item in operations.processes() if not item['helper']]
@@ -491,6 +554,10 @@ def check(record_path, operations=None, require_diagnostics=False):
             raise PreflightError('권한 검사 중 실행 중인 한Q가 바뀌었습니다. 다시 check하세요.')
         ready = result['ax'] is True and result['post'] is True
         receipt = diagnostic_receipt(record, main[0]) if ready and 'diagnostics' in record else None
+        recovery = verify_recovery_receipt(record, main[0], receipt) if receipt else None
+        if recovery:
+            record.setdefault('verified_permission_recoveries', []).append(recovery)
+            record['launched_pid'] = main[0]['pid']
         record.pop('error', None)
         record['checked_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         record['permission_result'] = result

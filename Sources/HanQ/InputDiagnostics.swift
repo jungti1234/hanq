@@ -1526,7 +1526,8 @@ final class InputIncidentTrace {
             let missing=(storage.map{$0.status.unavailable+$0.status.encodingFailures+$0.status.limited+$0.status.statusWriteFailures} ?? 0)+(sharedStore.map{$0.stats.failures+$0.stats.rejected+$0.stats.incompleteFiles} ?? 0)
             let budget=storage?.status.writeBudget
             completion(DiagnosticStorageHealth(readiness:readiness,missingWrites:missing,
-                suppressedWrites:(budget?["suppressedAutomatic"] ?? 0)+(budget?["suppressedManual"] ?? 0)))
+                suppressedWrites:(budget?["suppressedAutomatic"] ?? 0)+(budget?["suppressedManual"] ?? 0),
+                collectionEnabled:enabled))
         }}
     }
     func observeStorage(_ callback:@escaping()->Void){queue.async{[self] in storageObserver=callback}}
@@ -2806,8 +2807,7 @@ final class DiagnosticLogStore {
         guard (receipt==nil)==(name==nil) else{return readiness}
         let filename:String
         if let name {
-            guard name.hasPrefix(".preflight-"),name.hasSuffix(".json"),
-                  UUID(uuidString:String(name.dropFirst(11).dropLast(5))) != nil else{return readiness}
+            guard DiagnosticReadinessReceipt.validName(name) else{return readiness}
             filename=name
         }else{filename=".storage-check-"+UUID().uuidString}
         let data=receipt ?? Data(UUID().uuidString.utf8)
@@ -3622,10 +3622,19 @@ struct DiagnosticReadinessReceipt: Codable {
     let runID: String
     let ready: Bool
     let bounded: Bool?
+    let recoveryFromPID: Int32?
     static func make(token:String,runID:String,bounded:Bool=false)->Self {
-        Self(schema:1,token:token,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test",runID:runID,ready:true,bounded:bounded)
+        Self(schema:1,token:token,pid:getpid(),build:Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "test",runID:runID,ready:true,bounded:bounded,recoveryFromPID:DiagnosticStorageStartup.recoveryFromPID(arguments:ProcessInfo.processInfo.arguments))
     }
-    static func name(_ token:String)->String {".preflight-\(token).json"}
+    static func name(_ token:String,pid:Int32=getpid())->String {".preflight-\(token)-\(pid).json"}
+    static func validName(_ name:String)->Bool {
+        guard name.hasPrefix(".preflight-"),name.hasSuffix(".json") else{return false}
+        let identity=String(name.dropFirst(11).dropLast(5))
+        guard identity.count>37,identity[identity.index(identity.startIndex,offsetBy:36)]=="-",
+              UUID(uuidString:String(identity.prefix(36))) != nil,
+              let pid=Int32(identity.dropFirst(37)),pid>1 else{return false}
+        return name==self.name(String(identity.prefix(36)),pid:pid)
+    }
 }
 
 enum DiagnosticStorageStartup {
@@ -3643,6 +3652,13 @@ enum DiagnosticStorageStartup {
         let args=ProcessInfo.processInfo.arguments
         guard let i=args.firstIndex(of:tokenArgument),i+1<args.count,UUID(uuidString:args[i+1]) != nil else{return nil}
         return args[i+1]
+    }
+    static func recoveryFromPID(arguments args:[String])->Int32? {
+        guard args.contains("--permission-recovery"),
+              args.filter({$0=="--permission-recovery-from"}).count==1,
+              let i=args.firstIndex(of:"--permission-recovery-from"),i+1<args.count,
+              let pid=Int32(args[i+1]),pid>1,pid != getpid() else{return nil}
+        return pid
     }
     static func requireReadyIfRequested(){
         let args=ProcessInfo.processInfo.arguments
@@ -3773,9 +3789,11 @@ struct DiagnosticStorageHealth {
     let readiness:DiagnosticStorageReadiness
     let missingWrites:Int
     var suppressedWrites:Int=0
+    var collectionEnabled:Bool=true
     var menuMessage:String? {
-        if readiness.reason=="not_checked"{return nil}
-        if !readiness.ready{return "진단 저장 확인 실패 — 새 기록이 저장되지 않을 수 있습니다"}
+        // OFF deliberately withdraws the readiness receipt. This is not a failed
+        // write, but real earlier write failures must remain visible while OFF.
+        if collectionEnabled && readiness.reason != "not_checked" && !readiness.ready{return "진단 저장 확인 실패 — 새 기록이 저장되지 않을 수 있습니다"}
         if missingWrites>0{return "진단 저장 오류 \(missingWrites)회 — 기록을 확인하세요"}
         if suppressedWrites>0{return "진단 쓰기 한도로 일부 기록 생략 — 기존 기록은 유지됩니다"}
         return nil

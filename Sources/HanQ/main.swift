@@ -284,6 +284,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let inputDiagnosticsItem = NSMenuItem(title:"진단 기록 활성화",action:#selector(toggleInputDiagnostics),keyEquivalent:"")
     let diagnosticStorageItem = NSMenuItem(title:"",action:nil,keyEquivalent:"")
     private var diagnosticStorageMessage:String?
+    private var diagnosticAvailabilityGeneration:UInt64=0
+    var diagnosticStorageHealthLoader: (@escaping (DiagnosticStorageHealth)->Void)->Void = {
+        InputIncidentTrace.shared.storageHealth($0)
+    }
     let inputIncidentItem = NSMenuItem(title:"방금 발생한 문제 기록",action:#selector(markInputIncident),keyEquivalent:"")
     let inputDiagnosticExportItem = NSMenuItem(title:"진단 기록 내보내기…",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
@@ -1008,25 +1012,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let active = !InputIncidentTrace.shared.enabled
         UserDefaults.standard.set(active,forKey:InputIncidentPreferences.key)
         changingInputDiagnostics=true
+        diagnosticAvailabilityGeneration &+= 1
+        diagnosticStorageMessage=nil
         stopKeyboardObservation()
         InputIncidentTrace.shared.setCollectionEnabled(active){[weak self] in
             self?.configureKeyboardObservation()
             self?.changingInputDiagnostics=false;self?.refreshStatus()
+            self?.refreshDiagnosticLogAvailability()
             self?.continueInterruptionFeedback()
         }
         refreshStatus()
     }
-    private func refreshDiagnosticLogAvailability(){
-        guard let directory=InputIncidentTrace.shared.destinationDirectory else{return}
-        InputIncidentTrace.shared.storageHealth{[weak self] health in
+    func refreshDiagnosticLogAvailability(){
+        diagnosticAvailabilityGeneration &+= 1
+        let generation=diagnosticAvailabilityGeneration
+        guard !changingInputDiagnostics else{return}
+        diagnosticStorageHealthLoader{[weak self] health in
             DispatchQueue.main.async{
-                self?.diagnosticStorageMessage=health.menuMessage
-                self?.refreshStatus()
+                guard let self,self.diagnosticAvailabilityGeneration==generation,
+                      !self.changingInputDiagnostics else{return}
+                self.diagnosticStorageMessage=health.menuMessage
+                self.refreshStatus()
             }
+        }
+        guard let directory=InputIncidentTrace.shared.destinationDirectory else{
+            hasDiagnosticLogs=false;refreshStatus();return
         }
         DispatchQueue.global(qos:.utility).async{[weak self] in
             let found=((try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []).contains{($0.hasPrefix("incident-") && $0.hasSuffix(".json")) || DiagnosticCriticalJournal.filenames.contains($0) || DiagnosticCriticalJournal.laneDirectories.contains($0) || $0==DiagnosticSharedStore.directoryName}
-            DispatchQueue.main.async{self?.hasDiagnosticLogs=found;self?.refreshStatus()}
+            DispatchQueue.main.async{
+                guard let self,self.diagnosticAvailabilityGeneration==generation,
+                      !self.changingInputDiagnostics else{return}
+                self.hasDiagnosticLogs=found;self.refreshStatus()
+            }
         }
     }
     @objc func exportInputDiagnostics(){

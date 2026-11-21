@@ -3,14 +3,26 @@ import Darwin
 
 let marker = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HANQ_TEST_RELAUNCH_LOG"]!)
 let lockURL = marker.appendingPathExtension("lock")
-PermissionRelauncher.runIfRequested {
+PermissionRelauncher.runIfRequested { owner in
     // The real owner must have exited and released its UI-instance lock first.
     guard let acquired = AppInstanceLock(url: lockURL) else { _exit(80) }
     withExtendedLifetime(acquired) {
         try! Data("relaunched\n".utf8).write(to: marker)
+        let payload: [String: Any] = ["owner": Int(owner), "arguments": PermissionRecovery.diagnosticArguments]
+        try! JSONSerialization.data(withJSONObject: payload).write(to: marker.appendingPathExtension("json"))
     }
 }
 let mode = CommandLine.arguments.last!
+if mode == "arguments-check" {
+    let expected = ["--preserve-input-incidents", "/private/tmp/log path", "--diagnostic-readiness-token", "nonce",
+                    "--diagnose-input", "/private/tmp/trace.log", "--trace-onset-focus", "--diagnose-onset-scene"]
+    precondition(PermissionRecovery.diagnosticArguments(from: ["HanQ", "--permission-relauncher", "123"] + expected + ["--unrelated", "value"]) == expected)
+    let invalid = ["--bounded-input-incidents", "/private/tmp/a", "--bounded-input-incidents", "/private/tmp/b", "--preserve-input-incidents"]
+    precondition(PermissionRecovery.diagnosticArguments(from: ["HanQ"] + invalid) == invalid)
+    precondition(PermissionRecovery.diagnosticArguments(from: ["HanQ", "--diagnose-input-incidents", "/private/tmp/development"]) == ["--diagnose-input-incidents", "/private/tmp/development"])
+    print("PASS: relaunch forwards diagnostic paths, mode, nonce and switches without helper roles")
+    exit(0)
+}
 if mode == "lock-check" {
     guard let acquired = AppInstanceLock(url: lockURL) else { exit(66) }
     withExtendedLifetime(acquired) { exit(0) }

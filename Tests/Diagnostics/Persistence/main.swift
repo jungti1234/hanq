@@ -133,6 +133,10 @@ func toggle(_ trace:InputIncidentTrace,_ active:Bool){
     check(finished && trace.enabled==active,"runtime toggle completes")
     trace.flush()
 }
+check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0,collectionEnabled:false).menuMessage==nil,"OFF receipt withdrawal is not a storage failure")
+check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:2,collectionEnabled:false).menuMessage?.contains("오류 2회")==true,"OFF retains actual historical write failures")
+check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0).menuMessage?.contains("확인 실패")==true,"ON unavailable still reports a real readiness failure")
+check(DiagnosticStorageHealth(readiness:.notChecked,missingWrites:2).menuMessage?.contains("오류 2회")==true,"not checked never hides known write failures")
 var captures:[InputIncidentTrace.Capture]=[]
 let trace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{captures.append($0)})
 trace.state(.mismatch,.buffered,pending:11);trace.mark();trace.flush()
@@ -143,6 +147,9 @@ check(captures.count==1 && captures[0].frames.contains{$0.kind == .state && $0.c
 let oldSpan=trace.beginRead(.mismatchAX)
 trace.flush()
 toggle(trace,false)
+var offHealth:DiagnosticStorageHealth?
+trace.storageHealth{offHealth=$0};trace.flush()
+check(offHealth?.collectionEnabled==false && offHealth?.menuMessage==nil,"collector reports OFF separately from storage readiness")
 trace.endRead(.mismatchAX,oldSpan);trace.flush()
 let count=captures.count
 Thread.sleep(forTimeInterval:1.1);trace.flush()

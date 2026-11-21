@@ -31,7 +31,7 @@ class DiagnosticMacOS(common.FakeMacOS):
     def launch_diagnostics(self, app, directory, token, mode='preserve'):
         self.launch_mode = mode
         pid = self.launch(app)
-        self.receipt = pathlib.Path(directory) / f'.preflight-{token}.json'
+        self.receipt = pathlib.Path(directory) / f'.preflight-{token}-{pid}.json'
         if self.write_receipt:
             self.receipt.write_text(json.dumps({'schema': 1, 'token': token, 'pid': pid,
                                               'build': '132', 'runID': str(uuid.uuid4()), 'ready': True,
@@ -128,9 +128,62 @@ class DiagnosticReadinessTests(unittest.TestCase):
     def test_changed_main_cannot_use_the_old_receipt(self):
         self.prepare_diagnostics()
         self.ops.running[0]['pid'] += 1
-        with self.assertRaises(preflight.PreflightError):
+        with self.assertRaises((preflight.PreflightError, FileNotFoundError)):
             self.check()
         self.assertEqual(self.record()['status'], 'awaiting_diagnostics')
+
+    def recovery_receipt(self):
+        old_path = self.ops.receipt
+        old_bytes = old_path.read_bytes()
+        old = json.loads(old_bytes)
+        self.ops.running[0]['pid'] += 1
+        current = dict(old, pid=self.ops.running[0]['pid'], runID=str(uuid.uuid4()), recoveryFromPID=old['pid'])
+        self.ops.receipt = self.logs / f".preflight-{old['token']}-{current['pid']}.json"
+        self.ops.receipt.write_text(json.dumps(current))
+        self.ops.receipt.chmod(0o600)
+        return old_path, old_bytes, current
+
+    def test_verified_recovery_adopts_only_fresh_receipt_and_preserves_parent(self):
+        self.prepare_diagnostics()
+        old_path, old_bytes, current = self.recovery_receipt()
+        self.assertEqual(self.check(), 0)
+        record = self.record()
+        self.assertEqual(record['status'], 'input_test_ready')
+        self.assertEqual(record['launched_pid'], current['pid'])
+        self.assertEqual(record['verified_permission_recoveries'][0]['from_pid'], current['recoveryFromPID'])
+        self.assertEqual(old_path.read_bytes(), old_bytes)
+        self.assertEqual(self.check(), 0)
+        self.assertEqual(len(self.record()['verified_permission_recoveries']), 1)
+
+    def test_recovery_requires_parent_identity_and_new_run(self):
+        self.prepare_diagnostics()
+        old_path, old_bytes, current = self.recovery_receipt()
+        for changed in (dict(current, recoveryFromPID=None), dict(current, recoveryFromPID=True),
+                        dict(current, recoveryFromPID=current['recoveryFromPID']+100),
+                        dict(current, runID=json.loads(old_bytes)['runID'])):
+            self.ops.receipt.write_text(json.dumps(changed))
+            with self.assertRaises(preflight.PreflightError): self.check()
+            self.assertNotIn('permission_result', self.record())
+        self.ops.receipt.write_text(json.dumps(current))
+        old_path.unlink()
+        with self.assertRaises(FileNotFoundError): self.check()
+        self.assertEqual(self.record()['status'], 'awaiting_diagnostics')
+
+    def test_recovery_permission_denial_does_not_adopt_current_pid(self):
+        self.prepare_diagnostics()
+        old_path, old_bytes, current = self.recovery_receipt()
+        self.ops.result.update(ax=False, post=False)
+        self.assertEqual(self.check(), 2)
+        self.assertEqual(self.record()['launched_pid'], current['recoveryFromPID'])
+        self.assertNotIn('verified_permission_recoveries', self.record())
+
+    def test_legacy_nonce_receipt_requires_exact_current_pid(self):
+        self.prepare_diagnostics()
+        receipt = json.loads(self.ops.receipt.read_text())
+        self.ops.receipt.rename(self.logs / f".preflight-{receipt['token']}.json")
+        self.assertEqual(self.check(), 0)
+        self.ops.running[0]['pid'] += 1
+        with self.assertRaises(preflight.PreflightError): self.check()
 
     def test_receipt_symlink_is_rejected(self):
         self.prepare_diagnostics()

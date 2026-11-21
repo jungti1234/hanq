@@ -71,14 +71,37 @@ final class PermissionRecovery {
     }
 
     static var diagnosticArguments: [String] {
-        let args = ProcessInfo.processInfo.arguments
-        guard let index = args.firstIndex(of: "--diagnose-input"), index + 1 < args.count else { return [] }
-        return ["--diagnose-input", args[index + 1]]
+        diagnosticArguments(from: ProcessInfo.processInfo.arguments)
+    }
+
+    static func diagnosticArguments(from args: [String]) -> [String] {
+        let values: Set<String> = ["--diagnose-input", "--diagnose-input-incidents",
+                                   "--preserve-input-incidents", "--bounded-input-incidents",
+                                   "--diagnostic-readiness-token"]
+        let switches: Set<String> = ["--trace-onset-focus", "--diagnose-onset-scene"]
+        var result: [String] = []
+        var index = 1 // Exclude the executable and never forward helper roles.
+        while index < args.count {
+            let argument = args[index]
+            if values.contains(argument) {
+                result.append(argument)
+                if index + 1 < args.count, !args[index + 1].hasPrefix("--") {
+                    index += 1
+                    result.append(args[index])
+                }
+            } else if switches.contains(argument) {
+                result.append(argument)
+            }
+            index += 1
+        }
+        // Keep conflicting/duplicate diagnostic flags so startup can reject
+        // them. A relaunch must not silently change the requested storage mode.
+        return result
     }
 }
 
 enum PermissionRelauncher {
-    static func runIfRequested(relaunch: @escaping () -> Void = launchApplication) {
+    static func runIfRequested(relaunch: @escaping (pid_t) -> Void = launchApplication) {
         let args = ProcessInfo.processInfo.arguments
         guard let index = args.firstIndex(of: "--permission-relauncher") else { return }
         guard index + 1 < args.count, let owner = Int32(args[index + 1]), owner > 1,
@@ -98,18 +121,18 @@ enum PermissionRelauncher {
         // EOF can precede process exit if a handle is closed explicitly.
         while getppid() == owner { usleep(10_000) }
         InputDiagnostics.shared.record("recovery.owner.exited owner=\(owner)")
-        relaunch()
+        relaunch(owner)
         _exit(0)
     }
 
-    private static func launchApplication() {
+    private static func launchApplication(owner: pid_t) {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         configuration.allowsRunningApplicationSubstitution = false
         configuration.activates = true
         configuration.addsToRecentItems = false
         configuration.promptsUserIfNeeded = false
-        configuration.arguments = ["--permission-recovery"] + PermissionRecovery.diagnosticArguments
+        configuration.arguments = ["--permission-recovery", "--permission-recovery-from", String(owner)] + PermissionRecovery.diagnosticArguments
         let completed = DispatchSemaphore(value: 0)
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
             InputDiagnostics.shared.record("recovery.launch success=\(error == nil)")

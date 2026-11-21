@@ -4,6 +4,31 @@ import ApplicationServices
 // Exercises the production teardown with a Mach port/run-loop source, without
 // installing a global event tap or changing Accessibility permissions.
 let owner = AppDelegate()
+// Out-of-order readiness callbacks must not restore a warning from the previous
+// collection state. Check the real menu item without reopening a menu or taps.
+do {
+    _ = NSApplication.shared
+    let app=AppDelegate()
+    var replies:[(DiagnosticStorageHealth)->Void]=[]
+    app.diagnosticStorageHealthLoader={replies.append($0)}
+    func settle(){RunLoop.current.run(until:Date().addingTimeInterval(0.03))}
+    app.refreshDiagnosticLogAvailability()
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:0))
+    settle();precondition(app.diagnosticStorageItem.title.contains("확인 실패"))
+    app.refreshDiagnosticLogAvailability()
+    app.refreshDiagnosticLogAvailability()
+    replies.removeLast()(.init(readiness:.unavailable,missingWrites:0,collectionEnabled:false))
+    settle();precondition(app.diagnosticStorageItem.isHidden)
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:0))
+    settle();precondition(app.diagnosticStorageItem.isHidden,"stale ON failure cannot overwrite OFF")
+    app.refreshDiagnosticLogAvailability()
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:2,collectionEnabled:false))
+    settle();precondition(app.diagnosticStorageItem.title.contains("오류 2회"),"real failures remain visible while OFF")
+    app.refreshDiagnosticLogAvailability()
+    replies.removeFirst()(.init(readiness:.ready,missingWrites:0))
+    settle();precondition(app.diagnosticStorageItem.isHidden,"successful ON clears warning without menu reopening")
+    print("PASS: diagnostic menu distinguishes OFF from failure and rejects stale readiness callbacks")
+}
 owner.enabled = true
 owner.koreanEnabled = true
 owner.hanjaEnabled = true
