@@ -9,14 +9,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let jamoRepair = JamoRepair()
     lazy var onsetRecovery: OnsetRecoveryController = {
         let controller = OnsetRecoveryController()
+        controller.inputAllowed = { [weak self] in self?.freshPermissionGate.allowsInput ?? false }
         controller.unfocusedKeyCheck = { [weak self] in self?.sourceSwitchBarrier.unfocusedKeyCheck($0,needsReadyLayout:$1) ?? .noSwitch }
         controller.canRun = { [weak self] in
             guard let self else { return false }
-            return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
+            return self.enabled && self.inputPermissionReady && !self.updateRestricted && self.tap != nil
         }
         controller.canBeginRepair = { [weak self] in
             guard let self else { return false }
-            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && !self.mismatchRecovery.busy && !self.sourceSwitchBarrier.busy
+            return self.inputPermissionReady && !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && !self.mismatchRecovery.busy && !self.sourceSwitchBarrier.busy
         }
         controller.willBeginRepair = { [weak self] in
             self?.sourceSwitchBarrier.resetObservation()
@@ -36,10 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }()
     lazy var mismatchRecovery: MismatchRecoveryController = {
         let controller=MismatchRecoveryController()
+        controller.engine.inputAllowed = { [weak self] in self?.freshPermissionGate.allowsInput ?? false }
         controller.engine.sourceEvidence=self.inputSourceEvidence
         controller.canRun = { [weak self] in
             guard let self else{return false}
-            return self.enabled && self.permissionGranted && !self.updateRestricted && self.tap != nil
+            return self.enabled && self.inputPermissionReady && !self.updateRestricted && self.tap != nil
         }
         controller.engine.didStart = { [weak self] in self?.refreshInputDeliveryOrigin() }
         controller.engine.verifiedDeliveryHistory = { [weak self] snap,allowPrior in
@@ -51,10 +53,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let busy=self.sourceSwitchBarrier.busy
             if !self.koreanEnabled{self.mismatchRecovery.engine.switchGate?.acceptanceReason=9}
             else if busy{self.mismatchRecovery.engine.switchGate?.acceptanceReason=10}
-            return self.koreanEnabled && !busy
+            return self.inputPermissionReady && self.koreanEnabled && !busy
         }
         controller.engine.canObserve = { [weak self] in
-            guard let self else{return false}
+            guard let self,self.inputPermissionReady else{return false}
             if self.jamoRepair.isEditing {InputIncidentTrace.shared.decision(.eligibility,.manualEdit);return false}
             if self.externalKeyboards.isCapturing {InputIncidentTrace.shared.decision(.eligibility,.keyboardCapture);return false}
             if self.onsetRecovery.engine?.recovering == true {InputIncidentTrace.shared.decision(.eligibility,.onsetRepair);return false}
@@ -69,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         controller.engine.canBeginRepair = { [weak self] in
             guard let self else{return false}
-            return !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && self.onsetRecovery.prepareManualEdit()
+            return self.inputPermissionReady && !self.jamoRepair.isEditing && !self.externalKeyboards.isCapturing && self.onsetRecovery.prepareManualEdit()
         }
         controller.engine.willBeginRepair = { [weak self] in
             self?.sourceSwitchBarrier.noteExternalEdit()
@@ -93,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let controller = ExternalKeyboardController()
         controller.canConfigure = { [weak self] in
             guard let self else { return false }
-            return self.permissionGranted && !self.updateRestricted && self.tap != nil && self.enabled
+            return self.inputPermissionReady && !self.updateRestricted && self.tap != nil && self.enabled
                 && !self.filter.consuming && !self.optionFilter.consuming && !self.mismatchRecovery.busy
         }
         controller.onBeginCapture = { [weak self] in self?.jamoRepair.inputDidChange() }
@@ -133,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             InputIncidentTrace.shared.sourceEvidence(.committed,self.inputSourceEvidence.diagnostic(selected:id))
         }
         let read:(((pid_t,AXUIElement)->Void)?)->SourceSwitchBarrier.Snapshot? = { [weak self] observe in
-            guard let self,self.permissionGranted,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
+            guard let self,self.inputPermissionReady,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
             self.mismatchRecovery.engine.followFrontmost()
             guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true,observeOutsideWindow:observe) else{return nil}
             return SourceSwitchBarrier.Snapshot(field:snap.element,text:snap.text,selection:snap.selection)
@@ -146,10 +148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         barrier.ready = { [weak self] in
             guard let self else{return false}
-            return !self.mismatchRecovery.busy && self.onsetRecovery.engine?.recovering != true && self.onsetRecovery.engine?.gate?.reservation() == nil
+            return self.inputPermissionReady && !self.mismatchRecovery.busy && self.onsetRecovery.engine?.recovering != true && self.onsetRecovery.engine?.gate?.reservation() == nil
         }
         barrier.readFocus = { [weak self] in
-            guard let self,self.permissionGranted,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
+            guard let self,self.inputPermissionReady,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
             let access=self.mismatchRecovery.engine.focusAccess
             return access.read(access.system)
         }
@@ -206,12 +208,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var safetyPulseTimer: Timer?
     let inputSafety = InputSafetyWatchdog()
     let permissionRecovery = PermissionRecovery()
-    lazy var freshPermission = FreshPermissionMonitor { [weak self] reason in
-        NSLog("입력 안전 종료: 새 프로세스 권한 검사 (%@)", reason)
-        if reason == "permission-denied" { self?.permissionRecovery.exitAfterPermissionLoss() }
+    let freshPermissionGate=FreshPermissionGate()
+    private(set) var permissionProbeFailure:OperationalFailure?
+    var inputPermissionReady:Bool{permissionGranted && freshPermissionGate.allowsInput}
+    lazy var freshPermission = FreshPermissionMonitor(changed:{[weak self] update in
+        guard let self else{return}
+        switch update {
+        case .unavailable(let failure):
+            let generation=self.freshPermissionGate.block()
+            DispatchQueue.main.async{[weak self] in self?.pauseForPermissionProbe(failure,generation:generation)}
+        case .granted:
+            let generation=self.freshPermissionGate.generation
+            if generation<0{DispatchQueue.main.async{[weak self] in self?.resumeFromPermissionProbe(generation:generation)}}
+        }
+    },terminate:{[weak self] reason in
+        NSLog("입력 안전 종료: 새 프로세스 권한 검사 (%@)",reason)
+        self?.permissionRecovery.exitAfterPermissionLoss()
         _exit(72)
-    }
+    })
     var permissionGranted = false
+    func pauseForPermissionProbe(_ failure:OperationalFailure,generation:Int32) {
+        guard freshPermissionGate.generation==generation else{return}
+        permissionProbeFailure=failure
+        stopMapping(keepPermissionMonitor:true)
+        pendingActivation=true
+        refreshStatus()
+    }
+    func resumeFromPermissionProbe(generation:Int32,activate:(()->Void)?=nil) {
+        guard !updateRestricted,freshPermissionGate.restore(generation) else{return}
+        permissionProbeFailure=nil;pendingActivation=true
+        OperationalDiagnostics.shared.record(.policy(.permissionRestored,1))
+        if let activate{activate()}else{updatePermission()}
+    }
     var pendingActivation = true
     private var timeoutRestart:DispatchWorkItem?
     private var lastTimeoutRestart = -Double.infinity
@@ -404,7 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let snapshot{self.mismatchRecovery.engine.observeRecoverySource(snapshot.id)}
             self.jamoRepair.inputSourceDidChange()
             self.sourceObservations += 1
-            if self.permissionGranted && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name,sourceClass:KoreanEnglishSwitch.sourceClass(snapshot)) }
+            if self.inputPermissionReady && !self.updateRestricted && self.sourceObservations > 1 && UserDefaults.standard.bool(forKey: "hudEnabled") { self.hud.show(name: snapshot?.name,sourceClass:KoreanEnglishSwitch.sourceClass(snapshot)) }
             else {InputIncidentTrace.shared.hud(.suppressed,sourceClass:KoreanEnglishSwitch.sourceClass(snapshot))}
         }
         jamoRepair.beginTextEdit = { [weak self] field,source in
@@ -532,7 +560,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissionGranted = granted
         permissionContent.isHidden = granted
         if granted { window.orderOut(nil) }
-        if granted && pendingActivation && !updateRestricted {
+        if granted && !updateRestricted && !freshPermissionGate.allowsInput {freshPermission.start()}
+        if granted && freshPermissionGate.allowsInput && pendingActivation && !updateRestricted {
             let korean = UserDefaults.standard.bool(forKey: "koreanKeyEnabled")
             let hanja = UserDefaults.standard.bool(forKey: "hanjaKeyEnabled")
             if korean || hanja {
@@ -563,6 +592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func switchInputSource(to target: String, at timestamp: CGEventTimestamp = 0, rightCommand: Bool = false) -> OSStatus {
+        guard inputPermissionReady,!updateRestricted else{return -50}
         // The HID gate normally owns these presses. If another event source
         // bypasses that gate, the primary tap must still use the user's intended
         // boundary, not toggle from recovery's temporary English source.
@@ -589,7 +619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func startMapping() {
-        guard !updateRestricted else { return }
+        guard inputPermissionReady,!updateRestricted else { return }
         guard !filter.consuming && !optionFilter.consuming && !externalKeyboards.consuming else { status.stringValue = "누른 한영키와 한자키를 놓은 뒤 다시 시작하세요."; return }
         guard !CGEventSource.keyState(.combinedSessionState, key: 54) && !CGEventSource.keyState(.combinedSessionState, key: 61) else {
             status.stringValue = "우측 Command와 Option을 놓은 뒤 시작하세요."; return
@@ -644,10 +674,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         }
                         return Unmanaged.passUnretained(event)
                     }
-                    guard owner.permissionGranted && !owner.updateRestricted else {
+                    guard owner.inputPermissionReady && !owner.updateRestricted else {
                         control?.route=(owner.updateRestricted ? InputIncidentControl.Route.updateRestricted: .permissionDenied).rawValue
                         owner.enabled = false
-                        DispatchQueue.main.async { owner.stopMapping() }
+                        DispatchQueue.main.async { owner.stopMapping(keepPermissionMonitor:!owner.freshPermissionGate.allowsInput) }
                         return Unmanaged.passUnretained(event)
                     }
                     if event.getIntegerValueField(.eventSourceUserData) == SyntheticInputMarker.manualEdit || OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) {
@@ -825,6 +855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     var canRestartIdleMapping:Bool {
+        guard freshPermissionGate.allowsInput else{return false}
         let mismatch=mismatchRecovery.engine
         if let onset=onsetRecovery.engine,
            onset.recovering || onset.rollingBack || onset.waitingForContext ||
@@ -840,7 +871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Start a fresh registration after teardown. Never enable the disabled tap.
     func scheduleTimeoutRestart(now:Double=ProcessInfo.processInfo.systemUptime)->Bool {
-        guard timeoutRestart==nil,now-lastTimeoutRestart>=60,permissionGranted,!updateRestricted,
+        guard timeoutRestart==nil,now-lastTimeoutRestart>=60,inputPermissionReady,!updateRestricted,
               !enabled,tap==nil,canRestartIdleMapping else{return false}
         lastTimeoutRestart=now
         let work=DispatchWorkItem{[weak self] in self?.resumeAfterTimeout()}
@@ -855,7 +886,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ){
         guard let work=timeoutRestart,!work.isCancelled else{return}
         work.cancel();timeoutRestart=nil
-        guard !enabled,tap==nil,permissionGranted,!updateRestricted else{return}
+        guard !enabled,tap==nil,inputPermissionReady,!updateRestricted else{return}
         let korean=settings.bool(forKey:"koreanKeyEnabled"),hanja=settings.bool(forKey:"hanjaKeyEnabled")
         guard korean || hanja else{return}
         if ready(),canRestartIdleMapping {
@@ -875,7 +906,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func refreshInputDeliveryOrigin() {
-        guard enabled,permissionGranted,!updateRestricted,tap != nil else{return}
+        guard enabled,inputPermissionReady,!updateRestricted,tap != nil else{return}
         // A restarted mismatch gate inserts a HID head tap. Install provenance
         // after it so capture remains ahead of all main-run-loop input work.
         inputDeliveryOrigin?.stop()
@@ -891,10 +922,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Fail open: remove the system hook, not just the feature flags.
     /// Called outside the tap callback. The watchdog stays armed until cleanup ends.
-    func stopMapping(afterIdleTimeout:Bool=false) {
+    func stopMapping(afterIdleTimeout:Bool=false,keepPermissionMonitor:Bool=false) {
         timeoutRestart?.cancel();timeoutRestart=nil
         explicitTapStop=false
         inputDeliveryOrigin?.stop();inputDeliveryOrigin=nil
+        if !freshPermissionGate.allowsInput {
+            // Complete only releases for downs already posted by this process.
+            // No new down, retained input replay, or permission query is allowed.
+            mismatchRecovery.engine.releasePostedKeys()
+            onsetRecovery.engine?.releasePostedKeys()
+        }
         sourceSwitchBarrier.fail("input_stopped")
         InputDiagnostics.shared.record("tap.stop.begin present=\(tap != nil)")
         mismatchRecovery.stop(afterIdleTimeout:afterIdleTimeout)
@@ -911,13 +948,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             CFRunLoopSourceInvalidate(oldSource)
         }
         if let oldTap { CFMachPortInvalidate(oldTap) }
-        inputSafety.disarm()
-        freshPermission.stop()
+        if !keepPermissionMonitor{freshPermission.stop()}
         filter = CommandFilter()
         optionFilter = CommandFilter(keyCode: 61, left: 0x20, right: 0x40, aggregate: .maskAlternate)
         jamoRepair.stop()
         externalKeyboards.stop()
         KeyboardStateMirror.shared.stop()
+        inputSafety.disarm()
         InputDiagnostics.shared.record("tap.stop.end")
     }
 
@@ -1079,21 +1116,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleItem.state = UserDefaults.standard.bool(forKey: "koreanKeyEnabled") ? .on : .off
             hanjaItem.state = UserDefaults.standard.bool(forKey: "hanjaKeyEnabled") ? .on : .off
         }
-        toggleItem.isEnabled = permissionGranted && !updateRestricted
-        hanjaItem.isEnabled = permissionGranted && !updateRestricted
-        hudItem.isEnabled = permissionGranted && !updateRestricted
+        toggleItem.isEnabled = inputPermissionReady && !updateRestricted
+        hanjaItem.isEnabled = inputPermissionReady && !updateRestricted
+        hudItem.isEnabled = inputPermissionReady && !updateRestricted
         menuStatus.title = permissionGranted ? status.stringValue : "손쉬운 사용 권한을 기다리고 있어요"
         menuStatus.toolTip = nil
         if let reason = inputInterruption, permissionGranted {
             menuStatus.title = reason.status
             menuStatus.toolTip = reason.explanation + "\n" + reason.guidance
         }
+        if permissionGranted && !freshPermissionGate.allowsInput {
+            menuStatus.title="권한 확인 실패 · 기능 일시 중단 · 자동 재확인 중"
+            menuStatus.toolTip="한Q는 실행 중입니다. 권한을 다시 확인하면 새 입력부터 기능을 재개합니다. 보관된 입력은 자동으로 다시 보내지 않습니다."
+        }
         if updateRestricted { menuStatus.title = "업데이트가 필요해요 · 한Q 기능 중단" }
         if updateRestricted { menuStatus.toolTip = nil }
         statusIcon.setDisabled(!koreanEnabled && !hanjaEnabled)
     }
     @objc func toggleKorean() {
-        guard !updateRestricted else { return }
+        guard inputPermissionReady,!updateRestricted else { return }
         if !koreanEnabled { startMapping(); guard enabled else { return } }
         koreanEnabled.toggle()
         UserDefaults.standard.set(koreanEnabled, forKey: "koreanKeyEnabled")
@@ -1101,7 +1142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshStatus()
     }
     @objc func toggleHanja() {
-        guard !updateRestricted else { return }
+        guard inputPermissionReady,!updateRestricted else { return }
         if !hanjaEnabled { startMapping(); guard enabled else { return } }
         hanjaEnabled.toggle()
         UserDefaults.standard.set(hanjaEnabled, forKey: "hanjaKeyEnabled")

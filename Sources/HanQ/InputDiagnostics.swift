@@ -3,6 +3,125 @@ import Foundation
 import CryptoKit
 import Darwin
 import Carbon
+import OSLog
+
+// Operational failures are independent of opt-in input tracing. Only fixed
+// stages/domains and numeric error codes cross this boundary, never paths or
+// NSError descriptions/userInfo (which can contain user data).
+enum OperationalStage:Int,Codable {
+    case diagnosticOpen=1,diagnosticWrite
+    case probeDirectory=10,probeValidate,probeEnter,probeLaunch,probeRead,probeDecode,probeToken
+    case probeEncode,probeOpen,probeWrite,probePublish,probeTimeout,probeCleanup
+    case permissionDenied,permissionUnavailable,permissionRestored,watchdog,transport
+    case budgetPersistence=30,storageWrite
+    case storagePrepare,storageOwnership,storagePublish,storagePrune,storageEncode,storageStatus
+}
+struct OperationalFailure:Error,Codable,Hashable {
+    enum Domain:Int,Codable {case policy=0,posix,cocoa,osStatus,mach,other}
+    let stage:OperationalStage
+    let domain:Domain
+    let code:Int
+    let underlyingPOSIX:Int
+    static func posix(_ stage:OperationalStage,_ code:Int32)->Self {
+        Self(stage:stage,domain:.posix,code:Int(code),underlyingPOSIX:Int(code))
+    }
+    static func policy(_ stage:OperationalStage,_ code:Int)->Self {
+        Self(stage:stage,domain:.policy,code:code,underlyingPOSIX:0)
+    }
+    static func capture(_ error:Error,stage:OperationalStage)->Self {
+        let value=error as NSError
+        let domain:Domain
+        switch value.domain {
+        case NSPOSIXErrorDomain:domain = .posix
+        case NSCocoaErrorDomain:domain = .cocoa
+        case NSOSStatusErrorDomain:domain = .osStatus
+        case NSMachErrorDomain:domain = .mach
+        default:domain = .other
+        }
+        var underlying=domain == .posix ? value.code:0
+        var next: NSError?=value
+        for _ in 0..<4 {
+            guard let current=next else{break}
+            if current.domain==NSPOSIXErrorDomain{underlying=current.code;break}
+            next=current.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return Self(stage:stage,domain:domain,code:value.code,underlyingPOSIX:underlying)
+    }
+}
+final class OperationalDiagnostics {
+    struct Entry:Codable {
+        let failure:OperationalFailure
+        var count:Int
+        let firstNanoseconds:UInt64
+        var lastNanoseconds:UInt64
+        var elapsedMilliseconds:Int
+        var lastEmittedNanoseconds:UInt64
+    }
+    static let shared=OperationalDiagnostics()
+    private static let logger=Logger(subsystem:"taek.in.hanq",category:"operations")
+    private let lock=NSLock()
+    private var entries:[Entry]=[]
+    private var evicted=0
+    private var emissionWindow:UInt64=0,emissions=0
+    private let clock:()->UInt64
+    private let sink:(Entry)->Void
+    init(clock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},
+         sink:@escaping (Entry)->Void={entry in
+             let value=entry.failure
+             OperationalDiagnostics.logger.error("stage=\(value.stage.rawValue,privacy:.public) domain=\(value.domain.rawValue,privacy:.public) code=\(value.code,privacy:.public) errno=\(value.underlyingPOSIX,privacy:.public) count=\(entry.count,privacy:.public) elapsedMS=\(entry.elapsedMilliseconds,privacy:.public)")
+         }) {self.clock=clock;self.sink=sink}
+    // At most 64 distinct entries; repeats emit at most once per 30 seconds.
+    // No disk write, arbitrary string, or logging of a logger failure here.
+    func record(_ failure:OperationalFailure,elapsedMilliseconds:Int=0) {
+        let now=clock()
+        lock.lock()
+        let index:Int
+        let isNew:Bool
+        if let existing=entries.firstIndex(where:{$0.failure==failure}) {index=existing;isNew=false}
+        else {
+            if entries.count==64{entries.removeFirst();evicted=min(Int.max-1,evicted)+1}
+            entries.append(Entry(failure:failure,count:0,firstNanoseconds:now,lastNanoseconds:now,
+                                 elapsedMilliseconds:0,lastEmittedNanoseconds:now))
+            index=entries.count-1;isNew=true
+        }
+        entries[index].count=min(Int.max-1,entries[index].count)+1
+        entries[index].lastNanoseconds=now
+        entries[index].elapsedMilliseconds=max(0,min(elapsedMilliseconds,60_000))
+        let last=entries[index].lastEmittedNanoseconds
+        if now>=emissionWindow,now-emissionWindow>=30_000_000_000{emissionWindow=now;emissions=0}
+        let emit=emissions<8 && (isNew || (now>=last && now-last>=30_000_000_000))
+        if emit{emissions+=1}
+        if emit{entries[index].lastEmittedNanoseconds=now}
+        let value=entries[index]
+        lock.unlock()
+        if emit{sink(value)}
+    }
+    func snapshot()->(entries:[Entry],evicted:Int) {
+        lock.lock();defer{lock.unlock()};return(entries,evicted)
+    }
+}
+enum OperationalIO {
+    typealias Write=(Int32,UnsafeRawPointer?,Int)->Int
+    // Capture errno before cleanup. Short writes and EINTR never lose a suffix;
+    // a zero-byte write is a separate no-progress policy failure.
+    static func writeAll(_ data:Data,to descriptor:Int32,stage:OperationalStage,
+                         write:Write={Darwin.write($0,$1,$2)})->OperationalFailure? {
+        data.withUnsafeBytes {bytes in
+            var offset=0
+            while offset<bytes.count {
+                let count=write(descriptor,bytes.baseAddress!.advanced(by:offset),bytes.count-offset)
+                if count<0 {
+                    let code=errno
+                    if code==EINTR{continue}
+                    return .posix(stage,code)
+                }
+                guard count>0,count<=bytes.count-offset else{return .policy(stage,1)}
+                offset+=count
+            }
+            return nil
+        }
+    }
+}
 
 /// Opt-in incident tracing. No text, keycodes, clipboard or AX content is logged.
 /// Independent probes let us distinguish a stuck main loop from stale permission
@@ -16,6 +135,7 @@ final class InputDiagnostics {
         let args = ProcessInfo.processInfo.arguments
         if let index = args.firstIndex(of: "--diagnose-input"), index + 1 < args.count {
             descriptor = open(args[index + 1], O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+            if descriptor<0{OperationalDiagnostics.shared.record(.posix(.diagnosticOpen,errno))}
         } else { descriptor = -1 }
     }
 
@@ -24,7 +144,9 @@ final class InputDiagnostics {
     func record(_ message: @autoclosure () -> String) {
         guard descriptor >= 0 else { return }
         let line = "\(Date().timeIntervalSince1970) mono=\(DispatchTime.now().uptimeNanoseconds) pid=\(getpid()) \(message())\n"
-        line.withCString { pointer in _ = write(descriptor, pointer, strlen(pointer)) }
+        if let failure=OperationalIO.writeAll(Data(line.utf8),to:descriptor,stage:.diagnosticWrite) {
+            OperationalDiagnostics.shared.record(failure)
+        }
     }
 
     func start() {
@@ -826,6 +948,7 @@ final class InputIncidentTrace {
         let requested:[Int:Int];let merged:[Int:Int];let deferred:[Int:Int]
         let requestOverflow:[Int:Int];let windowOverflow:[Int:Int];let postOverflow:[Int:Int];let discardedOnDisable:[Int:Int]
         let submittedWindows:Int;let completedWindows:Int
+        var rateSuppressed:[Int:Int]?=nil
     }
     // Codes are persisted. Append new entries to preserve older recordings.
     struct RecoveryFailure:Codable {
@@ -983,6 +1106,7 @@ final class InputIncidentTrace {
     private var captureRequested:[Int:Int]=[:],captureMerged:[Int:Int]=[:],captureDeferred:[Int:Int]=[:]
     private var captureRequestOverflow:[Int:Int]=[:],captureWindowOverflow:[Int:Int]=[:],capturePostOverflow:[Int:Int]=[:],captureDiscarded:[Int:Int]=[:]
     private var submittedWindows=0,completedWindows=0
+    private var captureRateSuppressed:[Int:Int]=[:],lastAutomaticKind:[Int:Double]=[:]
     private let decisionCapacity:Int
     private let importantCredits:DispatchSemaphore,routineCredits:DispatchSemaphore
     // Fixed scalar counters avoid one async allocation per overflow. Only the
@@ -995,6 +1119,7 @@ final class InputIncidentTrace {
     private let observationClock:()->UInt64
     private var observationWaits:[Int:DecisionWaitStats]=[:]
     private let storage:DiagnosticLogStore?
+    private let limitsWrites:Bool
     private let clock:()->Double
     // Default remains the live OS security state; synthetic fixtures inject their state.
     fileprivate let secureInput:()->Bool
@@ -1037,7 +1162,9 @@ final class InputIncidentTrace {
         routineCredits=DispatchSemaphore(value:self.decisionCapacity-important)
         overflowSignals=(destination != nil || writer != nil) ? (0..<310).map{_ in DispatchSemaphore(value:0)}:[]
         self.destinationDirectory=destination
-        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory,requiresBoundedPriorPolicy:boundedStorage)}
+        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory,requiresBoundedPriorPolicy:boundedStorage,
+            writeBudget:persistentOwnership && archiveDirectory==nil && retention.maximumAutomaticBytes != Int.max ? DiagnosticWriteBudget():nil)}
+        self.limitsWrites=persistentOwnership && archiveDirectory==nil && retention.maximumAutomaticBytes != Int.max
         self.configured=destination != nil || writer != nil;self.gate=DiagnosticCollectionGate(self.configured && initiallyEnabled)
         self.capacity=max(1,min(capacity,16384));self.clock=clock;self.callbackCPU=callbackCPU;origin=clock();self.writer=writer
         ring=Array(repeating:nil,count:self.configured ? self.capacity:0)
@@ -1057,7 +1184,9 @@ final class InputIncidentTrace {
         decisionQueue.async{[self] in queue.async{[self] in
             let readiness=storage?.readiness ?? .unavailable
             let missing=storage.map{$0.status.unavailable+$0.status.encodingFailures+$0.status.limited+$0.status.statusWriteFailures} ?? 0
-            completion(DiagnosticStorageHealth(readiness:readiness,missingWrites:missing))
+            let budget=storage?.status.writeBudget
+            completion(DiagnosticStorageHealth(readiness:readiness,missingWrites:missing,
+                suppressedWrites:(budget?["suppressedAutomatic"] ?? 0)+(budget?["suppressedManual"] ?? 0)))
         }}
     }
     func observeStorage(_ callback:@escaping()->Void){queue.async{[self] in storageObserver=callback}}
@@ -1178,7 +1307,7 @@ final class InputIncidentTrace {
     private func backlogSnapshot()->CaptureBacklog {
         CaptureBacklog(automaticCapacity:16,manualCapacity:4,requestCapacityPerTrigger:16,requestsPerWindow:32,
             pendingAutomatic:windows.values.filter{$0.before.trigger != .manual}.count,pendingManual:windows.values.filter{$0.before.trigger == .manual}.count,
-            requested:captureRequested,merged:captureMerged,deferred:captureDeferred,requestOverflow:captureRequestOverflow,windowOverflow:captureWindowOverflow,postOverflow:capturePostOverflow,discardedOnDisable:captureDiscarded,submittedWindows:submittedWindows,completedWindows:completedWindows)
+            requested:captureRequested,merged:captureMerged,deferred:captureDeferred,requestOverflow:captureRequestOverflow,windowOverflow:captureWindowOverflow,postOverflow:capturePostOverflow,discardedOnDisable:captureDiscarded,submittedWindows:submittedWindows,completedWindows:completedWindows,rateSuppressed:limitsWrites ? captureRateSuppressed:nil)
     }
     private func collectCaptureOverflow(){
         for (index,signal) in captureOverflowSignals.enumerated(){
@@ -1294,11 +1423,20 @@ final class InputIncidentTrace {
                 let (identifier,origin)=reference.map{eventIdentity($0)} ?? (0,0)
                 let request=CaptureRequest(trigger:reason.rawValue,milliseconds:Int(max(0,time-self.origin)*1000),afterSequence:sequence,lane:lane.rawValue,detail:detail,event:identifier,inputOrigin:origin)
                 captureRequested[reason.rawValue,default:0]+=1
-                if reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
+                if !limitsWrites,reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
                     window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
                     let code=reason == window.before.trigger ? reason.rawValue%8:reason.rawValue%8+8
                     observationOmitted[observationCode(.capture,.main,code),default:0]+=1
                     scheduleClose(window);return
+                }
+                if limitsWrites,reason != .manual {
+                    // Suppression is counted by trigger, not presented as a
+                    // merged incident. A different trigger is independently admitted.
+                    let key=reason.rawValue
+                    if let last=lastAutomaticKind[key],time-last<10 {
+                        captureRateSuppressed[key,default:0]+=1;return
+                    }
+                    lastAutomaticKind[key]=time
                 }
                 let pending=windows.values.filter{($0.before.trigger == .manual)==(reason == .manual)}.count
                 guard pending<(reason == .manual ? 4:16) else{
@@ -1308,7 +1446,7 @@ final class InputIncidentTrace {
                 // immediate pre would retire that older automatic incident.
                 let intervalBlocked=clock()-lastTrigger<10
                 let orderBlocked=windows.values.contains{$0.deferred && !$0.submitted}
-                let deferred=reason != .manual && (intervalBlocked || orderBlocked)
+                let deferred = !limitsWrites && reason != .manual && (intervalBlocked || orderBlocked)
                 if deferred{
                     captureDeferred[reason.rawValue,default:0]+=1
                     observationOmitted[observationCode(.capture,.main,reason.rawValue%8+8),default:0]+=1
@@ -1317,7 +1455,7 @@ final class InputIncidentTrace {
                 let before=snapshot(reason,timing:timing,incident:captures)
                 let window=CaptureWindow(before,request,deferred:deferred,generation:generation)
                 windows[captures]=window
-                if !deferred {
+                if !deferred && !limitsWrites {
                     var value=before;value.capturePreservation=preservation(window);value.captureBacklog=backlogSnapshot()
                     queue.async{[self] in if gate.generation==generation{write(value)}}
                 }
@@ -1372,9 +1510,13 @@ final class InputIncidentTrace {
         after.capturePreservation=value;after.captureBacklog=backlog
         let writeBefore=window.deferred,generation=window.generation,incident=before.incident
         queue.async{[self] in
-            if writeBefore,gate.generation==generation{write(before)}
             let attemptedPost=gate.generation==generation
-            if attemptedPost{write(after)}
+            if limitsWrites {
+                if attemptedPost{writePair(before,after)}
+            }else {
+                if writeBefore,attemptedPost{write(before)}
+                if attemptedPost{write(after)}
+            }
             decisionQueue.async{[self] in
                 lock.lock();defer{lock.unlock()}
                 guard let current=windows[incident],current.generation==generation else{return}
@@ -1397,6 +1539,16 @@ final class InputIncidentTrace {
         if result != lastStorageNotice || !storage.readiness.ready || capture.trigger == .manual {
             lastStorageNotice=result;storageObserver?()
         }
+    }
+    private func writePair(_ before:Capture,_ after:Capture) {
+        if let writer{writer(before);writer(after);return}
+        guard let storage else{return}
+        var pre=before,post=after
+        pre.storageBeforeWrite=storage.status;post.storageBeforeWrite=storage.status
+        do {
+            _ = storage.savePair(try JSONEncoder().encode(pre),try JSONEncoder().encode(post),incident:pre.incident,automatic:pre.trigger != .manual)
+        }catch{storage.encodingFailed(incident:pre.incident,phase:0,automatic:pre.trigger != .manual)}
+        storageObserver?()
     }
     // No extra event tag, AX call, event copy, key post or source selection.
     func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0,started:CallbackStart?=nil){
@@ -1984,6 +2136,126 @@ struct DiagnosticLogRetentionPolicy {
     }
 }
 
+// Serial-writer accounting, separate from retained size. Reservations are
+// durable BEFORE payload writes, include metadata and are never refunded.
+// Fixed accounting windows start on first use, not at calendar boundaries.
+final class DiagnosticWriteBudget {
+    struct Limits {
+        var automaticHour=64*1024*1024,automaticDay=256*1024*1024
+        var manualHour=32*1024*1024,manualDay=128*1024*1024
+        var automaticEventsHour=48,automaticEventsDay=192
+    }
+    private struct Ledger:Codable {
+        var schema=1
+        var hour:Double,day:Double,last:Double
+        var automaticHour=0,automaticDay=0,manualHour=0,manualDay=0
+        var eventsHour=0,eventsDay=0
+    }
+    private let limits:Limits,clock:()->Double
+    private let writer:OperationalIO.Write
+    private var ledger:Ledger?
+    private var identity:stat?
+    private var failed=false
+    private(set) var lastFailure:OperationalFailure?
+    private(set) var suppressedAutomatic=0,suppressedManual=0,persistenceFailures=0
+    private(set) var actualBytes=0
+    private static let name=".write-budget-v1.ledger"
+    init(limits:Limits=Limits(),clock:@escaping ()->Double={Date().timeIntervalSince1970},
+         writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}) {
+        self.limits=limits;self.clock=clock;self.writer=writer
+    }
+    var summary:[String:Int] {
+        let v=ledger
+        return ["automaticHourLimit":limits.automaticHour,"automaticDayLimit":limits.automaticDay,
+                "manualHourLimit":limits.manualHour,"manualDayLimit":limits.manualDay,
+                "automaticHour":v?.automaticHour ?? 0,"automaticDay":v?.automaticDay ?? 0,
+                "manualHour":v?.manualHour ?? 0,"manualDay":v?.manualDay ?? 0,
+                "eventsHour":v?.eventsHour ?? 0,"eventsDay":v?.eventsDay ?? 0,
+                "suppressedAutomatic":suppressedAutomatic,"suppressedManual":suppressedManual,
+                "persistenceFailures":persistenceFailures]
+    }
+    private func fault(_ error:OperationalFailure)->Bool {
+        lastFailure=error
+        failed=true;persistenceFailures=min(persistenceFailures,Int.max-1)+1
+        OperationalDiagnostics.shared.record(error);return false
+    }
+    private func prepare(_ dir:Int32)->Bool {
+        if failed{return false};if ledger != nil{return true}
+        let now=clock();guard now.isFinite,now>=0 else{return fault(.policy(.budgetPersistence,1))}
+        let fd=openat(dir,Self.name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+        if fd<0 {
+            let code=errno;guard code==ENOENT else{return fault(.posix(.budgetPersistence,code))}
+            // A ledger missing from an upgraded store is damage, not new credit.
+            let index=openat(dir,".automatic-ownership-v1.index",O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+            if index>=0 {
+                defer{close(index)}
+                guard let data=try? FileHandle(fileDescriptor:index,closeOnDealloc:false).read(upToCount:8*1024*1024+1),
+                      let object=try? JSONSerialization.jsonObject(with:data) as? [String:Any],
+                      object["writeBudgetRequired"] as? Bool != true else{return fault(.policy(.budgetPersistence,2))}
+            }else if errno != ENOENT{return fault(.posix(.budgetPersistence,errno))}
+            ledger=Ledger(hour:now,day:now,last:now);return true
+        }
+        defer{close(fd)}
+        var info=stat()
+        guard fstat(fd,&info)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        guard info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o7777==0o600,info.st_size>0,info.st_size<=4096,
+              let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:4097),
+              let value=try? JSONDecoder().decode(Ledger.self,from:data),value.schema==1,
+              [value.hour,value.day,value.last].allSatisfy({$0.isFinite && $0>=0}),value.hour<=value.last,value.day<=value.last,
+              [value.automaticHour,value.automaticDay,value.manualHour,value.manualDay,value.eventsHour,value.eventsDay].allSatisfy({$0>=0 && $0<=Int.max/2})
+        else{return fault(.policy(.budgetPersistence,3))}
+        identity=info;ledger=value;return true
+    }
+    private func same(_ left:stat,_ right:stat)->Bool {
+        left.st_dev==right.st_dev && left.st_ino==right.st_ino && left.st_size==right.st_size &&
+        left.st_mtimespec.tv_sec==right.st_mtimespec.tv_sec && left.st_mtimespec.tv_nsec==right.st_mtimespec.tv_nsec &&
+        left.st_ctimespec.tv_sec==right.st_ctimespec.tv_sec && left.st_ctimespec.tv_nsec==right.st_ctimespec.tv_nsec
+    }
+    func reserve(_ bytes:Int,automatic:Bool,event:Bool,dir:Int32)->Bool {
+        guard bytes>=0,bytes<=Int.max-4096,prepare(dir) else{return false}
+        var value=ledger!
+        let wall=clock();guard wall.isFinite,wall>=0 else{return fault(.policy(.budgetPersistence,1))}
+        // Clock rollback never grants another window, including across relaunch.
+        let now=max(value.last,wall);value.last=now
+        if now-value.hour>=3600{value.hour=now;value.automaticHour=0;value.manualHour=0;value.eventsHour=0}
+        if now-value.day>=86400{value.day=now;value.automaticDay=0;value.manualDay=0;value.eventsDay=0}
+        let charge=bytes+4096 // includes this <=4KiB atomic ledger replacement
+        let hour=automatic ? value.automaticHour:value.manualHour,day=automatic ? value.automaticDay:value.manualDay
+        let allowed=charge<=(automatic ? limits.automaticHour:limits.manualHour)-min(hour,automatic ? limits.automaticHour:limits.manualHour) &&
+            charge<=(automatic ? limits.automaticDay:limits.manualDay)-min(day,automatic ? limits.automaticDay:limits.manualDay) &&
+            (!automatic || !event || (value.eventsHour<limits.automaticEventsHour && value.eventsDay<limits.automaticEventsDay))
+        guard allowed else {
+            if automatic{suppressedAutomatic=min(suppressedAutomatic,Int.max-1)+1}else{suppressedManual=min(suppressedManual,Int.max-1)+1}
+            ledger=value;return false
+        }
+        if automatic{value.automaticHour+=charge;value.automaticDay+=charge;if event{value.eventsHour+=1;value.eventsDay+=1}}
+        else{value.manualHour+=charge;value.manualDay+=charge}
+        guard let data=try? JSONEncoder().encode(value),data.count<=4096 else{return fault(.policy(.budgetPersistence,4))}
+        if let identity {
+            var current=stat()
+            guard fstatat(dir,Self.name,&current,AT_SYMLINK_NOFOLLOW)==0,same(identity,current) else{return fault(.policy(.budgetPersistence,5))}
+        }
+        let name=".budget-"+UUID().uuidString
+        let fd=openat(dir,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
+        guard fd>=0 else{return fault(.posix(.budgetPersistence,errno))}
+        defer{close(fd);unlinkat(dir,name,0)}
+        if let failure=OperationalIO.writeAll(data,to:fd,stage:.budgetPersistence,write:{[self] fd,p,n in
+            let count=writer(fd,p,n);if count>0{actualBytes+=count};return count
+        }){return fault(failure)}
+        guard fsync(fd)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        if identity == nil {
+            guard linkat(dir,name,dir,Self.name,0)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        }else {
+            guard renameat(dir,name,dir,Self.name)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        }
+        guard fsync(dir)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        var info=stat();guard fstat(fd,&info)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        // Initial link temporarily has two names; unlink before remembering ctime.
+        if identity == nil{guard unlinkat(dir,name,0)==0,fstat(fd,&info)==0 else{return fault(.posix(.budgetPersistence,errno))}}
+        identity=info;ledger=value;return true
+    }
+}
+
 final class DiagnosticLogStore {
     enum Result:Int,Equatable {case saved=1,limit,retired,unavailable}
     // Fixed numeric state: no paths, input content, keys or arbitrary messages.
@@ -1996,6 +2268,7 @@ final class DiagnosticLogStore {
         var evictedGroups=0,evictedFiles=0,evictedBytes=0
         var lastIncident=0,lastPhase=0,lastAutomatic=false,lastResult=0,lastFailureStage=0,lastErrno=0
         var lastWriteMicros=0,maxWriteMicros=0,writeTimingClipped=0,statusWriteFailures=0
+        var writeBudget:[String:Int]?=nil
     }
     struct StatusDocument:Encodable {
         let schema=1
@@ -2027,16 +2300,32 @@ final class DiagnosticLogStore {
     private var statusName=".storage-"+UUID().uuidString+".status"
     private var statusFile:File?
     private var failureStage=0,failureErrno:Int32=0
+    private let writeBudget:DiagnosticWriteBudget?
+    private var writeCredit=0,budgetAutomatic=true,reservationActive=false
+    private var reservationFailure:OperationalFailure?
+    private(set) var actualWrittenBytes=0
+    var limitsWrites:Bool{writeBudget != nil}
     private(set) var readiness=DiagnosticStorageReadiness.notChecked
     private var readinessReceipt:File?
-    private func failed(_ stage:Int,_ code:Int32=0)->Result {failureStage=stage;failureErrno=code;return .unavailable}
+    private func storageFault(_ stage:OperationalStage,_ code:Int32=0,policy:Int=1)->Bool {
+        OperationalDiagnostics.shared.record(code == 0 ? .policy(stage,policy):.posix(stage,code));return false
+    }
+    private func failed(_ stage:Int,_ code:Int32=0)->Result {
+        failureStage=stage;failureErrno=code
+        let operation:OperationalStage
+        switch stage {case 2:operation = .storagePrepare;case 3:operation = .storageOwnership
+        case 4:operation = .storagePublish;case 5:operation = .storagePrune;case 6:operation = .storageEncode
+        default:operation = .storageWrite}
+        _ = storageFault(operation,code,policy:stage);return .unavailable
+    }
     var usage:Usage {Usage(files:groups.reduce(0){$0+$1.files.count},bytes:groups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     var manualUsage:Usage {Usage(files:manualGroups.reduce(0){$0+$1.files.count},bytes:manualGroups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     private(set) var lastResult:Result?
-    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,requiresBoundedPriorPolicy:Bool=false){
+    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,requiresBoundedPriorPolicy:Bool=false,writeBudget:DiagnosticWriteBudget?=nil){
         self.directory=directory;self.policy=policy;self.persistentOwnership=persistentOwnership
         self.archiveDirectory=archiveDirectory
         self.requiresBoundedPriorPolicy=requiresBoundedPriorPolicy
+        self.writeBudget=writeBudget ?? (requiresBoundedPriorPolicy && persistentOwnership && archiveDirectory==nil && policy.maximumAutomaticBytes != Int.max ? DiagnosticWriteBudget():nil)
         status=Status(maximumAutomaticFiles:policy.maximumAutomaticFiles,maximumAutomaticBytes:policy.maximumAutomaticBytes)
         status.maximumManualBytes=policy.maximumManualBytes;status.manualFiles=0;status.manualBytes=0
     }
@@ -2144,6 +2433,7 @@ final class DiagnosticLogStore {
         var manualFiles:[Record]?=nil
         var volumeUUID:String?=nil,bootUUID:String?=nil
         var birth:Int64?=nil,birthNanos:Int64?=nil
+        var writeBudgetRequired:Bool?=nil
     }
     private let persistentOwnership:Bool
     private var ownershipPrepared=false,ownershipHealthy=true
@@ -2195,7 +2485,7 @@ final class DiagnosticLogStore {
                   archiveDirectory==nil else{return}
         }
         guard let dir=openDirectory() else{return};defer{close(dir)}
-        if requiresBoundedPriorPolicy,!retainBoundedWriterLock(dir){return}
+        if requiresBoundedPriorPolicy || limitsWrites {guard retainBoundedWriterLock(dir) else{return}}
         guard prepareVolume(dir) else{return}
         var info=stat()
         if fstatat(dir,ownershipName,&info,AT_SYMLINK_NOFOLLOW) != 0 {
@@ -2293,6 +2583,14 @@ final class DiagnosticLogStore {
         status.maximumManualBytes=policy.maximumManualBytes
         statusName=index.statusName;statusFile=previousStatus;ownershipFile=File(name:ownershipName,phase:0,identity:info)
         if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
+        if limitsWrites,index.schema==3,index.writeBudgetRequired==true,
+           index.status.maximumAutomaticFiles==policy.maximumAutomaticFiles,
+           index.status.maximumAutomaticBytes==policy.maximumAutomaticBytes,
+           index.status.maximumManualBytes==policy.maximumManualBytes {
+            // Reopening an unchanged store is read-only. In particular an
+            // exhausted automatic allowance cannot consume manual credit.
+            updateUsage();ownershipHealthy=true;return
+        }
         // Lowered limits and legacy manual data rotate before accepting new files.
         guard trimRestored(dir) else{return}
         updateUsage()
@@ -2383,10 +2681,11 @@ final class DiagnosticLogStore {
         guard group.files.allSatisfy({owned($0,dir)}) else{_ = failed(3);return false}
         if let archiveDirectory {
             do{try archive(group.files,from:dir,to:archiveDirectory)}
-            catch{_ = failed(5);return false}
+            catch{OperationalDiagnostics.shared.record(.capture(error,stage:.storagePrune));_ = failed(5);return false}
         }
         for file in group.files {
-            guard owned(file,dir),unlinkat(dir,file.name,0)==0 else{_ = failed(5,errno);return false}
+            guard owned(file,dir) else{_ = failed(5);return false}
+            guard unlinkat(dir,file.name,0)==0 else{_ = failed(5,errno);return false}
             status.evictedFiles+=1;status.evictedBytes+=file.bytes
             if manual {
                 if let i=manualGroups.firstIndex(where:{$0.key==group.key}){manualGroups[i].files.removeAll{$0.name==file.name}}
@@ -2448,25 +2747,81 @@ final class DiagnosticLogStore {
         name.hasPrefix(".storage-") && name.hasSuffix(".status") && UUID(uuidString:String(name.dropFirst(9).dropLast(7))) != nil
     }
     private func persistOwnership(_ dir:Int32)->Bool {
-        guard let identity=directoryIdentity,prepareVolume(dir) else{return false}
+        guard let identity=directoryIdentity,prepareVolume(dir) else{return storageFault(.storageOwnership)}
         let index=Ownership(schema:3,device:Int64(identity.st_dev),inode:identity.st_ino,lastIncident:lastCaptureIncident,
             statusName:statusName,status:status,files:groups.flatMap{group in group.files.map{Record($0,incident:group.incident)}},
             statusFile:statusFile.map{Record($0,incident:0)},manualFiles:manualGroups.flatMap{group in group.files.map{Record($0,incident:group.incident,manualKey:group.key)}},
-            volumeUUID:volumeUUID,bootUUID:Self.bootUUID,birth:Int64(identity.st_birthtimespec.tv_sec),birthNanos:Int64(identity.st_birthtimespec.tv_nsec))
-        guard let data=try? JSONEncoder().encode(index),data.count<=8*1024*1024 else{return false}
-        if let old=ownershipFile, !owned(old,dir){return false}
+            volumeUUID:volumeUUID,bootUUID:Self.bootUUID,birth:Int64(identity.st_birthtimespec.tv_sec),birthNanos:Int64(identity.st_birthtimespec.tv_nsec),writeBudgetRequired:limitsWrites ? true:nil)
+        let data:Data
+        do{data=try JSONEncoder().encode(index)}catch{OperationalDiagnostics.shared.record(.capture(error,stage:.storageEncode));return false}
+        guard data.count<=8*1024*1024 else{return storageFault(.storageOwnership,policy:2)}
+        if let old=ownershipFile, !owned(old,dir){return storageFault(.storageOwnership,policy:3)}
         let temporary=".partial-"+UUID().uuidString
         let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{return false};defer{close(fd);unlinkat(dir,temporary,0)}
+        guard fd>=0 else{return storageFault(.storageOwnership,errno)};defer{close(fd);unlinkat(dir,temporary,0)}
         guard writeAll(data,fd) else{return false}
         if let old=ownershipFile {
-            guard owned(old,dir),renameat(dir,temporary,dir,ownershipName)==0 else{return false}
-        }else{guard linkat(dir,temporary,dir,ownershipName,0)==0,unlinkat(dir,temporary,0)==0 else{return false}}
-        var info=stat();guard fstat(fd,&info)==0 else{return false}
+            guard owned(old,dir) else{return storageFault(.storageOwnership,policy:3)}
+            guard renameat(dir,temporary,dir,ownershipName)==0 else{return storageFault(.storageOwnership,errno)}
+        }else{guard linkat(dir,temporary,dir,ownershipName,0)==0,unlinkat(dir,temporary,0)==0 else{return storageFault(.storageOwnership,errno)}}
+        var info=stat();guard fstat(fd,&info)==0 else{return storageFault(.storageOwnership,errno)}
         ownershipFile=File(name:ownershipName,phase:0,identity:info);return true
     }
 
     @discardableResult func save(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
+        budgetAutomatic=automatic
+        if limitsWrites,!reservationActive {
+            prepareOwnership()
+            if !ownershipHealthy{return saveReserved(data,incident:incident,phase:phase,automatic:automatic)}
+            guard reserveWrite(data.count+metadataAllowance(),automatic:automatic,event:phase==0) else{return rejectedReservation(incident:incident,phase:phase,automatic:automatic)}
+            reservationActive=true
+            defer{writeCredit=0;reservationActive=false}
+            return saveReserved(data,incident:incident,phase:phase,automatic:automatic)
+        }
+        return saveReserved(data,incident:incident,phase:phase,automatic:automatic)
+    }
+    // Reserve both encoded phases before either becomes visible. Reservation
+    // failures update memory only; there is no deferred catch-up write queue.
+    @discardableResult func savePair(_ before:Data,_ after:Data,incident:Int,automatic:Bool)->Result {
+        prepareOwnership();budgetAutomatic=automatic
+        guard ownershipHealthy else{lastResult = .unavailable;return .unavailable}
+        let retainedLimit=automatic ? policy.maximumAutomaticBytes:policy.maximumManualBytes
+        guard before.count<=retainedLimit,after.count<=retainedLimit-before.count,
+              !automatic || policy.maximumAutomaticFiles>=2 else{lastResult = .limit;return .limit}
+        guard before.count<=Int.max-after.count-2*metadataAllowance() else{return .limit}
+        if limitsWrites {
+            guard reserveWrite(before.count+after.count+2*metadataAllowance(),automatic:automatic,event:true) else{return rejectedReservation(incident:incident,phase:0,automatic:automatic)}
+        }
+        reservationActive=limitsWrites
+        defer{writeCredit=0;reservationActive=false}
+        let pre=saveReserved(before,incident:incident,phase:0,automatic:automatic)
+        guard pre == .saved else{return pre}
+        return saveReserved(after,incident:incident,phase:1,automatic:automatic)
+    }
+    private func metadataAllowance()->Int {
+        // Each ownership record is <1KiB (fixed names/hashes/numeric fields).
+        // Allow new pair records and a complete <=16KiB status replacement.
+        32*1024+(groups.reduce(0){$0+$1.files.count}+manualGroups.reduce(0){$0+$1.files.count}+2)*1024
+    }
+    private func reserveWrite(_ bytes:Int,automatic:Bool,event:Bool)->Bool {
+        reservationFailure=nil
+        guard let writeBudget else{return true}
+        guard let dir=openDirectory() else{reservationFailure = .posix(.budgetPersistence,failureErrno);return false};defer{close(dir)}
+        guard retainBoundedWriterLock(dir) else{reservationFailure = .posix(.budgetPersistence,failureErrno);return false}
+        let accepted=writeBudget.reserve(bytes,automatic:automatic,event:event,dir:dir)
+        reservationFailure=writeBudget.lastFailure
+        status.writeBudget=writeBudget.summary
+        if accepted{writeCredit=bytes}
+        return accepted
+    }
+    private func rejectedReservation(incident:Int,phase:Int,automatic:Bool)->Result {
+        guard let failure=reservationFailure else{lastResult = .limit;return .limit}
+        OperationalDiagnostics.shared.record(failure)
+        failureStage=4;failureErrno=Int32(clamping:failure.underlyingPOSIX);lastResult = .unavailable
+        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:4,began:DispatchTime.now().uptimeNanoseconds,persist:false)
+        invalidateReadiness();return .unavailable
+    }
+    private func saveReserved(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
         let began=DispatchTime.now().uptimeNanoseconds
         let previousStatusFailures=status.statusWriteFailures
         failureStage=0;failureErrno=0
@@ -2479,10 +2834,14 @@ final class DiagnosticLogStore {
     func encodingFailed(incident:Int,phase:Int,automatic:Bool){
         prepareOwnership()
         failureStage=6;failureErrno=0
-        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:5,began:DispatchTime.now().uptimeNanoseconds)
+        let persist = !limitsWrites || reserveWrite(metadataAllowance(),automatic:automatic,event:true)
+        reservationActive=limitsWrites && persist
+        defer{writeCredit=0;reservationActive=false}
+        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:5,began:DispatchTime.now().uptimeNanoseconds,persist:persist)
         invalidateReadiness()
     }
-    private func finishAttempt(incident:Int,phase:Int,automatic:Bool,result:Int,began:UInt64){
+    private func finishAttempt(incident:Int,phase:Int,automatic:Bool,result:Int,began:UInt64,persist:Bool=true){
+        status.writeBudget=writeBudget?.summary
         lastCaptureIncident=max(lastCaptureIncident,incident)
         status.attempts+=1
         switch result {
@@ -2499,6 +2858,7 @@ final class DiagnosticLogStore {
         status.lastWriteMicros=Int(min(elapsed/1000,60_000_000))
         status.maxWriteMicros=max(status.maxWriteMicros,status.lastWriteMicros)
         if elapsed>60_000_000_000{status.writeTimingClipped+=1}
+        guard persist else{return}
         let statusFailed = !writeStatus()
         if statusFailed{status.statusWriteFailures+=1}
         if persistentOwnership,ownershipHealthy {
@@ -2513,43 +2873,53 @@ final class DiagnosticLogStore {
         }
     }
     // One <=16KiB owner-only companion per store, excluded from the automatic
-    // capture budget. Atomically replaces only this instance's own status file.
+    // retention cap. Its bytes are included in the cumulative write budget.
+    // Atomically replaces only this instance's own status file.
     // A wholly unwritable disk cannot persist its failure: keep the last good
     // status and report the accumulated failure on the next successful write.
     private func writeStatus()->Bool {
         if requiresBoundedPriorPolicy {
-            guard boundedWriterLock>=0,boundedNamespaceAccepted else{return false}
+            guard boundedWriterLock>=0,boundedNamespaceAccepted else{return storageFault(.storageStatus)}
         }
         let previousStage=failureStage,previousErrno=failureErrno
         defer{failureStage=previousStage;failureErrno=previousErrno}
-        guard let data=try? JSONEncoder().encode(StatusDocument(status:status)),data.count<=16*1024,
-              let dir=openDirectory() else{return false}
+        let data:Data
+        do{data=try JSONEncoder().encode(StatusDocument(status:status))}catch{OperationalDiagnostics.shared.record(.capture(error,stage:.storageEncode));return false}
+        guard data.count<=16*1024 else{return storageFault(.storageStatus,policy:2)}
+        guard let dir=openDirectory() else{return false}
         defer{close(dir)}
-        if let old=statusFile {guard owned(old,dir) else{return false}}
+        if let old=statusFile {guard owned(old,dir) else{return storageFault(.storageStatus,policy:3)}}
         let temporary=".partial-"+UUID().uuidString
         let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{return false}
+        guard fd>=0 else{return storageFault(.storageStatus,errno)}
         defer{close(fd);unlinkat(dir,temporary,0)}
         guard writeAll(data,fd) else{return false}
         if let old=statusFile {
-            guard owned(old,dir),renameat(dir,temporary,dir,statusName)==0 else{return false}
+            guard owned(old,dir) else{return storageFault(.storageStatus,policy:3)}
+            guard renameat(dir,temporary,dir,statusName)==0 else{return storageFault(.storageStatus,errno)}
         } else {
-            guard linkat(dir,temporary,dir,statusName,0)==0,unlinkat(dir,temporary,0)==0 else{return false}
+            guard linkat(dir,temporary,dir,statusName,0)==0,unlinkat(dir,temporary,0)==0 else{return storageFault(.storageStatus,errno)}
         }
-        var info=stat();guard fstat(fd,&info)==0 else{return false}
+        var info=stat();guard fstat(fd,&info)==0 else{return storageFault(.storageStatus,errno)}
         statusFile=File(name:statusName,phase:0,identity:info,digest:Self.digest(data))
         return true
     }
     private func writeAll(_ data:Data,_ fd:Int32)->Bool {
-        data.withUnsafeBytes { bytes->Bool in
-            var offset=0
-            while offset<bytes.count {
-                let n=Darwin.write(fd,bytes.baseAddress!.advanced(by:offset),bytes.count-offset)
-                if n<0 && errno==EINTR{continue}
-                guard n>0 else{return false};offset+=n
-            }
-            return true
+        let standalone=limitsWrites && !reservationActive
+        defer{if standalone{writeCredit=0}}
+        if limitsWrites {
+            if standalone {guard reserveWrite(data.count,automatic:budgetAutomatic,event:false) else{return false}}
+            guard data.count<=writeCredit else{OperationalDiagnostics.shared.record(.policy(.storageWrite,1));return false}
+            writeCredit-=data.count
         }
+        if let failure=OperationalIO.writeAll(data,to:fd,stage:.storageWrite,write:{[self] fd,p,n in
+            let count=Darwin.write(fd,p,n);if count>0{actualWrittenBytes+=count};return count
+        }) {
+            OperationalDiagnostics.shared.record(failure)
+            failureErrno=Int32(failure.underlyingPOSIX);errno=failureErrno
+            return false
+        }
+        return true
     }
     private func openDirectory()->Int32? {
         if persistentOwnership {
@@ -2557,7 +2927,8 @@ final class DiagnosticLogStore {
             if lstat(parent,&p) != 0 {
                 guard errno==ENOENT,mkdir(parent,S_IRWXU)==0 else{_ = failed(2,errno);return nil}
             }
-            guard lstat(parent,&p)==0,p.st_mode&S_IFMT==S_IFDIR,p.st_uid==getuid(),p.st_mode&0o077==0 else{_ = failed(2);return nil}
+            guard lstat(parent,&p)==0 else{_ = failed(2,errno);return nil}
+            guard p.st_mode&S_IFMT==S_IFDIR,p.st_uid==getuid(),p.st_mode&0o077==0 else{_ = failed(2);return nil}
         }
         var info=stat()
         if lstat(directory.path,&info) != 0 {
@@ -2565,7 +2936,8 @@ final class DiagnosticLogStore {
         } else {guard (info.st_mode & S_IFMT)==S_IFDIR,info.st_uid==getuid(),(info.st_mode & 0o077)==0 else{_ = failed(2);return nil}}
         let dir=open(directory.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
         guard dir>=0 else{_ = failed(2,errno);return nil}
-        guard fstat(dir,&info)==0,info.st_uid==getuid(),(info.st_mode & 0o077)==0 else{_ = failed(2,errno);close(dir);return nil}
+        guard fstat(dir,&info)==0 else{_ = failed(2,errno);close(dir);return nil}
+        guard info.st_uid==getuid(),(info.st_mode & 0o077)==0 else{_ = failed(2);close(dir);return nil}
         if let previous=directoryIdentity {
             guard previous.st_dev==info.st_dev,previous.st_ino==info.st_ino else{_ = failed(2);close(dir);return nil}
         } else {directoryIdentity=info}
@@ -2689,12 +3061,13 @@ final class DiagnosticLogStore {
         defer{close(fd);unlinkat(dir,temporary,0)}
         guard writeAll(data,fd),linkat(dir,temporary,dir,filename,0)==0 else{return failed(4,errno)}
         var info=stat()
-        guard unlinkat(dir,temporary,0)==0,fstat(fd,&info)==0 else{unlinkat(dir,filename,0);return failed(4,errno)}
+        guard unlinkat(dir,temporary,0)==0,fstat(fd,&info)==0 else{let code=errno;unlinkat(dir,filename,0);return failed(4,code)}
         let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data),header:DiagnosticReviewCaptureHeader.read(data))
         for group in evictions {
             guard removeGroup(group,manual:!automatic,dir:dir) else{
+                let code=failureErrno
                 if owned(published,dir){unlinkat(dir,filename,0)}
-                return failed(5,errno)
+                return failed(5,code)
             }
         }
         if automatic {
@@ -2792,58 +3165,98 @@ final class PrivateProbeDirectory {
     }
     deinit{close(fd)}
     static func open(_ directory:URL,prefix:String)->PrivateProbeDirectory? {
+        switch checkedOpen(directory,prefix:prefix) {
+        case .success(let workspace):return workspace
+        case .failure(let error):OperationalDiagnostics.shared.record(error);return nil
+        }
+    }
+    static func checkedOpen(_ directory:URL,prefix:String)->Result<PrivateProbeDirectory,OperationalFailure> {
         guard ["hanq-permission-","hanq-storage-"].contains(prefix),
               directory.deletingLastPathComponent().path==root.path,
               directory.lastPathComponent.hasPrefix(prefix),
               directory.lastPathComponent.count>prefix.count,
-              directory.lastPathComponent.count<=128 else{return nil}
+              directory.lastPathComponent.count<=128 else{return .failure(.policy(.probeValidate,1))}
         // Foundation may abbreviate /private/tmp to /tmp even when no link is
         // traversed. Validate each real component with directory descriptors.
         let base=Darwin.open("/private",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
-        guard base>=0 else{return nil};defer{close(base)}
+        guard base>=0 else{return .failure(.posix(.probeOpen,errno))};defer{close(base)}
         let parent=openat(base,"tmp",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
-        guard parent>=0 else{return nil};defer{close(parent)}
+        guard parent>=0 else{return .failure(.posix(.probeOpen,errno))};defer{close(parent)}
         let fd=openat(parent,directory.lastPathComponent,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
-        guard fd>=0 else{return nil}
+        guard fd>=0 else{return .failure(.posix(.probeOpen,errno))}
         var info=stat()
-        guard fstat(fd,&info)==0,info.st_uid==getuid(),info.st_mode&S_IFMT==S_IFDIR,
-              info.st_mode&0o7777==0o700 else{close(fd);return nil}
+        guard fstat(fd,&info)==0 else{let error=OperationalFailure.posix(.probeValidate,errno);close(fd);return .failure(error)}
+        guard info.st_uid==getuid(),info.st_mode&S_IFMT==S_IFDIR,
+              info.st_mode&0o7777==0o700 else{close(fd);return .failure(.policy(.probeValidate,2))}
         let workspace=PrivateProbeDirectory(directory,fd,info)
-        return workspace.isCurrent ? workspace:nil
+        if let error=workspace.validationFailure{return .failure(error)}
+        return .success(workspace)
     }
-    private var isCurrent:Bool {
+    private var validationFailure:OperationalFailure? {
         var info=stat()
-        return lstat(directory.path,&info)==0 && info.st_dev==identity.st_dev && info.st_ino==identity.st_ino &&
-            info.st_uid==getuid() && info.st_mode&S_IFMT==S_IFDIR && info.st_mode&0o7777==0o700
+        guard lstat(directory.path,&info)==0 else{return .posix(.probeValidate,errno)}
+        guard info.st_dev==identity.st_dev,info.st_ino==identity.st_ino,
+            info.st_uid==getuid(),info.st_mode&S_IFMT==S_IFDIR,info.st_mode&0o7777==0o700 else{return .policy(.probeValidate,3)}
+        return nil
     }
-    func enter()->Bool{isCurrent && fchdir(fd)==0}
+    func enter()->Bool {
+        let failure=validationFailure ?? (fchdir(fd)==0 ? nil:.posix(.probeEnter,errno))
+        if let failure{OperationalDiagnostics.shared.record(failure);return false}
+        return true
+    }
     func publish(_ data:Data)->Bool {
-        guard data.count<=8192,isCurrent else{return false}
+        if let failure=publishFailure(data){OperationalDiagnostics.shared.record(failure);return false}
+        return true
+    }
+    func publishFailure(_ data:Data,write:OperationalIO.Write={Darwin.write($0,$1,$2)})->OperationalFailure? {
+        guard data.count<=8192 else{return .policy(.probeEncode,1)}
+        if let failure=validationFailure{return failure}
         let name=".result-"+UUID().uuidString
         let output=openat(fd,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard output>=0 else{return false}
+        guard output>=0 else{return .posix(.probeOpen,errno)}
         defer{close(output);unlinkat(fd,name,0)}
-        let written=data.withUnsafeBytes { bytes->Bool in
-            var offset=0
-            while offset<bytes.count {
-                let count=write(output,bytes.baseAddress!.advanced(by:offset),bytes.count-offset)
-                if count<0 && errno==EINTR{continue}
-                guard count>0 else{return false};offset+=count
-            }
-            return true
-        }
+        if let failure=OperationalIO.writeAll(data,to:output,stage:.probeWrite,write:write){return failure}
+        if let failure=validationFailure{return failure}
         // Publish a complete private file atomically; EEXIST includes symlinks.
-        return written && isCurrent && linkat(fd,name,fd,"result.json",0)==0
+        guard linkat(fd,name,fd,"result.json",0)==0 else{return .posix(.probePublish,errno)}
+        return nil
+    }
+    func readResult()->Result<Data?,OperationalFailure> {
+        if let failure=validationFailure{return .failure(failure)}
+        let input=openat(fd,"result.json",O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+        guard input>=0 else {
+            let code=errno
+            return code==ENOENT ? .success(nil):.failure(.posix(.probeRead,code))
+        }
+        defer{close(input)}
+        var info=stat()
+        guard fstat(input,&info)==0 else{return .failure(.posix(.probeRead,errno))}
+        guard info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,
+              info.st_size>0,info.st_size<=8192 else{return .failure(.policy(.probeRead,2))}
+        var data=Data(count:Int(info.st_size)),offset=0
+        let failure:OperationalFailure?=data.withUnsafeMutableBytes {bytes in
+            while offset<bytes.count {
+                let count=Darwin.read(input,bytes.baseAddress!.advanced(by:offset),bytes.count-offset)
+                if count<0 {let code=errno;if code==EINTR{continue};return .posix(.probeRead,code)}
+                guard count>0 else{return .policy(.probeRead,3)}
+                offset+=count
+            }
+            return nil
+        }
+        if let failure{return .failure(failure)}
+        return .success(data)
     }
 }
 
 struct DiagnosticStorageHealth {
     let readiness:DiagnosticStorageReadiness
     let missingWrites:Int
+    var suppressedWrites:Int=0
     var menuMessage:String? {
         if readiness.reason=="not_checked"{return nil}
         if !readiness.ready{return "진단 저장 확인 실패 — 새 기록이 저장되지 않을 수 있습니다"}
         if missingWrites>0{return "진단 저장 오류 \(missingWrites)회 — 기록을 확인하세요"}
+        if suppressedWrites>0{return "진단 쓰기 한도로 일부 기록 생략 — 기존 기록은 유지됩니다"}
         return nil
     }
 }

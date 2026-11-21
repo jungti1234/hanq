@@ -21,7 +21,8 @@ defer { try? fm.removeItem(at: root) }
 let directory = root.appendingPathComponent("source")
 let clock = TestClock()
 let policy = DiagnosticLogRetentionPolicy(maximumAutomaticFiles: 4, maximumAutomaticBytes: 1_000_000, maximumManualBytes: 1_000_000)
-let trace = InputIncidentTrace(secureInput:{false},destination: directory, persistentOwnership: true, clock: clock.now, retention: policy)
+var traceOwner:InputIncidentTrace? = InputIncidentTrace(secureInput:{false},destination: directory, persistentOwnership: true, clock: clock.now, retention: policy)
+var trace:InputIncidentTrace {traceOwner!}
 func manifest(_ directory: URL) throws -> [String: Data] {
     Dictionary(uniqueKeysWithValues: try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).map {
         ($0.lastPathComponent, Data(SHA256.hash(data: try Data(contentsOf: $0))))
@@ -60,8 +61,8 @@ trace.recordFailure(action:3,site:"safariActivationRetry",reason:"source_switch_
 trace.mark(); trace.flush()
 let pending = try manifest(directory)
 let pendingFiles = pending.keys.filter { $0.hasPrefix("incident-") }.count
-check((1...2).contains(pendingFiles) && pending.keys.contains { $0.hasPrefix("incident-1-0-") }, "real pre-capture exists before export (observed \(pendingFiles), total \(pending.count))")
-print("INFO: review integration starts with \(pendingFiles) capture files (one means post is pending)")
+check(pendingFiles==0 || pendingFiles==2, "normal capture publishes no pre-only pair before reservation (observed \(pendingFiles), total \(pending.count))")
+print("INFO: review integration starts with \(pendingFiles) capture files (zero means the pair is pending)")
 DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { trace.finishCaptureWindowsForTest() }
 let firstURL = root.appendingPathComponent("first")
 try snapshot(trace, to: firstURL)
@@ -178,6 +179,9 @@ check(!trace.enabled && afterOffReview == beforeOffReview, "collection-OFF revie
 let legacy = root.appendingPathComponent("legacy-export")
 try snapshot(trace, to: legacy, review: false)
 check(!fm.fileExists(atPath: legacy.appendingPathComponent("review-dates.json").path), "legacy full export keeps its original file set")
+// A stopped object still owns its writer lock. Model process exit by releasing
+// it and allowing its already scheduled one-second close callback to finish.
+traceOwner=nil;Thread.sleep(forTimeInterval:1.1)
 let restarted = InputIncidentTrace(destination: directory, persistentOwnership: true, clock: clock.now, retention: policy)
 restarted.flush(); complete(restarted)
 let afterRestart = root.appendingPathComponent("restarted")

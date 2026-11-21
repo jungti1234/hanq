@@ -48,10 +48,14 @@ import re
 STORAGE_FIELDS=set(['maximumAutomaticFiles', 'maximumAutomaticBytes', 'automaticFiles', 'automaticBytes', 'attempts', 'saved', 'limited', 'retired', 'unavailable', 'encodingFailures', 'evictedGroups', 'evictedFiles', 'evictedBytes', 'lastIncident', 'lastPhase', 'lastAutomatic', 'lastResult', 'lastFailureStage', 'lastErrno', 'lastWriteMicros', 'maxWriteMicros', 'writeTimingClipped', 'statusWriteFailures'])
 
 OPTIONAL_STORAGE_FIELDS={"maximumManualBytes","manualFiles","manualBytes"}
+BUDGET_FIELDS={'automaticHourLimit','automaticDayLimit','manualHourLimit','manualDayLimit','automaticHour','automaticDay','manualHour','manualDay','eventsHour','eventsDay','suppressedAutomatic','suppressedManual','persistenceFailures'}
 
 def storage_status(value):
-    if not isinstance(value,dict) or set(value) not in (STORAGE_FIELDS,STORAGE_FIELDS|OPTIONAL_STORAGE_FIELDS) or type(value['lastAutomatic']) is not bool or any(type(n) is not int or n<0 for k,n in value.items() if k!='lastAutomatic'):
+    if not isinstance(value,dict) or set(value)-{'writeBudget'} not in (STORAGE_FIELDS,STORAGE_FIELDS|OPTIONAL_STORAGE_FIELDS) or type(value['lastAutomatic']) is not bool or any(type(n) is not int or n<0 for k,n in value.items() if k not in ('lastAutomatic','writeBudget')):
         raise ValueError('invalid storage status')
+    if 'writeBudget' in value:
+        b=value['writeBudget']
+        if not isinstance(b,dict) or set(b)!=BUDGET_FIELDS or any(type(n) is not int or n<0 for n in b.values()) or any(b[k]>b[k+'Limit'] for k in ('automaticHour','automaticDay','manualHour','manualDay')):raise ValueError('invalid write budget')
     v=value
     if v['maximumAutomaticFiles']<=0 or v['maximumAutomaticBytes']<=0 or v['automaticFiles']>v['maximumAutomaticFiles'] or v['automaticBytes']>v['maximumAutomaticBytes']:
         raise ValueError('invalid storage policy/usage')
@@ -367,7 +371,8 @@ def capture_preservation(value):
 def capture_backlog(value):
     groups=['requested','merged','deferred','requestOverflow','windowOverflow','postOverflow','discardedOnDisable']
     keys={'automaticCapacity','manualCapacity','requestCapacityPerTrigger','requestsPerWindow','pendingAutomatic','pendingManual','submittedWindows','completedWindows'}|set(groups)
-    if not isinstance(value,dict) or set(value)!=keys:raise ValueError('invalid capture backlog')
+    if not isinstance(value,dict) or set(value)-{'rateSuppressed'}!=keys:raise ValueError('invalid capture backlog')
+    if 'rateSuppressed' in value:groups.append('rateSuppressed')
     if any(type(value[k]) is not int or value[k]<0 for k in keys-set(groups)) or (value['automaticCapacity'],value['manualCapacity'],value['requestCapacityPerTrigger'],value['requestsPerWindow'])!=(16,4,16,32) or value['pendingAutomatic']>16 or value['pendingManual']>4 or value['completedWindows']>value['submittedWindows']:raise ValueError('invalid capture backlog bounds')
     for key in groups:
         d=value[key]

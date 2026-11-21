@@ -47,7 +47,7 @@ extension MismatchRecoveryEngine {
         for event in [down,up] {
             event.flags=shift ? .maskShift:[]
             event.setIntegerValueField(.eventSourceUserData,value:marker)
-            post(event,at:.cghidEventTap)
+            guard post(event,at:.cghidEventTap) else{park("input_unavailable");return}
         }
         later(Self.pacedReplayInterval){[weak self] in
             self?.replayPacedCandidate(candidate,index:index+1,eventSource:source)

@@ -495,11 +495,18 @@ final class DiagnosticReviewSnapshot {
             } ?? "용량 미확인"
             return count + " · " + bytes
         }
-        let issues = [("limited", "한도로 저장 생략"), ("retired", "기한 경과로 저장 생략"),
+        var issues = [("limited", "한도로 저장 생략"), ("retired", "기한 경과로 저장 생략"),
                       ("unavailable", "저장 불가"), ("encodingFailures", "진단 파일 생성 실패"),
                       ("statusWriteFailures", "저장 상태 기록 실패")].compactMap { key, label -> DiagnosticReviewField? in
             guard let count = integer(status[key]) else { return .init(label: label, value: "미확인") }
             return count > 0 ? .init(label: label, value: "\(count)회") : nil
+        }
+        if let budget=status["writeBudget"] as? [String:Any] {
+            for (key,label) in [("suppressedAutomatic","누적 쓰기 한도로 자동 기록 생략"),
+                                ("suppressedManual","누적 쓰기 한도로 수동 기록 생략"),
+                                ("persistenceFailures","쓰기 예산 저장 실패")] {
+                if let count=integer(budget[key]),count>0{issues.append(.init(label:label,value:"\(count)회"))}
+            }
         }
         return DiagnosticReviewDocument("저장 상태", [
             .init(title: "보관 중인 파일", fields: [

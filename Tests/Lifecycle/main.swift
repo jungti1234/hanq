@@ -28,6 +28,57 @@ let result = owner.filter.process(type: .keyDown, key: 0, flags: flags, acceptNe
 precondition(!result.consume && result.flags == flags)
 print("PASS: production teardown releases port/source, clears held keys, passes input, and is idempotent")
 
+// An operational probe failure leaves the real AppDelegate/menu alive, blocks
+// cached-AX/manual/idle paths, and retains original event identities without replay.
+do {
+    _ = NSApplication.shared
+    let app=AppDelegate(),pid=getpid()
+    app.statusIcon.start(menu:NSMenu());app.permissionGranted=true
+    app.enabled=true;app.koreanEnabled=true;app.pendingActivation=false
+    let key=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:true)!
+    app.mismatchRecovery.engine.pending=[key]
+    var posts=0
+    app.mismatchRecovery.engine.testPost={_ in posts+=1}
+    let old=app.freshPermissionGate.block()
+    app.pauseForPermissionProbe(.posix(.probeDirectory,ENOSPC),generation:old)
+    precondition(getpid()==pid && !app.inputPermissionReady && app.permissionGranted)
+    precondition(!app.enabled && app.tap==nil && app.pendingActivation)
+    precondition(app.menuStatus.title.contains("자동 재확인") && !app.toggleItem.isEnabled)
+    precondition(app.mismatchRecovery.engine.retained.contains{$0 === key})
+    app.startMapping();app.toggleKorean();app.toggleHanja()
+    precondition(!app.enabled && !app.scheduleTimeoutRestart(now:1000))
+    app.mismatchRecovery.engine.post(key)
+    precondition(posts==0 && app.mismatchRecovery.engine.event(.keyDown,key)?.takeUnretainedValue() === key)
+    let next=app.freshPermissionGate.block()
+    var activations=0
+    app.resumeFromPermissionProbe(generation:old,activate:{activations+=1})
+    precondition(activations==0 && !app.inputPermissionReady)
+    app.pauseForPermissionProbe(.posix(.probeTimeout,ETIMEDOUT),generation:next)
+    app.resumeFromPermissionProbe(generation:next,activate:{activations+=1})
+    app.resumeFromPermissionProbe(generation:next,activate:{activations+=1})
+    precondition(activations==1 && app.inputPermissionReady && app.permissionProbeFailure==nil)
+    precondition(app.mismatchRecovery.engine.retained.contains{$0 === key} && posts==0)
+    let onset=OnsetRecoveryEngine();onset.inputAllowed={false};onset.testPost={_ in posts+=1}
+    onset.pending=[key];onset.enabled=true
+    precondition(!onset.post(key) && onset.event(.keyDown,key)?.takeUnretainedValue() === key)
+    onset.emergencyStop("hanq_input_stopped")
+    precondition(onset.pending.contains{$0 === key} && posts==0)
+    let replacement=OnsetRecoveryEngine();replacement.inheritClosedInput(from:onset)
+    precondition(replacement.retainedInput.contains{$0 === key} && onset.pending.isEmpty && posts==0)
+    app.stopMapping();app.statusIcon.stop()
+    var available=true,edges:[CGEventType]=[]
+    let mismatch=MismatchRecoveryEngine();mismatch.inputAllowed={available};mismatch.testPost={edges.append($0.type)}
+    precondition(mismatch.post(key));available=false
+    precondition(!mismatch.post(key));mismatch.releasePostedKeys();mismatch.releasePostedKeys()
+    precondition(edges == [.keyDown,.keyUp],"only an already-posted down gets one release")
+    available=true;edges=[]
+    let closing=OnsetRecoveryEngine();closing.inputAllowed={available};closing.testPost={edges.append($0.type)}
+    precondition(closing.post(key));available=false
+    precondition(!closing.post(key));closing.releasePostedKeys();closing.releasePostedKeys()
+    precondition(edges == [.keyDown,.keyUp])
+    print("PASS: production permission pause keeps PID/menu, blocks stale/cached/manual/idle paths, preserves pending event identity and sends no keys")
+}
+
 // A timeout uses the same teardown as a manual stop, then a fresh registration.
 do {
     let app=AppDelegate()
@@ -208,6 +259,7 @@ print("PASS: Sparkle optional delegate callbacks use the expected Objective-C se
 
 // Product repair paths must never edit the same field concurrently.
 let combined=AppDelegate()
+combined.permissionGranted=true
 combined.koreanEnabled=false
 precondition(!combined.mismatchRecovery.engine.canToggleRightCommand())
 combined.koreanEnabled=true
@@ -228,6 +280,8 @@ print("PASS: product onset/mismatch exclusion and right Command preference")
 // The primary mapping must still queue a user boundary instead of switching
 // relative to recovery's temporary ABC input source.
 let transition=AppDelegate()
+transition.permissionGranted=true
+transition.sourceSwitchBarrier.read={nil};transition.sourceSwitchBarrier.readFocus={nil}
 let recovery=transition.mismatchRecovery.engine
 recovery.recovering=true;recovery.recoverySourceID=mismatchKoreanID
 recovery.intendedSource=mismatchKoreanID
@@ -246,10 +300,12 @@ print("PASS: primary source switch honors recovery intent, queues each boundary 
 // A queued switch has not changed the editor's source. Its preceding Korean
 // candidate must remain available while the barrier waits for that repair.
 let waiting=AppDelegate(), waitingField=AXUIElementCreateApplication(12345)
+waiting.permissionGranted=true
 let detector=waiting.mismatchRecovery.engine
 var waitingText="",waitingRange=NSRange(location:0,length:0),waitingSource=mismatchKoreanID
 let boundary=waiting.sourceSwitchBarrier
 boundary.read={.init(field:waitingField,text:waitingText,selection:waitingRange)}
+boundary.readFocus={waitingField}
 boundary.source={waitingSource};boundary.ready={true}
 boundary.select={waitingSource=$0;return noErr}
 func observedKey(_ code:CGKeyCode)->CGEvent {
@@ -276,6 +332,7 @@ print("PASS: queued user switch preserves preceding Korean candidate and advance
 // prediction once. A subsequent physical vowel/final continues its composition.
 do {
  let app=AppDelegate(), field=AXUIElementCreateApplication(23456)
+ app.permissionGranted=true
  let b=app.sourceSwitchBarrier, c=app.onsetRecovery
  var text="abc ㄱ",range=NSRange(location:5,length:0),source=mismatchKoreanID,ready=false,selectionWrites=0
  b.read={.init(field:field,text:text,selection:range)};b.readFocus={field};b.source={source};b.ready={ready}
@@ -395,6 +452,7 @@ print("PASS: failed boundaries settle observed Command/Option releases in both s
 // deferred re-press into a new action while cleaning up an aborted queue.
 for repress in [false,true] {
  let app=AppDelegate(),b=app.sourceSwitchBarrier,field=AXUIElementCreateApplication(45678)
+ app.permissionGranted=true
  let held=CGEventFlags(rawValue:CGEventFlags.maskCommand.rawValue|0x10)
  b.read={.init(field:field,text:"abc",selection:NSRange(location:3,length:0))};b.readFocus={field};b.source={mismatchKoreanID}
  _=app.filter.process(type:.flagsChanged,key:54,flags:held,acceptNewPress:true)
@@ -431,6 +489,7 @@ do {
  }
  for code:CGKeyCode in [61,62] {
   let app=AppDelegate();app.externalKeyboards=controller
+  app.permissionGranted=true
   let b=app.sourceSwitchBarrier,field=AXUIElementCreateApplication(56789)
   let held=CGEventFlags(rawValue:code==61 ? CGEventFlags.maskAlternate.rawValue|0x40:CGEventFlags.maskControl.rawValue|0x2000)
   let down=physical(code,held)

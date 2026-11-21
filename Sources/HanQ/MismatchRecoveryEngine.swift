@@ -186,7 +186,7 @@ final class MismatchRecoveryEngine:NSObject {
             guard let self else{return}
             let start=ProcessInfo.processInfo.systemUptime
             if self.traceLatency{self.log("callback_started",["id":id,"line":line,"scheduledUptime":scheduled,"dueUptime":scheduled+delay,"startUptime":start,"lateMs":max(0,(start-scheduled-delay)*1000),"cancelled":self.recoveryEpoch != epoch])}
-            guard self.recoveryEpoch==epoch else{return}
+            guard self.recoveryEpoch==epoch,self.inputAllowed() else{return}
             if self.sourceWorkPaused{self.deferRecovery(action);return}
             action()
             if self.traceLatency{self.log("callback_finished",["id":id,"line":line,"durationMs":(ProcessInfo.processInfo.systemUptime-start)*1000])}
@@ -327,12 +327,24 @@ final class MismatchRecoveryEngine:NSObject {
         guard now-(snapshotWaitStarted ?? now)<0.75,now<recoveryDeadline else{park(stage+"_snapshot_timeout",site:stage);return nil}
         later(0.01,retry);return nil
     }
-    func post(_ event:CGEvent,at tap:CGEventTapLocation = .cgSessionEventTap) {
-        guard !detectionOnly else{return}
+    private var postedReleases:[Int64:(CGEvent,CGEventTapLocation)]=[:]
+    func releasePostedKeys() {
+        for release in Array(postedReleases.values){_ = post(release.0,at:release.1)}
+    }
+    @discardableResult func post(_ event:CGEvent,at tap:CGEventTapLocation = .cgSessionEventTap)->Bool {
+        let code=event.getIntegerValueField(.keyboardEventKeycode)
+        let finishing=event.type == .keyUp && postedReleases[code] != nil
+        guard (inputAllowed() || finishing),!detectionOnly else{return false}
         // Keep queued keys on the successful final retry's route so vowels and
         // final consonants can continue its live IME composition.
         let route=tap == .cgSessionEventTap && recovering && !rollingBack && replayStarted && koreanRetries==2
             ? CGEventTapLocation.cghidEventTap:tap
+        if event.type == .keyDown {
+            guard postedReleases.count<128 || postedReleases[code] != nil,
+                  let release=CGEvent(keyboardEventSource:nil,virtualKey:CGKeyCode(code),keyDown:false) else{return false}
+            release.flags=event.flags;release.setIntegerValueField(.eventSourceUserData,value:event.getIntegerValueField(.eventSourceUserData))
+            postedReleases[code]=(release,route)
+        }
         log("key_post_requested",["eventType":event.type.rawValue])
         if recovering,!rollingBack {
             let code=event.getIntegerValueField(.keyboardEventKeycode)
@@ -342,6 +354,8 @@ final class MismatchRecoveryEngine:NSObject {
         if let testPostAtTap {testPostAtTap(event,route)}
         else if let testPost {testPost(event)}
         else {event.post(tap:route)}
+        if event.type == .keyUp{postedReleases.removeValue(forKey:code)}
+        return true
     }
     private let incidentFocusProbe=InputIncidentFocusProbe()
     let focusAccess=InputFocusAccess()
@@ -471,8 +485,13 @@ final class MismatchRecoveryEngine:NSObject {
     var didStart:()->Void = {}
     var didProcessEvent:(CGEventType,CGEvent,Bool)->Void = {_,_,_ in}
     func event(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
+        guard inputAllowed() else {
+            if type == .keyUp{postedReleases.removeValue(forKey:event.getIntegerValueField(.keyboardEventKeycode))}
+            return Unmanaged.passUnretained(event)
+        }
         let token=event.getIntegerValueField(.eventSourceUserData),tracked=origin(type,event) != nil
         let result=processEvent(type,event)
+        if type == .keyUp,result != nil{postedReleases.removeValue(forKey:event.getIntegerValueField(.keyboardEventKeycode))}
         didProcessEvent(type,event,result != nil)
         // Consume source intent once, but keep the original-input identity for
         // a downstream onset receipt. Quartz may retimestamp between taps.
@@ -690,6 +709,7 @@ final class MismatchRecoveryEngine:NSObject {
         return Unmanaged.passUnretained(event)
     }
     func sample(synchronous:Bool=false,beforeKey:Bool=false,followingEvent:CGEvent?=nil){
+        guard inputAllowed() else{return}
         if recovering {
             observeRecoverySource(currentSource())
             if sourceMenuPaused {
@@ -944,7 +964,7 @@ final class MismatchRecoveryEngine:NSObject {
         // Verify the actual Korean result before releasing subsequent keys.
         guard events.count==candidate.codes.count*2 else{park("replay_allocation_failed");return}
         replayIssuedAt=ProcessInfo.processInfo.systemUptime
-        for event in events{guard let prepared=prepareEvent(event) else{park("replay_allocation_failed");return};post(prepared)}
+        for event in events{guard let prepared=prepareEvent(event) else{park("replay_allocation_failed");return};guard post(prepared) else{park("input_unavailable");return}}
         awaitKorean(candidate,remaining:25)
     }
     func awaitKorean(_ candidate:MismatchRecoveryPlan,remaining:Int){
@@ -1137,7 +1157,10 @@ final class MismatchRecoveryEngine:NSObject {
         if rollback,group.contains(where:{$0.type == .keyDown}){rollbackFirstEditDelivered=true}
         let buffered=group;pending.removeFirst(count)
         for (index,event) in prepared.enumerated(){
-            post(event)
+            guard post(event) else {
+                pending.insert(contentsOf:buffered.dropFirst(index),at:0)
+                park("input_unavailable");return
+            }
             let saved=buffered[index];postedBuffered+=1
             log("buffer_event_posted",["inputSource":pendingSources[bufferedID(saved)] ?? recoverySourceID,"deliverySource":nextSource,"id":bufferedID(saved),"originTimestamp":String(saved.timestamp),"postedTimestamp":String(event.timestamp),"code":saved.getIntegerValueField(.keyboardEventKeycode),"eventType":saved.type.rawValue,"rollback":rollback])
         }
@@ -1234,7 +1257,10 @@ final class MismatchRecoveryEngine:NSObject {
         let events=Array(pending.prefix(count)),prepared=events.compactMap{prepareEvent($0)}
         guard prepared.count==count else{park("event_allocation_failed");return true}
         pending.removeFirst(count)
-        for event in prepared{post(event);postedBuffered+=1}
+        for (index,event) in prepared.enumerated(){
+            guard post(event) else{pending.insert(contentsOf:events.dropFirst(index),at:0);park("input_unavailable");return true}
+            postedBuffered+=1
+        }
         replayCount+=count
         log("replay_holds_released")
         return true
@@ -1358,6 +1384,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         closeSession()
     }
+    var inputAllowed:()->Bool = { true }
     var canObserve:()->Bool = { true }
     var canToggleRightCommand:()->Bool = { true }
     var canBeginRepair:()->Bool = { true }

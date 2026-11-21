@@ -4,6 +4,7 @@ import Carbon
 /// Starts only alongside HanQ's input lifecycle, and follows keyboard focus without an app allowlist.
 final class OnsetRecoveryController: NSObject {
     var canRun: () -> Bool = { false }
+    var inputAllowed:()->Bool = { true }
     var canBeginRepair: () -> Bool = { true }
     var unfocusedKeyCheck:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->InputIncidentTrace.SwitchKeyCheck = {_,_ in .noSwitch}
     var willBeginRepair: () -> Void = {}
@@ -27,6 +28,7 @@ final class OnsetRecoveryController: NSObject {
         let old=engine
         old?.closeSession()
         let next=OnsetRecoveryEngine()
+        next.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
         if let old { next.inheritClosedInput(from: old) }
         next.canBeginRepair = { [weak self] in self?.canBeginRepair() ?? false }
         next.unfocusedKeyCheck = { [weak self] in self?.unfocusedKeyCheck($0,$1) ?? .noSwitch }

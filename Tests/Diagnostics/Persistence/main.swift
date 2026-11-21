@@ -158,16 +158,18 @@ let newSpan=trace.beginRead(.mismatchAX);trace.endRead(.mismatchAX,newSpan);trac
 check(newSpan != nil,"old span returns its reservation after OFF")
 toggle(trace,false)
 let offDir=root.appendingPathComponent("disabled")
-let off=InputIncidentTrace(secureInput:{false},destination:offDir,initiallyEnabled:false,persistentOwnership:true)
-off.mark();off.flush()
+var off:InputIncidentTrace?=InputIncidentTrace(secureInput:{false},destination:offDir,initiallyEnabled:false,persistentOwnership:true)
+off!.mark();off!.flush()
 check(!fm.fileExists(atPath:offDir.path),"disabled startup does not create storage")
-toggle(off,true);off.mark();off.flush()
+toggle(off!,true);off!.mark();off!.flush();off!.finishCaptureWindowsForTest();off!.flush()
 let savedFiles=files(offDir),savedData=try savedFiles.map{try Data(contentsOf:$0)}
-toggle(off,false)
+toggle(off!,false)
 check(try savedFiles.map{try Data(contentsOf:$0)}==savedData,"OFF preserves existing disk evidence")
 let previousRun=(try JSONSerialization.jsonObject(with:Data(contentsOf:savedFiles[0])) as! [String:Any])["runID"] as! String
+off!.stopAndFlush();off=nil
+Thread.sleep(forTimeInterval:1.1) // let the old capture close callback release the old writer
 let resumed=InputIncidentTrace(secureInput:{false},destination:offDir,persistentOwnership:true)
-resumed.mark();resumed.flush()
+resumed.mark();resumed.flush();resumed.finishCaptureWindowsForTest();resumed.flush()
 check(files(offDir).contains{$0.lastPathComponent.hasPrefix("incident-2-0-")},"new trace instance advances persistent capture identity")
 let newFile=files(offDir).first{$0.lastPathComponent.hasPrefix("incident-2-0-")}!
 let newRun=(try JSONSerialization.jsonObject(with:Data(contentsOf:newFile)) as! [String:Any])["runID"] as! String

@@ -353,13 +353,23 @@ struct RecorderStorageStatus:Codable {
     let maximumAutomaticFiles,maximumAutomaticBytes,automaticFiles,automaticBytes,attempts,saved,limited,retired,unavailable,encodingFailures,evictedGroups,evictedFiles,evictedBytes,lastIncident,lastPhase,lastResult,lastFailureStage,lastErrno,lastWriteMicros,maxWriteMicros,writeTimingClipped,statusWriteFailures:Int
     let lastAutomatic:Bool
     let maximumManualBytes:Int?,manualFiles:Int?,manualBytes:Int?
+    let writeBudget:[String:Int]?
+    static let budgetKeys:Set<String>=["automaticHourLimit","automaticDayLimit","manualHourLimit","manualDayLimit","automaticHour","automaticDay","manualHour","manualDay","eventsHour","eventsDay","suppressedAutomatic","suppressedManual","persistenceFailures"]
     static let optionalKeys=Set(["maximumManualBytes","manualFiles","manualBytes"])
     static func accepts(_ object:[String:Any])->Bool {
-        let names=Set(object.keys)
+        let names=Set(object.keys).subtracting(["writeBudget"])
+        if let budget=object["writeBudget"] {
+            guard let value=budget as? [String:Any],Set(value.keys)==budgetKeys,
+                  value.values.allSatisfy({($0 as? NSNumber).map{CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue>=0 && $0.doubleValue==Double($0.int64Value)} ?? false}) else{return false}
+        }
         return names==keys || (names==keys.union(optionalKeys) && optionalKeys.allSatisfy{!(object[$0] is NSNull)})
     }
     static let keys=Set(["maximumAutomaticFiles", "maximumAutomaticBytes", "automaticFiles", "automaticBytes", "attempts", "saved", "limited", "retired", "unavailable", "encodingFailures", "evictedGroups", "evictedFiles", "evictedBytes", "lastIncident", "lastPhase", "lastAutomatic", "lastResult", "lastFailureStage", "lastErrno", "lastWriteMicros", "maxWriteMicros", "writeTimingClipped", "statusWriteFailures"])
     var valid:Bool {
+        if let value=writeBudget {
+            guard Set(value.keys)==Self.budgetKeys,value.values.allSatisfy({$0>=0}) else{return false}
+            for key in ["automaticHour","automaticDay","manualHour","manualDay"] {guard value[key]!<=value[key+"Limit"]! else{return false}}
+        }
         if maximumManualBytes != nil || manualFiles != nil || manualBytes != nil {
             guard let limit=maximumManualBytes,let files=manualFiles,let bytes=manualBytes,limit>0,files>=0,bytes>=0,bytes<=limit else{return false}
         }
@@ -409,9 +419,10 @@ struct RecorderCaptureBacklog:Codable {
     let pendingAutomatic:Int;let pendingManual:Int
     let requested:[String:Int];let merged:[String:Int];let deferred:[String:Int];let requestOverflow:[String:Int];let windowOverflow:[String:Int]
     let postOverflow:[String:Int];let discardedOnDisable:[String:Int];let submittedWindows:Int;let completedWindows:Int
+    let rateSuppressed:[String:Int]?
     static let keys:Set<String>=["automaticCapacity","manualCapacity","requestCapacityPerTrigger","requestsPerWindow","pendingAutomatic","pendingManual","requested","merged","deferred","requestOverflow","windowOverflow","postOverflow","discardedOnDisable","submittedWindows","completedWindows"]
     var valid:Bool{
-        automaticCapacity==16 && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...16).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable].allSatisfy{d in d.count<=8 && d.allSatisfy{e in Int(e.key).map{(1...8).contains($0) && String($0)==e.key} == true && e.value>0}}
+        automaticCapacity==16 && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...16).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable,rateSuppressed ?? [:]].allSatisfy{d in d.count<=8 && d.allSatisfy{e in Int(e.key).map{(1...8).contains($0) && String($0)==e.key} == true && e.value>0}}
     }
 }
 struct RecorderMonitorSample:Codable {
@@ -550,7 +561,8 @@ struct RecorderTrace: Codable {
             guard let v=value as? [String:Any],Set(v.keys).subtracting(["closedMilliseconds"])==Set(["deferred","requests","postCapacity","postOmittedFrames","closed","endedOnShutdown"]),let requests=v["requests"] as? [[String:Any]],requests.allSatisfy({Set($0.keys)==Set(["trigger","milliseconds","afterSequence","lane","detail","event","inputOrigin"])}) else{throw RecorderError.invalidTrace}
         }
         if let value=object["captureBacklog"] {
-            guard let v=value as? [String:Any],Set(v.keys)==RecorderCaptureBacklog.keys else{throw RecorderError.invalidTrace}
+            guard let v=value as? [String:Any],Set(v.keys).subtracting(["rateSuppressed"])==RecorderCaptureBacklog.keys,
+                  v["rateSuppressed"] == nil || v["rateSuppressed"] is [String:Any] else{throw RecorderError.invalidTrace}
         }
         if object.keys.contains("runID") {
             guard let id=object["runID"] as? String,id.count==36,UUID(uuidString:id) != nil else{throw RecorderError.invalidTrace}

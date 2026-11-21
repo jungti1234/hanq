@@ -20,6 +20,7 @@ final class OnsetRecoveryEngine:NSObject {
         diagnosticHistory.emit={ [weak self] value,capture in self?.decisionTrace.onsetObservation(value,capture:capture) }
     }
     let marker:Int64=0x48414E5100000000 | Int64(UInt32.random(in:1...UInt32.max))
+    var inputAllowed:()->Bool = { true }
     var canBeginRepair: () -> Bool = { true }
     var unfocusedKeyCheck:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->InputIncidentTrace.SwitchKeyCheck = {_,_ in .noSwitch}
     var willBeginRepair: () -> Void = {}
@@ -139,7 +140,7 @@ final class OnsetRecoveryEngine:NSObject {
     func scheduleRecovery(_ delay:Double=0,_ action:@escaping ()->Void){
         let epoch=recoveryEpoch
         DispatchQueue.main.asyncAfter(deadline:.now()+delay){[weak self] in
-            guard let self,self.recoveryEpoch==epoch else{return};action()
+            guard let self,self.recoveryEpoch==epoch,self.inputAllowed() else{return};action()
         }
     }
     func pauseForContext(_ reason:String){
@@ -620,11 +621,25 @@ final class OnsetRecoveryEngine:NSObject {
     var testSource:(()->String)?
     var testPost:((CGEvent)->Void)?
     func currentSource()->String { testSource?() ?? InputSourceAccess.currentID() }
+    private var postedReleases:[Int64:CGEvent]=[:]
+    func releasePostedKeys(){for release in Array(postedReleases.values){_ = post(release)}}
     @discardableResult func post(_ event:CGEvent)->Bool {
-        if gate?.healthy()==false{return false}
-        if testPost == nil && (!AXIsProcessTrusted() || IsSecureEventInputEnabled()){return false}
+        let code=event.getIntegerValueField(.keyboardEventKeycode)
+        let finishing=event.type == .keyUp && postedReleases[code] != nil
+        guard inputAllowed() || finishing else{return false}
+        if !finishing {
+            if gate?.healthy()==false{return false}
+            if testPost == nil && (!AXIsProcessTrusted() || IsSecureEventInputEnabled()){return false}
+        }
         if event.getIntegerValueField(.keyboardEventKeycode)==51 && !OnsetDeletionKey.hasDeletePayload(event){emergencyStop("unsafe_delete_payload_blocked");return false}
+        if event.type == .keyDown {
+            guard postedReleases.count<128 || postedReleases[code] != nil,
+                  let release=(code==51 ? OnsetDeletionKey.make(down:false,marker:marker):CGEvent(keyboardEventSource:nil,virtualKey:CGKeyCode(code),keyDown:false)) else{return false}
+            release.flags=event.flags;release.setIntegerValueField(.eventSourceUserData,value:event.getIntegerValueField(.eventSourceUserData))
+            postedReleases[code]=release
+        }
         if let testPost { testPost(event) } else { recordPostedEvent();event.post(tap:.cghidEventTap) }
+        if event.type == .keyUp{postedReleases.removeValue(forKey:code)}
         if replayStarted,!rollingBack,currentPlan?.supportsReplay == true {didPostReplayEvent(event)}
         return true }
     var lastAXFailure=""
@@ -732,6 +747,7 @@ final class OnsetRecoveryEngine:NSObject {
         InputDiagnostics.shared.record("onset.reentry_engine decisionMonoNs=\(DispatchTime.now().uptimeNanoseconds) \(state)")
     }
     func automaticTick(){
+        guard inputAllowed() else{return}
         defer{flushReentryTrace();flushFocusHandoffDiagnostics();observeSceneProbe()}
         guard enabled else{return}
         guard AXIsProcessTrusted() else{emergencyStop("permission_revoked");return}
@@ -909,6 +925,8 @@ final class OnsetRecoveryEngine:NSObject {
 
     }
     func event(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>?{
+        if type == .keyUp{postedReleases.removeValue(forKey:event.getIntegerValueField(.keyboardEventKeycode))}
+        guard inputAllowed() else{return Unmanaged.passUnretained(event)}
         if OnsetInputGate.isRecoveryMarker(event.getIntegerValueField(.eventSourceUserData)) || event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit{return Unmanaged.passUnretained(event)}
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput{emergencyStop("event_tap_disabled");return Unmanaged.passUnretained(event)}
         guard enabled else{return Unmanaged.passUnretained(event)}
@@ -916,6 +934,7 @@ final class OnsetRecoveryEngine:NSObject {
         return Unmanaged.passUnretained(event)
     }
     func sample(){
+        guard inputAllowed() else{return}
         guard enabled,!recovering else{return}
         synchronizeWitnessDiagnostics()
         if currentLayout() == nil,gate?.reservation() == nil {
