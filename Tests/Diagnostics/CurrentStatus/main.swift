@@ -54,13 +54,15 @@ let snapshot=try DiagnosticReviewSnapshot(directory:exported)
 let environment=DiagnosticReviewEnvironment(appVersion:"0",build:"test",macOSVersion:"test",modelIdentifier:nil,keyboardLayout:.unknownOrOther,koreanKeyEnabled:false,hanjaKeyEnabled:false,hudEnabled:false,capsLockSwitchEnabled:nil,loginItemState:.unknown,diagnosticsEnabled:true,inputMonitoringEnabled:false,cachedAccessibilityPermission:false,updateRestricted:false)
 let files=try snapshot.files(selected:Set(snapshot.incidents.map(\.id)),environment:environment)
 let partial=try DiagnosticReviewArchive(files:files)
-check(partial.warningMessage?.contains("저장 대기")==true && partial.warningMessage?.contains("발생 전 또는 후")==true,"export warns about actual pending and missing post")
+check(partial.warningMessage?.contains("메모리에서 복사")==true && snapshot.incidents.allSatisfy(\.complete),"pending post is rescued and paired with the unchanged pre")
 check(files[0].readableText.contains("포함 범위 안내"),"same limitations are in exported summary")
 let pendingState=try JSONDecoder().decode(DiagnosticStorageIssueSnapshot.self,from:Data(contentsOf:exported.appendingPathComponent("storage-issues.json")))
 check(pendingState.isValid && pendingState.issues.contains{$0.component == .detail && $0.retry == .automatic},"export records the writer's actual scheduled retry")
-check(partial.warningMessage?.contains("자동으로 다시 시도")==true && files[0].readableText.contains("저장이 완료된 뒤"),"pending UI and ZIP summary wait for successful storage, not just reopening")
+check(partial.warningMessage?.contains("자동으로 다시 시도")==true && files[0].readableText.contains("재시도 상태는 바뀌지"),"memory export keeps the original writer's retry status")
 let legacyURL=root.appendingPathComponent("legacy-pending-export")
 try fm.copyItem(at:exported,to:legacyURL);try fm.removeItem(at:legacyURL.appendingPathComponent("storage-issues.json"))
+try fm.removeItem(at:legacyURL.appendingPathComponent("pending-export.json"))
+for capture in snapshot.pendingExport!.captures{try fm.removeItem(at:legacyURL.appendingPathComponent(capture.file))}
 let legacy=try DiagnosticReviewSnapshot(directory:legacyURL)
 let legacyWarning=try DiagnosticReviewArchive(files:legacy.files(selected:Set(legacy.incidents.map(\.id)),environment:environment)).warningMessage
 check(legacyWarning?.contains("상태를 확인할 수 없습니다")==true && legacyWarning?.contains("자동으로 다시 시도하고")==false,"older snapshots never invent an automatic retry from pending bytes")
@@ -171,7 +173,9 @@ let criticalSnapshot=try DiagnosticReviewSnapshot(directory:pendingCritical)
 check(criticalSnapshot.hasRecords,"pending critical status remains reviewable without a detailed capture")
 let criticalFiles=try criticalSnapshot.files(selected:[],environment:environment)
 let criticalArchive=try DiagnosticReviewArchive(files:criticalFiles)
-check(criticalArchive.warningMessage?.contains("중요 오류 기록이 아직 저장 대기")==true,"export explicitly discloses unwritten important errors")
+check(criticalArchive.warningMessage?.contains("메모리에 남아 있던 사건 기록")==true,"export discloses and includes unwritten important errors")
+let memoryEvents=try criticalFiles.filter{$0.path.hasPrefix("critical-memory-")}.flatMap{DiagnosticCriticalJournal.decode(try $0.data)!.events}
+check(memoryEvents.contains{$0.failure == .posix(.probeLaunch,EIO)},"pending important error has exact domain, code and event identity in export")
 check(criticalFiles.contains{$0.path=="critical-storage-status.json"},"pending critical status accompanies the ZIP")
 var criticalRecovered=false
 journalTrace.observeStorage{journalTrace.storageHealth{h in DispatchQueue.main.async{if h.menuMessage==nil{criticalRecovered=true}}}}
@@ -194,7 +198,7 @@ let quietCalls=idleWriter.calls
 for _ in 0..<100{_ = idle.drain()}
 check(idleWriter.calls==quietCalls,"healthy idle recovery introduces no recurring writes")
 
-// A retryable failure may later turn into a permanent ownership/access error.
+// A retryable failure may later turn into a non-recoverable writer error.
 let blockedWriter=Writer(),blockedRoot=root.appendingPathComponent("blocked-retry")
 try fm.createDirectory(at:blockedRoot,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
 let blockedTrace=InputIncidentTrace(secureInput:{false},destination:blockedRoot,sharedWriter:blockedWriter.write)
@@ -203,13 +207,13 @@ var blockedResults:[DiagnosticManualCapture.Status]=[]
 blockedTrace.mark{blockedResults.append($0)};blockedTrace.flush();settle()
 blockedWriter.fail(true);blockedTrace.finishCaptureWindowsForTest();blockedTrace.flush();settle()
 check(blockedResults == [.waiting],"retryable manual failure initially waits")
-blockedWriter.fail(true,code:EACCES)
+blockedWriter.fail(true,code:EINVAL)
 wait{blockedResults.last == .incomplete}
 check(!blockedResults.contains(.saved),"a later permanent failure never reports manual success")
 check(health(blockedTrace).menuMessage != nil && (blockedTrace.sharedStatsForTest()?.pendingBytes ?? 0)>0,"blocked evidence remains queued with an active storage warning")
 check(!health(blockedTrace).manualCaptureAvailable,"permanently unsafe store cannot accept a new manual capture")
 check(health(blockedTrace).activeIssues.first?.retry == .stopped,"permanent writer failure reports stopped, not automatic")
-check(health(blockedTrace).notice?.needsDetails==true && health(blockedTrace).problemSummary?.action.contains("피드백")==true && !health(blockedTrace).detailMessage.contains("전후 상세 기록"),"access failure offers feedback, with no redundant single-path heading")
+check(health(blockedTrace).notice?.needsDetails==true && health(blockedTrace).problemSummary?.action.contains("피드백")==true && !health(blockedTrace).detailMessage.contains("전후 상세 기록"),"stopped failure offers feedback, with no redundant single-path heading")
 let blockedCalls=blockedWriter.calls
 RunLoop.current.run(until:Date().addingTimeInterval(2.1))
 check(blockedWriter.calls==blockedCalls,"reported stopped writer does not secretly keep retrying")
@@ -219,7 +223,7 @@ let blockedSnapshot=try DiagnosticReviewSnapshot(directory:blockedExport)
 let blockedFiles=try blockedSnapshot.files(selected:Set(blockedSnapshot.incidents.map(\.id)),environment:environment)
 let blockedArchive=try DiagnosticReviewArchive(files:blockedFiles)
 check(blockedArchive.warningMessage?.contains("자동 재시도가 중단")==true && blockedArchive.warningMessage?.contains("잠시 후 창")==false,"actual stopped writer's export cannot promise a later retry")
-check(blockedFiles[0].readableText.contains("기다리거나 창을 다시 열어도 추가 저장되지 않습니다"),"ZIP summary preserves the stopped-state advice")
+check(blockedSnapshot.incidents.allSatisfy(\.complete) && blockedFiles[0].readableText.contains("자동 재시도가 중단"),"stopped writer's memory is exported without promising resumed storage")
 let blockedZip=root.appendingPathComponent("blocked.zip");try blockedArchive.save(to:blockedZip)
 let blockedUnzip=Process();blockedUnzip.executableURL=URL(fileURLWithPath:"/usr/bin/ditto");blockedUnzip.arguments=["-x","-k",blockedZip.path,root.appendingPathComponent("blocked-restored").path];try blockedUnzip.run();blockedUnzip.waitUntilExit()
 check(blockedUnzip.terminationStatus==0,"stopped-state ZIP restores")
@@ -246,7 +250,7 @@ final class LaneWriter {
     func write(_ fd:Int32,_ p:UnsafeRawPointer?,_ n:Int)->Int {
         var name=[CChar](repeating:0,count:Int(MAXPATHLEN));precondition(fcntl(fd,F_GETPATH,&name)==0)
         let path=String(cString:name)
-        lock.lock();let code=path.contains("CriticalErrors-v3") ? errors:(path.contains("CriticalObservations-v3") ? EACCES:0);lock.unlock()
+        lock.lock();let code=path.contains("CriticalErrors-v3") ? errors:(path.contains("CriticalObservations-v3") ? EINVAL:0);lock.unlock()
         if code != 0{errno=code;return -1};return Darwin.write(fd,p,n)
     }
 }
@@ -267,8 +271,9 @@ exportResult=nil;mixedTrace.prepareExport(to:mixedExport,reviewMetadata:true){ex
 let mixedSnapshot=try DiagnosticReviewSnapshot(directory:mixedExport)
 let mixedFiles=try mixedSnapshot.files(selected:Set(mixedSnapshot.incidents.map(\.id)),environment:environment)
 let mixedWarnings=try DiagnosticReviewArchive(files:mixedFiles).warningMessage ?? ""
-check(mixedWarnings.contains("중요 오류 기록이 아직 저장 대기 중입니다. 이 내보내기에 해당 오류의 전체 내용이 포함되지 않을 수 있습니다.\n자동으로 다시 시도"),"export preserves independent error lane retries")
-check(mixedWarnings.contains("일반 사건 기록이 아직 저장 대기 중입니다. 이 내보내기에 전체 내용이 포함되지 않을 수 있습니다.\n자동 재시도가 중단"),"export preserves independently stopped observation lane")
+check(mixedWarnings.contains("중요 오류 기록: 자동으로 다시 시도"),"export preserves independent error lane retries")
+check(mixedWarnings.contains("사건 관측 기록: 자동 재시도가 중단"),"export preserves independently stopped observation lane")
+check(mixedSnapshot.pendingExport?.journalFiles.values.reduce(0,+) ?? 0 >= 2,"both independently failed lanes supply memory copies")
 var changedCause=false
 mixedTrace.observeStorage{mixedTrace.storageHealth{value in DispatchQueue.main.async{changedCause=value.activeIssues.contains{$0.component == .criticalErrors && $0.cause == .io}}}}
 laneWriter.setErrors(EIO)
@@ -295,12 +300,12 @@ try fm.createDirectory(at:initialDenied,withIntermediateDirectories:false,attrib
 let initialDeniedTrace=InputIncidentTrace(secureInput:{false},destination:initialDenied)
 initialDeniedTrace.flush()
 let initialDeniedHealth=health(initialDeniedTrace)
-check(initialDeniedHealth.activeIssues.contains{$0.component == .detail && $0.retry == .stopped},"denied startup reports the permanently stopped detail writer")
+check(initialDeniedHealth.activeIssues.contains{$0.component == .detail && $0.retry == .automatic},"denied startup keeps the recoverable detail retry")
 check(initialDeniedHealth.activeIssues.contains{$0.component == .readiness && $0.retry == .automatic},"denied startup also exposes the independently scheduled preparation retry")
-check(initialDeniedHealth.notice?.detail.contains("일부")==true,"simultaneous preparation and writer failures show their different retry states")
+check(initialDeniedHealth.notice?.detail.contains("일부") != true,"both recoverable paths report automatic retries")
 try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:initialDenied.path)
-wait{!health(initialDeniedTrace).activeIssues.contains{$0.component == .readiness}}
-check(health(initialDeniedTrace).activeIssues.contains{$0.component == .detail && $0.retry == .stopped},"recovered preparation cannot hide the still-stopped detail writer")
+wait{health(initialDeniedTrace).activeIssues.isEmpty}
+check(health(initialDeniedTrace).manualCaptureAvailable,"restored startup permissions recover both paths without relaunch")
 initialDeniedTrace.stopAndFlush()
 
 // A persistent ownership guard is different: a timer invocation cannot retry
@@ -311,11 +316,13 @@ let ownershipTrace=InputIncidentTrace(secureInput:{false},destination:ownershipD
 ownershipTrace.flush()
 let ownershipHealth=health(ownershipTrace)
 print("Ownership diagnostic fixture:", ownershipHealth.detailMessage.replacingOccurrences(of:"\n",with:" | "))
-check(ownershipHealth.activeIssues.contains{$0.component == .readiness && $0.retry == .stopped && $0.cause == .permission},"permanently denied ownership is stopped despite the surrounding timer")
+check(ownershipHealth.activeIssues.contains{$0.component == .readiness && $0.retry == .automatic && $0.cause == .permission},"permission failure while opening ownership metadata remains recoverable")
 RunLoop.current.run(until:Date().addingTimeInterval(2.1))
-check(health(ownershipTrace).activeIssues.contains{$0.component == .readiness && $0.retry == .stopped && $0.cause == .permission},"repeated no-op preparation checks retain the original failure cause")
+check(health(ownershipTrace).activeIssues.contains{$0.component == .readiness && $0.retry == .automatic && $0.cause == .permission},"backoff retains the access failure's actual cause")
 check(health(ownershipTrace).notice?.detail.contains("일부") != true,"all stopped stores never imply a partial automatic retry")
 try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:ownershipDenied.path)
+wait{health(ownershipTrace).activeIssues.isEmpty}
+check(health(ownershipTrace).manualCaptureAvailable,"persistent ownership store safely initializes after access is restored")
 ownershipTrace.stopAndFlush()
 
 // Unknown and unscheduled states stay distinct, and invalid status metadata is

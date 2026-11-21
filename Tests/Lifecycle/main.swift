@@ -11,6 +11,27 @@ func pressNoticeKey(_ window:NSWindow,_ character:String,_ keyCode:UInt16) {
 // Exercises the production teardown with a Mach port/run-loop source, without
 // installing a global event tap or changing Accessibility permissions.
 let owner = AppDelegate()
+// Menu quit, Cmd-Q and Sparkle's Apple quit event enter the same delegate.
+// No global termination or input events are sent by these independent checks.
+do {
+    let app=AppDelegate();_ = NSApplication.shared
+    var responses:[Bool]=[],prompts=0,resumed=0
+    app.diagnosticQuitPreparer={$0(.init(detailPhases:2,errors:1,observations:0))}
+    app.diagnosticQuitResumer={resumed+=1}
+    app.diagnosticQuitPresenter={state,reply in
+        precondition(state?.detailPhases==2);prompts+=1;reply(.cancel)
+    }
+    app.diagnosticQuitReply={responses.append($0)}
+    precondition(app.applicationShouldTerminate(NSApp) == .terminateLater)
+    precondition(app.applicationShouldTerminate(NSApp) == .terminateCancel)
+    RunLoop.current.run(until:Date().addingTimeInterval(0.05))
+    precondition(responses == [false] && prompts==1 && resumed==1,"pending quit cancels without touching the running app")
+    app.diagnosticQuitPreparer={$0(.init(detailPhases:0,errors:0,observations:0))}
+    precondition(app.applicationShouldTerminate(NSApp) == .terminateLater)
+    RunLoop.current.run(until:Date().addingTimeInterval(0.05))
+    precondition(responses == [false,true] && prompts==1,"successful final save permits normal termination")
+    print("PASS: production AppDelegate termination gate routes pending cancel, duplicate requests and successful save")
+}
 // Reflow presentation text without losing the underlying error or its recovery
 // metadata. Unknown/localized text outside these stock sentences is unchanged.
 do {

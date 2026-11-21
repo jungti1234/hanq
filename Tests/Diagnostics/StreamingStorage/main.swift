@@ -76,6 +76,15 @@ check(partial.stats.lastFailure?.underlyingPOSIX==Int(ENOSPC) && partial.stats.p
 let written=partial.stats.writtenBytes
 for _ in 0..<100{_ = partial.drain()}
 check(partial.stats.writtenBytes==written,"backoff adds no writes")
+let pendingSnapshot=directory("pending-input")
+let pendingInfo=try! partial.copyReviewSnapshot(into:pendingSnapshot,request:DiagnosticSnapshotRequest())
+for (name,value) in [("review-dates.json",Data("{}".utf8)),("storage-status.json",Data("{\"schema\":1,\"status\":{}}".utf8)),("pending-export.json",try! JSONEncoder().encode(pendingInfo))]{
+    try! DiagnosticSharedStore.writeExport(value,to:pendingSnapshot.appendingPathComponent(name))
+}
+check(pendingInfo.captures.count==1 && partial.stats.writtenBytes==written,"maximum pending memory export adds no source writes")
+var rescuedFrames=0
+_ = try! DiagnosticArchiveReader.selection(pendingInfo.captures[0].file,in:pendingSnapshot).visit{value in rescuedFrames+=1;check(value["sequence"] as? Int==rescuedFrames,"memory export exact sequence")}
+check(rescuedFrames==65536 && partial.stats.pendingBytes>0,"maximum memory copy preserves all frames and original retry queue")
 blocked=false;retry+=61
 check(partial.drain() && partial.stats.saved==1 && partial.stats.pendingBytes==0,"retry resumes across chunk boundary")
 let name=try! fm.contentsOfDirectory(atPath:partial.directory.path).first{DiagnosticSharedStore.validName($0) && (try? DiagnosticSharedStore.readHeader(partial.directory.appendingPathComponent($0)).0.role) != 1}!

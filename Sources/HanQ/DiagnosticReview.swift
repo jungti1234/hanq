@@ -229,6 +229,8 @@ final class DiagnosticReviewSnapshot {
     private let storageData: Data
     private let sharedStatus:DiagnosticReviewFile?
     private let criticalFiles:[DiagnosticReviewFile]
+    let pendingExport:DiagnosticPendingExport?
+    var pendingIncidentIDs:Set<String>{pendingExport?.incidentIDs ?? []}
     private var exportWarnings:[String]=[]
     let critical:DiagnosticReviewDocument?
     var hasRecords:Bool{!incidents.isEmpty || critical != nil}
@@ -295,11 +297,29 @@ final class DiagnosticReviewSnapshot {
             if $0.number != $1.number { return $0.number > $1.number }
             return $0.id > $1.id
         }
+        let pendingURL=directory.appendingPathComponent("pending-export.json")
+        let listedIncidents=incidents
+        if FileManager.default.fileExists(atPath:pendingURL.path) {
+            let pending=try JSONDecoder().decode(DiagnosticPendingExport.self,from:Self.read(pendingURL))
+            guard pending.schema==1,pending.captures.count<=128,
+                  Set(pending.captures.map(\.file)).count==pending.captures.count,
+                  pending.captures.allSatisfy({ capture in
+                      DiagnosticSharedStore.validName(capture.file) &&
+                      listedIncidents.contains{incident in incident.id==capture.run+":"+String(capture.incident) && incident.originals[capture.phase]?.filename==capture.file}
+                  }),pending.journalFiles.allSatisfy({DiagnosticCriticalJournal.exportedName($0.key) && $0.value>0}),
+                  pending.unavailableSources.allSatisfy({["shared","legacy-and-journal"].contains($0)}) else{throw DiagnosticReviewError.invalidCapture}
+            pendingExport=pending
+        }else{pendingExport=nil}
         storageData = try Self.read(directory.appendingPathComponent("storage-status.json"))
         let status = try Self.object(storageData)
         guard Self.integer(status["schema"]) == 1, let values = status["status"] as? [String: Any] else { throw DiagnosticReviewError.invalidCapture }
         storage = Self.storageDocument(values)
         var criticalFiles:[DiagnosticReviewFile]=[],sections:[DiagnosticReviewSection]=[],notices:[String]=[]
+        if let pendingExport {
+            if !pendingExport.captures.isEmpty{notices.append("원래 저장소에 저장되지 않은 상세 구간 \(pendingExport.captures.count)개를 메모리에서 복사했습니다. 목록에서 선택한 사건의 사본만 ZIP에 포함합니다. 원래 저장소의 재시도 상태는 바뀌지 않습니다.")}
+            if !pendingExport.journalFiles.isEmpty{notices.append("메모리에 남아 있던 사건 기록 \(pendingExport.journalFiles.values.reduce(0,+))개를 포함합니다. 저장 파일과 중복된 사건은 실행 ID와 사건 순번으로 구분할 수 있습니다.")}
+            if !pendingExport.unavailableSources.isEmpty{notices.append("원래 저장소의 일부 파일을 안전하게 읽을 수 없어 포함하지 못했습니다. 메모리 사본과 읽을 수 있는 자료만 포함하며, 기존 원본은 변경하지 않았습니다.")}
+        }
         let issuesURL=directory.appendingPathComponent("storage-issues.json")
         var storageIssues:DiagnosticStorageIssueSnapshot?
         if FileManager.default.fileExists(atPath:issuesURL.path) {
@@ -316,12 +336,16 @@ final class DiagnosticReviewSnapshot {
         func retryAdvice(_ components:Set<DiagnosticStorageIssue.Component>)->String {
             storageIssues?.exportAdvice(for:components) ?? "이 자료만으로 자동 재시도 상태를 확인할 수 없습니다."
         }
+        if let pendingExport,!pendingExport.captures.isEmpty || !pendingExport.journalFiles.isEmpty {
+            let state=storageIssues?.issues.map{$0.component.title+": "+$0.retry.message}.joined(separator:"\n")
+            if let state,!state.isEmpty{notices.append("원래 저장소의 상태:\n"+state)}
+        }
         let criticalStatusURL=directory.appendingPathComponent("critical-storage-status.json")
         if FileManager.default.fileExists(atPath:criticalStatusURL.path) {
             let data=try Self.read(criticalStatusURL),status=try JSONDecoder().decode(DiagnosticCriticalJournal.Status.self,from:data)
             guard [status.pendingErrors,status.pendingObservations,status.droppedErrors,status.droppedObservations,status.writeFailures,status.lastErrno,status.lastPolicy,status.writtenBytes,status.rotations].allSatisfy({$0>=0}) else{throw DiagnosticReviewError.invalidCapture}
-            if status.pendingErrors>0{notices.append("중요 오류 기록이 아직 저장 대기 중입니다. 이 내보내기에 해당 오류의 전체 내용이 포함되지 않을 수 있습니다.\n"+retryAdvice([.criticalErrors,.termination]))}
-            if status.pendingObservations>0{notices.append("일반 사건 기록이 아직 저장 대기 중입니다. 이 내보내기에 전체 내용이 포함되지 않을 수 있습니다.\n"+retryAdvice([.observations]))}
+            if status.pendingErrors>0,pendingExport==nil{notices.append("중요 오류 기록이 아직 저장 대기 중입니다. 이 내보내기에 해당 오류의 전체 내용이 포함되지 않을 수 있습니다.\n"+retryAdvice([.criticalErrors,.termination]))}
+            if status.pendingObservations>0,pendingExport==nil{notices.append("일반 사건 기록이 아직 저장 대기 중입니다. 이 내보내기에 전체 내용이 포함되지 않을 수 있습니다.\n"+retryAdvice([.observations]))}
             if status.droppedErrors>0{notices.append("오류 기록 대기 용량을 초과해 파일에 남지 못한 오류가 있습니다.")}
             if status.droppedObservations>0{notices.append("일반 관측 기록 대기 용량을 초과해 파일에 남지 못한 관측이 있습니다.")}
             let section=DiagnosticReviewSection(title:"사건 기록 저장 상태",fields:[
@@ -335,7 +359,7 @@ final class DiagnosticReviewSnapshot {
         let sharedURL=directory.appendingPathComponent("shared-storage-status.json")
         if FileManager.default.fileExists(atPath:sharedURL.path) {
             let data=try Self.read(sharedURL),stats=try JSONDecoder().decode(DiagnosticSharedStore.Stats.self,from:data)
-            if stats.pendingBytes>0{notices.append("아직 저장 대기 중인 상세 기록은 이 내보내기에 포함되지 않습니다.\n"+retryAdvice([.detail]))}
+            if stats.pendingBytes>0,pendingExport==nil{notices.append("아직 저장 대기 중인 상세 기록은 이 내보내기에 포함되지 않습니다.\n"+retryAdvice([.detail]))}
             if stats.rejected>0{notices.append("저장 대기 용량을 초과해 상세 기록을 받지 못한 이력이 있습니다. 모든 사건의 상세가 보관되어 있다고 보장할 수 없습니다.")}
             if stats.incompleteFiles>0{notices.append("완료되지 않은 저장 파일이 있습니다. 해당 파일은 완성된 상세 기록에 포함되지 않습니다.")}
             let document=DiagnosticReviewDocument("공유 상세 저장 상태",[.init(title:"저장과 중복 제거",fields:[
@@ -691,11 +715,11 @@ final class DiagnosticReviewSnapshot {
             .init(title: "저장 실패·생략 내역 (누적)", fields: issues.isEmpty
                 ? [.init(label: "저장 실패·생략", value: "기록된 내역 없음")] : issues)])
     }
-    func files(selected: Set<String>, environment: DiagnosticReviewEnvironment,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest()) throws -> [DiagnosticReviewFile] {
+    func files(selected: Set<String>, environment: DiagnosticReviewEnvironment,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),allPending:Bool=false) throws -> [DiagnosticReviewFile] {
         try request.check()
         let chosen = incidents.filter { selected.contains($0.id) }
         guard (!chosen.isEmpty || !criticalFiles.isEmpty), chosen.count == selected.count else { throw DiagnosticReviewError.emptySelection }
-        guard chosen.count <= Self.selectionLimit else { throw DiagnosticReviewError.tooManySelections }
+        guard allPending ? selected==pendingIncidentIDs:chosen.count <= Self.selectionLimit else { throw DiagnosticReviewError.tooManySelections }
         var warnings=exportWarnings
         if chosen.contains(where:{!$0.complete}){warnings.append("선택한 기록 중 발생 전 또는 후 기록이 없는 항목이 있습니다. 보관된 부분만 포함합니다.")}
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ko_KR"); formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -741,6 +765,15 @@ final class DiagnosticReviewSnapshot {
             files.append(DiagnosticReviewFile("selection-manifest.json","선택한 원본과 공유 자료",original:manifest,preview:DiagnosticReviewDocument("선택한 원본과 공유 자료",[.init(title:"내보내기 구성",fields:[.init(label:"선택한 원본 파일",value:selectedOriginals.joined(separator:"\n")),.init(label:"공유 자료 수",value:"\(sharedDependencies.count)")])])))
         }
         if let sharedStatus{files.append(sharedStatus)}
+        if var pending=pendingExport {
+            let selectedNames=Set(selectedOriginals)
+            pending.captures=pending.captures.filter{selectedNames.contains($0.file)}
+            let data=try JSONEncoder().encode(pending)
+            files.append(DiagnosticReviewFile("pending-export.json","메모리에서 복사한 기록",original:data,preview:DiagnosticReviewDocument("메모리에서 복사한 기록",[.init(title:"원래 저장소와 별도로 보존",fields:[
+                .init(label:"선택한 상세 구간",value:"\(pending.captures.count)개"),
+                .init(label:"메모리의 사건 기록",value:"\(pending.journalFiles.values.reduce(0,+))개"),
+                .init(label:"원래 저장 상태",value:"내보내기는 별도 사본입니다. 원래 저장소의 저장 완료를 뜻하지 않습니다.")])])))
+        }
         files.append(contentsOf:criticalFiles)
         files.append(DiagnosticReviewFile("storage-status.json", "저장 상태", original: storageData, preview: storage))
         var seen=Set<String>();warnings=warnings.filter{seen.insert($0).inserted}

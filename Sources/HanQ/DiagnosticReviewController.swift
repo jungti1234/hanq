@@ -32,6 +32,7 @@ private final class DiagnosticReviewScrollView: NSScrollView {
 final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private static let worker = DispatchQueue(label: "hanq.diagnostics.review", qos: .utility)
     private let environment: DiagnosticReviewEnvironment
+    let allPending:Bool
     private var snapshot: DiagnosticReviewSnapshot?
     var hasRecords: Bool { snapshot?.hasRecords == true }
     private var selected = Set<String>()
@@ -58,11 +59,11 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     private let feedbackButton = NSButton(title: UserFacingText.feedbackAction, target: nil, action: nil)
     private let cancelButton = NSButton(title: "취소", target: nil, action: nil)
 
-    init(environment: DiagnosticReviewEnvironment) {
-        self.environment = environment
+    init(environment: DiagnosticReviewEnvironment,allPending:Bool=false) {
+        self.environment = environment;self.allPending=allPending
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 850),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "한Q - 진단 기록 내보내기"
+        window.title = allPending ? "한Q - 대기 기록 내보내기":"한Q - 진단 기록 내보내기"
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 900, height: 740)
         window.contentView = DiagnosticReviewBackground(frame: window.contentView!.bounds)
@@ -130,8 +131,9 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         guard !closed else { return }
         self.snapshot = snapshot
         selected.removeAll()
-        if let first = snapshot.incidents.first { selected = [first.id] }
-        countLabel.stringValue = "전체 \(snapshot.incidents.count)건 · 최신순" + (snapshot.critical != nil ? " · 최소 사건 기록 포함":"")
+        if allPending{selected=snapshot.pendingIncidentIDs}
+        else if let first = snapshot.incidents.first { selected = [first.id] }
+        countLabel.stringValue = allPending ? "저장 대기 기록 전체 \(selected.count)건 · 사건 기록 포함":"전체 \(snapshot.incidents.count)건 · 최신순" + (snapshot.critical != nil ? " · 최소 사건 기록 포함":"")
         prepareSelection()
         if !snapshot.incidents.isEmpty { recordTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
     }
@@ -279,37 +281,44 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         for view in [heading, records, split] { view.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true }
     }
 
+    private var visibleIncidents:[DiagnosticReviewIncident]{
+        guard let snapshot else{return []}
+        return allPending ? snapshot.incidents.filter{snapshot.pendingIncidentIDs.contains($0.id)}:snapshot.incidents
+    }
     func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === recordTable ? snapshot?.incidents.count ?? 0 : archive?.files.count ?? 0
+        tableView === recordTable ? visibleIncidents.count : archive?.files.count ?? 0
     }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         if tableView === fileTable {
             guard let files = archive?.files, files.indices.contains(row) else { return nil }
             let field = label(files[row].title); field.toolTip = files[row].path; return cell(field)
         }
-        guard let incidents = snapshot?.incidents, incidents.indices.contains(row) else { return nil }
+        let incidents=visibleIncidents
+        guard incidents.indices.contains(row) else { return nil }
         let incident = incidents[row]
         switch tableColumn?.identifier.rawValue {
         case "check":
             let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleRecord(_:)))
             button.tag = row; button.state = selected.contains(incident.id) ? .on : .off
             button.setAccessibilityLabel("\(incident.title) 내보내기 선택")
-            button.isEnabled = !saving && (selected.contains(incident.id) || selected.count < DiagnosticReviewSnapshot.selectionLimit)
-            if !button.isEnabled && !saving { button.toolTip = DiagnosticReviewError.tooManySelections.localizedDescription }
+            button.isEnabled = !allPending && !saving && (selected.contains(incident.id) || selected.count < DiagnosticReviewSnapshot.selectionLimit)
+            if allPending{button.toolTip="종료 전 대기 중인 사건의 전후 구간을 모두 포함합니다."}
+            else if !button.isEnabled && !saving { button.toolTip = DiagnosticReviewError.tooManySelections.localizedDescription }
             return cell(button, centered: true)
         case "date":
             let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ko_KR"); formatter.dateFormat = "MM-dd HH:mm:ss"
             return cell(label(incident.savedAt.map(formatter.string) ?? "저장 시각 미확인"))
         case "kind": return cell(label(incident.manual ? "수동" : "자동"))
         default:
-            return cell(label(incident.title + (incident.complete ? "" : " · 전후 기록 일부 없음")))
+            return cell(label(incident.title + (snapshot?.pendingIncidentIDs.contains(incident.id)==true ? " · 메모리 사본":"") + (incident.complete ? "" : " · 전후 기록 일부 없음")))
         }
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         if notification.object as? NSTableView === fileTable { showFile() }
     }
     @objc private func toggleRecord(_ sender: NSButton) {
-        guard !saving, let incidents = snapshot?.incidents, incidents.indices.contains(sender.tag) else { return }
+        let incidents=visibleIncidents
+        guard !allPending,!saving,incidents.indices.contains(sender.tag) else { return }
         let id = incidents[sender.tag].id
         if selected.contains(id) {
             selected.remove(id)
@@ -324,7 +333,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         let operation=DiagnosticSnapshotRequest();selectionRequest=operation
         generation += 1
         let request = generation
-        selectionLabel.stringValue = "선택한 기록 \(selected.count)/\(DiagnosticReviewSnapshot.selectionLimit)건"
+        selectionLabel.stringValue = allPending ? "대기 기록 전체 \(selected.count)건":"선택한 기록 \(selected.count)/\(DiagnosticReviewSnapshot.selectionLimit)건"
         recordTable.reloadData()
         archive = nil; savedURL = nil
         finderButton.isHidden = true
@@ -335,10 +344,10 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
             statusLabel.stringValue = snapshot?.incidents.isEmpty == true ? "보관 중인 기록이 없습니다." : "저장할 기록을 하나 이상 선택해 주세요."
             return
         }
-        let selection = selected, environment = environment
+        let selection = selected, environment = environment,allPending=allPending
         statusLabel.stringValue = "선택한 기록의 ZIP을 준비하고 있습니다…"
         Self.worker.async { [weak self] in
-            let result = Result { try DiagnosticReviewArchive(files: snapshot.files(selected: selection, environment: environment,request:operation),request:operation) }
+            let result = Result { try DiagnosticReviewArchive(files: snapshot.files(selected: selection, environment: environment,request:operation,allPending:allPending),request:operation) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == request else { return }
                 switch result {

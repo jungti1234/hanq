@@ -23,7 +23,8 @@ def run(folder,binary,*args):
     subprocess.run([str(exe),*args],cwd=folder,env=env,check=True)
     print('Streaming artifacts:',folder,flush=True)
 fixture=stage('storage');run(fixture,build/'storage-tests')
-for mode in ['load','zip']:
-    folder=stage(mode);shutil.copytree(fixture/'maximum-input',folder/'input')
-    run(folder,build/'review-tests',mode)
+for fixture_name in ['maximum-input','pending-input']:
+    for mode in ['load','zip']:
+        folder=stage(fixture_name+'-'+mode);shutil.copytree(fixture/fixture_name,folder/'input')
+        run(folder,build/'review-tests',mode)
 PY

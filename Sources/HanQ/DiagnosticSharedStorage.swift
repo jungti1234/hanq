@@ -160,6 +160,12 @@ final class DiagnosticCaptureLease {
 // a file's own payload; resolving one never requires that file's capture window.
 // Metadata chains checkpoint after 32 captures or one hour. Retention follows
 // those two dependency kinds separately, preventing an endless reference chain.
+struct DiagnosticPendingExport:Codable {
+    struct Capture:Codable {let file:String,run:String,incident:Int,phase:Int}
+    var schema=1,captures:[Capture]=[],journalFiles:[String:Int]=[:],unavailableSources:[String]=[]
+    var incidentIDs:Set<String>{Set(captures.map{$0.run+":"+String($0.incident)})}
+}
+
 final class DiagnosticSharedStore {
     static let retentionSeconds:Double=72*60*60
     static let directoryName="Shared-v1"
@@ -201,6 +207,8 @@ final class DiagnosticSharedStore {
     private var counters=Stats()
     private(set) var hasVerifiedWrite=false
     var canRetry:Bool{lock.lock();defer{lock.unlock()};return !blocked}
+    var pendingCount:Int{lock.lock();defer{lock.unlock()};return waiting.count+(pending==nil ? 0:1)}
+    @discardableResult func retryForQuit()->Bool{lock.lock();defer{lock.unlock()};retryAt=0;return drain()}
     func storageIssue(retryScheduled:Bool)->DiagnosticStorageIssue? {
         lock.lock();defer{lock.unlock()}
         guard let failure=counters.lastFailure else{return nil}
@@ -287,6 +295,18 @@ final class DiagnosticSharedStore {
                     guard header.owner==owner else{throw OperationalFailure.policy(.storageOwnership,7)}
                     records[name]=Record(header:header,identity:state)
                 };loaded=true
+            }
+            if counters.lastFailure != nil {
+                // Resuming after a filesystem outage must not reuse references
+                // to a file that was replaced or changed while writing paused.
+                for (name,record) in records {
+                    var actual=stat()
+                    guard fstatat(fd,name,&actual,AT_SYMLINK_NOFOLLOW)==0 else{throw OperationalFailure.posix(.storageRead,errno)}
+                    guard DiagnosticOwnedIO.same(record.identity,actual),actual.st_mode&S_IFMT==S_IFREG,
+                          actual.st_uid==getuid(),actual.st_mode&0o7777==0o600,actual.st_nlink==1 else{
+                        throw OperationalFailure.policy(.storageOwnership,9)
+                    }
+                }
             }
             return fd
         }catch{close(fd);throw error}
@@ -392,11 +412,11 @@ final class DiagnosticSharedStore {
         result.metadataPending=meta;result.metadataName=metadataName;result.metadataCheckpoint=base==nil
         return result
     }
-    private func makePending(name:String,input:Input,frames:[DiagnosticPackedFrame],ranges:[FrameRange],changes:[DiagnosticJSON.Change],base:String?,role:Int)throws->Pending {
+    private func makePending(name:String,input:Input,frames:[DiagnosticPackedFrame],ranges:[FrameRange],changes:[DiagnosticJSON.Change],base:String?,role:Int,exportOwner:String?=nil)throws->Pending {
         let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
         let payload=try DiagnosticPayloadStream.encode(fields:role==1 ? []:DiagnosticPackedCodec.shared.fields,frames:frames,changes:changes)
         var hash=SHA256();for chunk in payload.chunks{hash.update(data:chunk)}
-        var header=Header(schema:1,owner:owner!,runID:input.run,incident:input.incident,phase:input.phase,trigger:input.trigger,
+        var header=Header(schema:1,owner:exportOwner ?? owner!,runID:input.run,incident:input.incident,phase:input.phase,trigger:input.trigger,
             milliseconds:input.milliseconds,metadataBase:base,ranges:ranges,frameCount:role==1 ? 0:input.frames.count,ownFrameCount:frames.count,
             rawBytes:payload.rawBytes,compressed:payload.compressed,digest:hash.finalize().map{String(format:"%02x",$0)}.joined())
         header.role=role
@@ -493,6 +513,52 @@ final class DiagnosticSharedStore {
         }
         let data=try JSONEncoder().encode(stats);let path=destination.appendingPathComponent("shared-storage-status.json")
         try data.write(to:path,options:.withoutOverwriting);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+    }
+    /// Copy verified published files, then make independent archives from the
+    /// still-owned packed inputs. Never resume/acknowledge a failed transaction
+    /// merely because its export copy succeeded. A failed disk snapshot cannot
+    /// leak partially copied or untrusted shared dependencies into the review.
+    func copyReviewSnapshot(into destination:URL,request:DiagnosticSnapshotRequest)throws->DiagnosticPendingExport {
+        lock.lock();defer{lock.unlock()}
+        var result=DiagnosticPendingExport()
+        let staging=destination.appendingPathComponent(".shared-review-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:staging,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+        defer{try? FileManager.default.removeItem(at:staging)}
+        var copied=false
+        do{try request.check();try copySnapshot(into:staging);copied=true}
+        catch{try request.check();fail(error);result.unavailableSources.append("shared")}
+        if copied {
+            for file in try FileManager.default.contentsOfDirectory(at:staging,includingPropertiesForKeys:nil){
+                try request.check()
+                try FileManager.default.moveItem(at:file,to:destination.appendingPathComponent(file.lastPathComponent))
+            }
+        }else{
+            try Self.writeExport(try JSONEncoder().encode(stats),to:destination.appendingPathComponent("shared-storage-status.json"))
+        }
+        let inputs=(pending.map{[$0.input]} ?? [])+waiting
+        let exportOwner=UUID().uuidString
+        for input in inputs {
+            try request.check()
+            let name="shared-"+UUID().uuidString+".hqdiag"
+            let ranges=input.frames.isEmpty ? []:[FrameRange(file:name,first:0,count:input.frames.count)]
+            let item=try makePending(name:name,input:input,frames:input.frames,ranges:ranges,
+                changes:DiagnosticJSON.changes(from:.object([:]),to:input.metadata),base:nil,role:0,exportOwner:exportOwner)
+            let url=destination.appendingPathComponent(name)
+            let fd=open(url.path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0o600)
+            guard fd>=0 else{throw OperationalFailure.posix(.storagePublish,errno)}
+            defer{close(fd)}
+            for chunk in item.chunks {
+                try request.check()
+                if let failure=OperationalIO.writeAll(chunk,to:fd,stage:.storageWrite){throw failure}
+            }
+            guard fsync(fd)==0 else{throw OperationalFailure.posix(.storageWrite,errno)}
+            result.captures.append(.init(file:name,run:input.run,incident:input.incident,phase:input.phase))
+        }
+        return result
+    }
+    static func writeExport(_ data:Data,to url:URL)throws {
+        try data.write(to:url,options:.withoutOverwriting)
+        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
     }
 }
 
@@ -664,10 +730,10 @@ final class DiagnosticCriticalJournal {
         else if observation{observations.record(event,observation:true)}
         else{errors.record(event)}
     }
-    @discardableResult func flush(timeout:Double=0.25)->Bool {
+    @discardableResult func flush(timeout:Double=0.25,retryNow:Bool=false)->Bool {
         let deadline=ProcessInfo.processInfo.systemUptime+max(0,timeout)
         var success=true
-        for lane in [terminal,errors,observations]{let result=lane.flush(timeout:max(0,deadline-ProcessInfo.processInfo.systemUptime));success=result && success}
+        for lane in [terminal,errors,observations]{let result=lane.flush(timeout:max(0,deadline-ProcessInfo.processInfo.systemUptime),retryNow:retryNow);success=result && success}
         return success
     }
     func status()->Status {
@@ -679,6 +745,9 @@ final class DiagnosticCriticalJournal {
     }
     func storageIssues()->[DiagnosticStorageIssue] {
         [errors.storageIssue(component:.criticalErrors),observations.storageIssue(component:.observations),terminal.storageIssue(component:.termination)].compactMap{$0}
+    }
+    func pendingExport()throws->[(String,Data,Int)] {
+        try [errors,observations,terminal].compactMap{try $0.pendingExport()}
     }
     static func decode(_ data:Data)->Decoded? {DiagnosticCriticalLane.decode(data)}
     static func exportedName(_ name:String)->Bool {

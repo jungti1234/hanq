@@ -82,8 +82,8 @@ final class OperationalDiagnostics {
         if ordinaryLost>0{value.record(.policy(.journalOverflow,2),context:DiagnosticCriticalJournal.Context(trace:run,incident:0,sequence:0,lane:0,kind:0,category:0,count:ordinaryLost,episode:0),observation:true)}
         if lost>0{value.record(.policy(.journalOverflow,1),context:DiagnosticCriticalJournal.Context(trace:run,incident:0,sequence:0,lane:0,kind:0,category:0,count:lost,episode:0))}
     }
-    @discardableResult func flushCritical(timeout:Double=0.25)->Bool {
-        lock.lock();let value=journal;lock.unlock();return value?.flush(timeout:timeout) ?? false
+    @discardableResult func flushCritical(timeout:Double=0.25,retryNow:Bool=false)->Bool {
+        lock.lock();let value=journal;lock.unlock();return value?.flush(timeout:timeout,retryNow:retryNow) ?? false
     }
     // Every failure occurrence reaches OSLog and the compact journal with a
     // unique event ID. The 64-entry summary is not the event retention policy.
@@ -131,6 +131,11 @@ final class OperationalDiagnostics {
         lock.lock();let journal=self.journal;lock.unlock()
         guard let journal,journal.directory==directory.standardizedFileURL else{return []}
         return journal.storageIssues()
+    }
+    func pendingExport(for directory:URL)throws->[(String,Data,Int)] {
+        lock.lock();let journal=self.journal;lock.unlock()
+        guard let journal,journal.directory==directory.standardizedFileURL else{return []}
+        return try journal.pendingExport()
     }
 }
 enum OperationalIO {
@@ -229,9 +234,9 @@ final class DiagnosticCriticalLane {
     }
     // Only the waiting caller is bounded. The writer may still be blocked in
     // the kernel; a safety exit must never wait for it indefinitely.
-    @discardableResult func flush(timeout:Double=0.25)->Bool {
+    @discardableResult func flush(timeout:Double=0.25,retryNow:Bool=false)->Bool {
         let signal=DispatchSemaphore(value:0)
-        queue.async{[self] in drain(all:true);signal.signal()}
+        queue.async{[self] in if retryNow{retryAt=0};drain(all:true);signal.signal()}
         guard signal.wait(timeout:.now()+timeout) == .success else{return false}
         lock.lock();defer{lock.unlock()};return pending.isEmpty && droppedErrors==reportedErrors && droppedObservations==reportedObservations
     }
@@ -245,6 +250,15 @@ final class DiagnosticCriticalLane {
         guard var issue=currentStorageIssue else{return nil}
         issue.component=component;issue.pendingCount=pending.count
         return issue
+    }
+    func pendingExport()throws->(String,Data,Int)? {
+        lock.lock();let events=pending.map(\.0);lock.unlock()
+        guard !events.isEmpty else{return nil}
+        let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
+        var data=try encoder.encode(Header(schema:3,generation:1,createdMilliseconds:Int64(wallClock()*1000),lane:lane,session:run))
+        data.append(10)
+        for event in events{data.append(try encoder.encode(event));data.append(10)}
+        return ("critical-memory-v3-\(lane)-\(UUID().uuidString).jsonl",data,events.count)
     }
     static func scan(_ data:Data,visit:(Event)->Void)->(generation:Int,incomplete:Int)? {
         guard data.count<=maximumSegmentBytes else{return nil}
@@ -496,6 +510,51 @@ final class InputDiagnostics {
 }
 
 // A fixed atomic generation: callers never wait for a settings/trace lock.
+struct DiagnosticQuitState:Equatable {
+    let detailPhases:Int,errors:Int,observations:Int
+    var hasPending:Bool{detailPhases>0 || errors>0 || observations>0}
+}
+
+/// AppKit termination and updater relaunch use the same nonblocking decision.
+/// A stalled filesystem is unknown, never evidence that the queue is empty.
+final class DiagnosticQuitCoordinator {
+    enum Choice {case cancel,export,discard}
+    var prepare:(@escaping(DiagnosticQuitState)->Void)->Void
+    var resume:()->Void
+    var decide:(DiagnosticQuitState?,@escaping(Choice)->Void)->Void
+    var exportPending:()->Void
+    private(set) var active=false
+    private var generation=0,deciding=false
+    init(prepare:@escaping(@escaping(DiagnosticQuitState)->Void)->Void,resume:@escaping()->Void,
+         decide:@escaping(DiagnosticQuitState?,@escaping(Choice)->Void)->Void,exportPending:@escaping()->Void){
+        self.prepare=prepare;self.resume=resume;self.decide=decide;self.exportPending=exportPending
+    }
+    @discardableResult func request(timeout:Double=3,reply:@escaping(Bool)->Void)->Bool {
+        guard !active else{return false}
+        active=true;deciding=false;generation+=1;let current=generation
+        func finish(_ allowed:Bool,_ export:Bool=false){
+            guard self.active,self.generation==current else{return}
+            self.active=false;self.generation+=1
+            if !allowed{self.resume()}
+            reply(allowed)
+            if export{self.exportPending()}
+        }
+        func completed(_ state:DiagnosticQuitState?){
+            guard self.active,self.generation==current,!self.deciding else{return}
+            self.deciding=true
+            if let state,!state.hasPending{finish(true);return}
+            self.decide(state){choice in
+                DispatchQueue.main.async{
+                    switch choice{case .cancel:finish(false);case .export:finish(false,true);case .discard:finish(true)}
+                }
+            }
+        }
+        prepare{state in DispatchQueue.main.async{completed(state)}}
+        DispatchQueue.main.asyncAfter(deadline:.now()+max(0,timeout)){completed(nil)}
+        return true
+    }
+}
+
 private final class DiagnosticCollectionGate {
     private var value:Int32
     init(_ enabled:Bool){value=enabled ? 1:-1}
@@ -1419,6 +1478,8 @@ final class InputIncidentTrace {
     private var recentRecoveryFailures:[RecoveryFailure]=[]
     private var monitorStatus:MonitorStatus?
     private let gate:DiagnosticCollectionGate
+    private var preparingQuit:Int32=0
+    private var quitGeneration:Int32=0
     private let configured:Bool
     let destinationDirectory:URL?
     var enabled:Bool {gate.generation>0}
@@ -1586,7 +1647,7 @@ final class InputIncidentTrace {
             let budget=storage?.status.writeBudget
             let memorySpace=sharedStore==nil || frameBytes+2*metadata<=captureMemory.limit-captureMemory.status.manual
             let writerSpace=sharedStore?.canAcceptManualCapture(frameBytes:frameBytes,awaitingPosts:postCount,awaitingPostBytes:postBytes) ?? (writer != nil || storage?.readiness.ready==true)
-            let available=enabled && gate.generation==generation && windowSpace && memorySpace && writerSpace
+            let available=enabled && OSAtomicAdd32Barrier(0,&preparingQuit)==0 && gate.generation==generation && windowSpace && memorySpace && writerSpace
             // Reuse the existing retry tick to recheck capacity while disabled.
             // Healthy menus add no polling, disk probes or capture copies.
             manualCapacityLimited=enabled && (!windowSpace || !memorySpace || (!writerSpace && sharedStore?.canRetry==true))
@@ -1847,7 +1908,7 @@ final class InputIncidentTrace {
         requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock(),episode:episode,duration:duration,manual:manual)
     }
     private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double,episode:Int?=nil,duration:Double?=nil,manual:DiagnosticManualCapture?=nil){
-        let generation=gate.generation;guard generation>0,reason != .onsetObservation else{manual?.finish(.unavailable);return}
+        let generation=gate.generation;guard generation>0,OSAtomicAdd32Barrier(0,&preparingQuit)==0,reason != .onsetObservation else{manual?.finish(.unavailable);return}
         let requestID=UUID().uuidString
         var requestContext=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:0,lane:lane.rawValue,kind:reason.rawValue,category:detail,count:0,episode:episode ?? 0)
         requestContext.observedMilliseconds=Int(max(0,(time-origin)*1000));requestContext.requestID=requestID
@@ -2476,10 +2537,35 @@ final class InputIncidentTrace {
                     if previous != sharedStore?.stats.lastFailure{storageObserver?()}
                 }
                 let hasSharedCaptures=(sharedStore?.lastCaptureIncident ?? 0)>0
+                // Freeze unsaved journal events before copying disk segments;
+                // a concurrent successful write may duplicate an event ID, but
+                // must not create a gap between the memory and disk snapshots.
+                let pendingJournal=try destinationDirectory.map{try OperationalDiagnostics.shared.pendingExport(for:$0)} ?? []
                 let journal=destinationDirectory.flatMap{OperationalDiagnostics.shared.storageStatus(for:$0,flush:true)}
                 let hasJournalState=journal.map{$0.pendingErrors>0 || $0.pendingObservations>0 || $0.droppedErrors>0 || $0.droppedObservations>0 || $0.writeFailures>0} ?? false
-                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request,includeEmpty:hasSharedCaptures || hasJournalState)
-                if sharedPresent{try sharedStore?.copySnapshot(into:directory)}
+                var pendingExport=DiagnosticPendingExport()
+                do{try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request,includeEmpty:hasSharedCaptures || hasJournalState || (sharedStore?.stats.pendingBytes ?? 0)>0)}
+                catch{
+                    try request.check()
+                    if let failure=error as? DiagnosticLogExport.Failure,[.noLogs,.insufficientSpace].contains(failure){throw error}
+                    // copyExportSnapshot removes only its own incomplete copy.
+                    // An inaccessible original must not prevent exporting data
+                    // still held by this process to a new review directory.
+                    guard !FileManager.default.fileExists(atPath:directory.path) else{throw error}
+                    try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+                    try DiagnosticSharedStore.writeExport(Data("{\"schema\":1,\"status\":{}}".utf8),to:directory.appendingPathComponent("storage-status.json"))
+                    if reviewMetadata{try DiagnosticSharedStore.writeExport(Data("{}".utf8),to:directory.appendingPathComponent("review-dates.json"))}
+                    pendingExport.unavailableSources.append("legacy-and-journal")
+                }
+                if let sharedStore,sharedPresent || sharedStore.stats.pendingBytes>0 {
+                    let shared=try sharedStore.copyReviewSnapshot(into:directory,request:request)
+                    pendingExport.captures=shared.captures;pendingExport.unavailableSources+=shared.unavailableSources
+                }
+                for (name,data,count) in pendingJournal {
+                    try request.check();try DiagnosticSharedStore.writeExport(data,to:directory.appendingPathComponent(name))
+                    pendingExport.journalFiles[name]=count
+                }
+                try DiagnosticSharedStore.writeExport(try JSONEncoder().encode(pendingExport),to:directory.appendingPathComponent("pending-export.json"))
                 if let journal {
                     let path=directory.appendingPathComponent("critical-storage-status.json")
                     try JSONEncoder().encode(journal).write(to:path,options:.withoutOverwriting)
@@ -2510,21 +2596,42 @@ final class InputIncidentTrace {
     #endif
     // Used by deterministic tests and shutdown only; never from an input callback.
     func flush(){for _ in 0..<4{decisionQueue.sync{};queue.sync{}}}
+    func prepareForQuit(completion:@escaping(DiagnosticQuitState)->Void){
+        _ = OSAtomicCompareAndSwap32Barrier(0,1,&preparingQuit)
+        let generation=OSAtomicIncrement32Barrier(&quitGeneration)
+        decisionQueue.async{[self] in
+            guard OSAtomicAdd32Barrier(0,&quitGeneration)==generation else{return}
+            finishCaptureWindowsForQuit()
+            queue.async{[self] in
+                _ = sharedStore?.retryForQuit()
+                _ = OperationalDiagnostics.shared.flushCritical(timeout:0.25,retryNow:true)
+                let journal=destinationDirectory.flatMap{OperationalDiagnostics.shared.storageStatus(for:$0)}
+                completion(DiagnosticQuitState(detailPhases:sharedStore?.pendingCount ?? 0,errors:journal?.pendingErrors ?? 0,observations:journal?.pendingObservations ?? 0))
+            }
+        }
+    }
+    func cancelQuitPreparation(){
+        _ = OSAtomicIncrement32Barrier(&quitGeneration)
+        _ = OSAtomicCompareAndSwap32Barrier(1,0,&preparingQuit)
+        queue.async{[self] in storageObserver?()}
+    }
+    private func finishCaptureWindowsForQuit(){
+        lock.lock();defer{lock.unlock()}
+        preservePreviousFrame()
+        for window in windows.values.sorted(by:{$0.before.incident<$1.before.incident}) where !window.submitted {
+            if !window.closed {
+                window.closed=true;window.closedMilliseconds=Int(max(0,clock()-origin)*1000);window.endedOnShutdown=true
+                window.after=snapshot(window.before.trigger,timing:DecisionTiming(queueMicros:0,lockWaitMicros:0,contended:false,clipped:false),incident:window.before.incident,phase:1,frames:window.post,requestedFrom:window.requests.first?.milliseconds,requestedThrough:window.requests.last.map{$0.milliseconds+3000})
+            }
+            submitWindow(window)
+        }
+    }
+    func stopAfterQuitPreparation(){timer?.cancel();timer=nil;storageRetryTimer?.cancel();storageRetryTimer=nil;_ = gate.pause()}
     // Normal application termination, after input hooks have stopped. Cancel
     // future observations and let an in-progress storage transaction complete.
     func stopAndFlush(){
         timer?.cancel();timer=nil
-        decisionQueue.sync{
-            lock.lock();defer{lock.unlock()}
-            preservePreviousFrame()
-            for window in windows.values.sorted(by:{$0.before.incident<$1.before.incident}) where !window.submitted {
-                if !window.closed {
-                    window.closed=true;window.closedMilliseconds=Int(max(0,clock()-origin)*1000);window.endedOnShutdown=true
-                    window.after=snapshot(window.before.trigger,timing:DecisionTiming(queueMicros:0,lockWaitMicros:0,contended:false,clipped:false),incident:window.before.incident,phase:1,frames:window.post,requestedFrom:window.requests.first?.milliseconds,requestedThrough:window.requests.last.map{$0.milliseconds+3000})
-                }
-                submitWindow(window)
-            }
-        }
+        decisionQueue.sync{finishCaptureWindowsForQuit()}
         flush();_ = gate.pause()
     }
     deinit{timer?.cancel();storageRetryTimer?.cancel()}
@@ -2688,7 +2795,14 @@ final class DiagnosticWriteBudget {
         self.name=name;self.requiredMarker=requiredMarker
     }
     static func transient(_ error:OperationalFailure)->Bool {
-        [ENOSPC,EDQUOT,EIO,EAGAIN,EINTR,EMFILE,ENFILE,ENOMEM,EBUSY].contains(Int32(clamping:error.domain == .posix ? error.code:error.underlyingPOSIX))
+        // A denied or read-only destination can recover without replacing this
+        // writer. Every retry still runs its ownership/identity checks. Never
+        // reinterpret a policy failure (replacement, corruption, unsafe mode)
+        // as a recoverable errno, even if the numeric values happen to match.
+        guard error.domain != .policy else{return false}
+        let code=Int32(clamping:error.domain == .posix ? error.code:error.underlyingPOSIX)
+        if [ENOSPC,EDQUOT,EIO,EAGAIN,EINTR,EMFILE,ENFILE,ENOMEM,EBUSY,EACCES,EPERM,EROFS].contains(code){return true}
+        return error.domain == .cocoa && [NSFileReadNoPermissionError,NSFileWriteNoPermissionError,NSFileWriteVolumeReadOnlyError].contains(error.code)
     }
     var summary:[String:Int] {
         let v=ledger

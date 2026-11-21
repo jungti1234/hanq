@@ -438,6 +438,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let inputDiagnosticExportItem = NSMenuItem(title:"진단 기록 내보내기…",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
     private(set) var diagnosticReview:DiagnosticReviewController?
+    private(set) var pendingDiagnosticReview:DiagnosticReviewController?
+    var diagnosticQuitPreparer:(@escaping(DiagnosticQuitState)->Void)->Void={InputIncidentTrace.shared.prepareForQuit(completion:$0)}
+    var diagnosticQuitResumer:()->Void={InputIncidentTrace.shared.cancelQuitPreparation()}
+    var diagnosticQuitPresenter:((DiagnosticQuitState?,@escaping(DiagnosticQuitCoordinator.Choice)->Void)->Void)?
+    var diagnosticQuitReply:(Bool)->Void={NSApp.reply(toApplicationShouldTerminate:$0)}
+    private lazy var diagnosticQuit=DiagnosticQuitCoordinator(
+        prepare:{[weak self] completion in self?.diagnosticQuitPreparer(completion)},
+        resume:{[weak self] in self?.diagnosticQuitResumer()},
+        decide:{[weak self] state,reply in self?.showDiagnosticQuit(state,reply:reply)},
+        exportPending:{[weak self] in self?.exportPendingDiagnostics()})
+    private var diagnosticQuitAlert:NSAlert?
+    private var diagnosticQuitChoice:((DiagnosticQuitCoordinator.Choice)->Void)?
     private var hasDiagnosticLogs=false
     let menuStatus = NSMenuItem(title: "준비 중", action: nil, keyEquivalent: "")
 
@@ -1235,6 +1247,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         review.onFeedback={ [weak self] in self?.openFeedback() }
         return review
     }
+    func exportPendingDiagnostics(){
+        if let pendingDiagnosticReview{pendingDiagnosticReview.showWindow(nil);NSApp.activate(ignoringOtherApps:true);return}
+        let review=DiagnosticReviewController(environment:diagnosticReviewEnvironment(),allPending:true)
+        pendingDiagnosticReview=review
+        review.onClose={ [weak self] in self?.pendingDiagnosticReview=nil }
+        review.onFeedback={ [weak self] in self?.openFeedback() }
+        review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
+        review.load(from:InputIncidentTrace.shared)
+    }
+    private func showDiagnosticQuit(_ state:DiagnosticQuitState?,reply:@escaping(DiagnosticQuitCoordinator.Choice)->Void){
+        if let diagnosticQuitPresenter{diagnosticQuitPresenter(state,reply);return}
+        let alert=NSAlert();diagnosticQuitAlert=alert;diagnosticQuitChoice=reply;alert.alertStyle = .informational
+        alert.messageText=state==nil ? "진단 기록 저장을 확인하지 못했어요.":"저장하지 못한 진단 기록이 있어요."
+        let detail=state.map{"상세 구간 \($0.detailPhases)개와 오류·사건 기록 \($0.errors+$0.observations)개가 저장 대기 중입니다.\n"} ?? "저장 상태 확인이 지연되고 있습니다.\n"
+        alert.informativeText=detail+"지금 종료하면 메모리에 남은 진단 기록은 사라집니다.\n계속 사용하거나 대기 기록을 내보낼 수 있습니다."
+        alert.addButton(withTitle:"계속 사용하기")
+        alert.addButton(withTitle:"대기 기록 내보내기…")
+        alert.addButton(withTitle:"저장하지 않고 종료")
+        for (index,button) in alert.buttons.enumerated(){button.target=self;button.action=#selector(chooseDiagnosticQuit(_:));button.tag=index}
+        alert.buttons[0].keyEquivalent="\r";alert.buttons[2].keyEquivalent=""
+        alert.layout();alert.window.center();alert.window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps:true)
+    }
+    @objc private func chooseDiagnosticQuit(_ sender:NSButton){
+        guard let reply=diagnosticQuitChoice else{return}
+        diagnosticQuitChoice=nil;diagnosticQuitAlert?.window.orderOut(nil);diagnosticQuitAlert=nil
+        reply(sender.tag==2 ? .discard:(sender.tag==1 ? .export:.cancel))
+    }
     func feedbackForInputInterruption() {
         guard inputMonitoringNotice.isVisible else { return }
         inputMonitoringNotice.closeNotice()
@@ -1445,6 +1485,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
+        diagnosticQuit.request{[weak self] allowed in self?.diagnosticQuitReply(allowed)} ? .terminateLater:.terminateCancel
+    }
     func applicationWillTerminate(_ notification: Notification) {
         statusIcon.stop()
         updater.stop()
@@ -1454,7 +1497,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stopMapping()
         OperationalDiagnostics.shared.record(.policy(.termination,0))
         _ = OperationalDiagnostics.shared.flushCritical()
-        InputIncidentTrace.shared.stopAndFlush()
+        // The normal termination gate already offered a final bounded save.
+        // Do not hang AppKit indefinitely on a writer stuck in the kernel.
+        InputIncidentTrace.shared.stopAfterQuitPreparation()
         stopKeyboardObservation()
     }
 }
