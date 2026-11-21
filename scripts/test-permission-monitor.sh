@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 source scripts/test-workspace.sh
 stage=$(hanq_test_stage permission-tests)
 trap 'rm -rf "$stage"' EXIT
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Sources/HanQ/FreshPermissionMonitor.swift Sources/HanQ/PermissionProbeChannel.swift Tests/PermissionMonitor/main.swift -o "$stage/permission-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/FreshPermissionMonitor.swift Sources/HanQ/PermissionProbeChannel.swift Tests/PermissionMonitor/main.swift -o "$stage/permission-tests"
 clang Tests/PermissionMonitor/foreign.c -o "$stage/foreign-probe"
 for mode in errors workspace revoked missing-result stalled-launch launch-error wrong-token corrupt-result result-before-error wrong-pid recover no-file process foreign-signature stop; do
   hanq_test_run "$stage/permission-tests" "$mode"

@@ -51,7 +51,7 @@ for operation in 1...10 {
     if operation==10{check(captures.contains{$0.frames.contains{$0.kind == .observationWait && $0.category==10}},"important capture wait also survives in bounded history")}
     measured[String(operation)]=stats.maxLockWaitMicros
 }
-// Post capture is a separate writer acquisition after the 1s boundary.
+// Post capture is a separate writer acquisition after the 3s boundary.
 do {
     let phase0=DispatchSemaphore(value:0),phase1=DispatchSemaphore(value:0),held=DispatchSemaphore(value:0),release=DispatchSemaphore(value:0),done=DispatchSemaphore(value:0),attempted=DispatchSemaphore(value:0)
     let guardLock=NSLock();var calls=0;var captures:[InputIncidentTrace.Capture]=[]
@@ -60,7 +60,7 @@ do {
     guardLock.lock();calls=0;guardLock.unlock()
     Thread{trace.withLockedMetadataForTest{held.signal();release.wait()};done.signal()}.start()
     check(held.wait(timeout:.now()+2) == .success,"post capture metadata held")
-    check(attempted.wait(timeout:.now()+3) == .success,"post capture try-lock actually failed")
+    check(attempted.wait(timeout:.now()+5) == .success,"post capture try-lock actually failed")
     Thread.sleep(forTimeInterval:0.025);release.signal();check(done.wait(timeout:.now()+2) == .success,"post lock released")
     check(phase1.wait(timeout:.now()+2) == .success,"post capture written")
     let post=captures.first{$0.phase==1}!

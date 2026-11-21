@@ -15,6 +15,7 @@ enum OperationalStage:Int,Codable {
     case permissionDenied,permissionUnavailable,permissionRestored,watchdog,transport
     case budgetPersistence=30,storageWrite
     case storagePrepare,storageOwnership,storagePublish,storagePrune,storageEncode,storageStatus
+    case recoveryFailure=40,incidentTrigger,termination,captureDisposition,journalOverflow,storageRead,slowRead
 }
 struct OperationalFailure:Error,Codable,Hashable {
     enum Domain:Int,Codable {case policy=0,posix,cocoa,osStatus,mach,other}
@@ -56,44 +57,65 @@ final class OperationalDiagnostics {
         var lastNanoseconds:UInt64
         var elapsedMilliseconds:Int
         var lastEmittedNanoseconds:UInt64
+        var event:DiagnosticCriticalJournal.Event
     }
     static let shared=OperationalDiagnostics()
     private static let logger=Logger(subsystem:"taek.in.hanq",category:"operations")
     private let lock=NSLock()
     private var entries:[Entry]=[]
     private var evicted=0
-    private var emissionWindow:UInt64=0,emissions=0
+    private var journal:DiagnosticCriticalJournal?
+    private var earlyEvents:[(DiagnosticCriticalJournal.Event,Bool)]=[]
+    private var earlyOverflow=0,earlyObservationOverflow=0
+    private let run=UUID().uuidString
+    private var eventSequence=0
     private let clock:()->UInt64
     private let sink:(Entry)->Void
     init(clock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},
          sink:@escaping (Entry)->Void={entry in
              let value=entry.failure
-             OperationalDiagnostics.logger.error("stage=\(value.stage.rawValue,privacy:.public) domain=\(value.domain.rawValue,privacy:.public) code=\(value.code,privacy:.public) errno=\(value.underlyingPOSIX,privacy:.public) count=\(entry.count,privacy:.public) elapsedMS=\(entry.elapsedMilliseconds,privacy:.public)")
+             OperationalDiagnostics.logger.error("stage=\(value.stage.rawValue,privacy:.public) domain=\(value.domain.rawValue,privacy:.public) code=\(value.code,privacy:.public) errno=\(value.underlyingPOSIX,privacy:.public) event=\(entry.event.sequence,privacy:.public) run=\(entry.event.run,privacy:.public) incident=\(entry.event.context?.incident ?? 0,privacy:.public) count=\(entry.count,privacy:.public) elapsedMS=\(entry.elapsedMilliseconds,privacy:.public)")
          }) {self.clock=clock;self.sink=sink}
-    // At most 64 distinct entries; repeats emit at most once per 30 seconds.
+    func installJournal(_ value:DiagnosticCriticalJournal) {
+        lock.lock();journal=value;let pending=earlyEvents;earlyEvents.removeAll();let lost=earlyOverflow,ordinaryLost=earlyObservationOverflow;earlyOverflow=0;earlyObservationOverflow=0;lock.unlock()
+        for (event,observation) in pending{value.record(event,observation:observation)}
+        if ordinaryLost>0{value.record(.policy(.journalOverflow,2),context:DiagnosticCriticalJournal.Context(trace:run,incident:0,sequence:0,lane:0,kind:0,category:0,count:ordinaryLost,episode:0),observation:true)}
+        if lost>0{value.record(.policy(.journalOverflow,1),context:DiagnosticCriticalJournal.Context(trace:run,incident:0,sequence:0,lane:0,kind:0,category:0,count:lost,episode:0))}
+    }
+    @discardableResult func flushCritical(timeout:Double=0.25)->Bool {
+        lock.lock();let value=journal;lock.unlock();return value?.flush(timeout:timeout) ?? false
+    }
+    // Every failure occurrence reaches OSLog and the compact journal with a
+    // unique event ID. The 64-entry summary is not the event retention policy.
     // No disk write, arbitrary string, or logging of a logger failure here.
-    func record(_ failure:OperationalFailure,elapsedMilliseconds:Int=0) {
+    func record(_ failure:OperationalFailure,elapsedMilliseconds:Int=0,context:DiagnosticCriticalJournal.Context?=nil,observation:Bool=false) {
         let now=clock()
         lock.lock()
+        eventSequence+=1
+        let event=DiagnosticCriticalJournal.Event(run:run,sequence:eventSequence,milliseconds:Int64(Date().timeIntervalSince1970*1000),failure:failure,context:context)
         let index:Int
-        let isNew:Bool
-        if let existing=entries.firstIndex(where:{$0.failure==failure}) {index=existing;isNew=false}
+        if let existing=entries.firstIndex(where:{$0.failure==failure}) {index=existing}
         else {
             if entries.count==64{entries.removeFirst();evicted=min(Int.max-1,evicted)+1}
             entries.append(Entry(failure:failure,count:0,firstNanoseconds:now,lastNanoseconds:now,
-                                 elapsedMilliseconds:0,lastEmittedNanoseconds:now))
-            index=entries.count-1;isNew=true
+                                 elapsedMilliseconds:0,lastEmittedNanoseconds:now,event:event))
+            index=entries.count-1
         }
         entries[index].count=min(Int.max-1,entries[index].count)+1
         entries[index].lastNanoseconds=now
         entries[index].elapsedMilliseconds=max(0,min(elapsedMilliseconds,60_000))
-        let last=entries[index].lastEmittedNanoseconds
-        if now>=emissionWindow,now-emissionWindow>=30_000_000_000{emissionWindow=now;emissions=0}
-        let emit=emissions<8 && (isNew || (now>=last && now-last>=30_000_000_000))
-        if emit{emissions+=1}
+        entries[index].event=event
+        let emit = !observation
         if emit{entries[index].lastEmittedNanoseconds=now}
-        let value=entries[index]
+        let value=entries[index],journal=self.journal
+        if journal==nil {
+            let terminal=failure.stage == .termination
+            let count=earlyEvents.filter{terminal ? $0.0.failure.stage == .termination:($0.1==observation && $0.0.failure.stage != .termination)}.count
+            if count<(terminal ? 16:(observation ? 256:2048)){earlyEvents.append((event,observation))}
+            else if observation{earlyObservationOverflow+=1}else{earlyOverflow+=1}
+        }
         lock.unlock()
+        journal?.record(event,observation:observation)
         if emit{sink(value)}
     }
     func snapshot()->(entries:[Entry],evicted:Int) {
@@ -120,6 +142,266 @@ enum OperationalIO {
             }
             return nil
         }
+    }
+}
+
+// Separate lane writer. Immutable retired segments expire by age; file size
+// only starts a new segment, never evicts a still-retained occurrence.
+final class DiagnosticCriticalLane {
+    struct Context:Codable {
+        let trace:String,incident:Int,sequence:Int,lane:Int,kind:Int,category:Int,count:Int,episode:Int
+        var observedMilliseconds:Int?=nil
+        var requestID:String?=nil
+        var durationMicros:Int?=nil
+        var durationClipped:Bool?=nil
+        var operationID:Int?=nil
+        var beganMilliseconds:Int?=nil
+        var outcome:Int?=nil
+    }
+    struct Event:Codable {
+        let run:String,sequence:Int,milliseconds:Int64,failure:OperationalFailure,context:Context?
+        var valid:Bool {UUID(uuidString:run) != nil && sequence>0 && milliseconds>=0 &&
+            (context.map{UUID(uuidString:$0.trace) != nil && $0.incident>=0 && $0.sequence>=0 && $0.episode>=0} ?? true)}
+    }
+    struct Header:Codable {let schema:Int,generation:Int;var createdMilliseconds:Int64?=nil;var lane:String?=nil;var session:String?=nil}
+    struct Decoded {let generation:Int,events:[Event],incomplete:Int}
+    struct Status:Codable {
+        let pendingErrors:Int,pendingObservations:Int,droppedErrors:Int,droppedObservations:Int
+        let writeFailures:Int,lastErrno:Int,lastPolicy:Int,writtenBytes:Int,rotations:Int
+    }
+    static let filenames=[".critical-events-v2-0.jsonl",".critical-events-v2-1.jsonl"]
+    static let maximumSegmentBytes=4*1024*1024
+    private let queue=DispatchQueue(label:"hanq.diagnostics.critical",qos:.utility)
+    private let lock=NSLock()
+    private let directory:URL,writer:OperationalIO.Write,clock:()->Double,segmentBytes:Int
+    private let run=UUID().uuidString
+    private var nextSequence=0,pending:[(Event,Bool)]=[],scheduled=false
+    private var droppedErrors=0,droppedObservations=0,writeFailures=0,lastErrno=0,lastPolicy=0,rotations=0
+    private var reportedErrors=0,reportedObservations=0
+    private var writtenBytes=0,inFlight:Data?,inFlightOffset=0,inFlightCount=0
+    private var retryAt=0.0,retryDelay=1.0,blocked=false
+    private var directoryIdentity:stat?,lockIdentity:stat?,identities:[Int:stat]=[:]
+    private var current=0,generation=0,descriptor:Int32 = -1,lockFD:Int32 = -1
+    private var currentName="",created=0.0,lastPruned = -Double.infinity
+    private let lane:String,wallClock:()->Double,preserve:Bool
+    private var timer:DispatchSourceTimer?
+    init(directory:URL,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},
+         segmentBytes:Int=DiagnosticCriticalLane.maximumSegmentBytes,lane:String="errors",preserve:Bool=false,wallClock:@escaping ()->Double={Date().timeIntervalSince1970},
+         writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}) {
+        self.directory=directory;self.clock=clock;self.writer=writer;self.lane=lane;self.preserve=preserve;self.wallClock=wallClock
+        self.segmentBytes=max(4096,min(segmentBytes,Self.maximumSegmentBytes))
+        let timer=DispatchSource.makeTimerSource(queue:queue)
+        timer.schedule(deadline:.now()+1,repeating:1)
+        timer.setEventHandler{[weak self] in self?.drain(all:false)}
+        self.timer=timer;timer.resume()
+    }
+    deinit {timer?.cancel();if descriptor>=0{close(descriptor)};if lockFD>=0{close(lockFD)}}
+    func record(_ failure:OperationalFailure,context:Context?=nil,observation:Bool=false) {
+        lock.lock();nextSequence+=1;let sequence=nextSequence;lock.unlock()
+        record(Event(run:run,sequence:sequence,milliseconds:Int64(wallClock()*1000),failure:failure,context:context),observation:observation)
+    }
+    func record(_ event:Event,observation:Bool=false) {
+        lock.lock()
+        let count=pending.reduce(0){$0+($1.1==observation ? 1:0)}
+        if count >= (observation ? 256:2048) {
+            if observation{droppedObservations=min(Int.max-1,droppedObservations)+1}
+            else{droppedErrors=min(Int.max-1,droppedErrors)+1}
+            lock.unlock();return
+        }
+        pending.append((event,observation))
+        let start = !scheduled
+        if start{scheduled=true}
+        lock.unlock()
+        if start{queue.async{[self] in drain(all:false)}}
+    }
+    // Only the waiting caller is bounded. The writer may still be blocked in
+    // the kernel; a safety exit must never wait for it indefinitely.
+    @discardableResult func flush(timeout:Double=0.25)->Bool {
+        let signal=DispatchSemaphore(value:0)
+        queue.async{[self] in drain(all:true);signal.signal()}
+        guard signal.wait(timeout:.now()+timeout) == .success else{return false}
+        lock.lock();defer{lock.unlock()};return pending.isEmpty && droppedErrors==reportedErrors && droppedObservations==reportedObservations
+    }
+    func status()->Status {
+        lock.lock();defer{lock.unlock()}
+        return Status(pendingErrors:pending.filter{!$0.1}.count,pendingObservations:pending.filter{$0.1}.count,
+            droppedErrors:droppedErrors,droppedObservations:droppedObservations,writeFailures:writeFailures,lastErrno:lastErrno,lastPolicy:lastPolicy,writtenBytes:writtenBytes,rotations:rotations)
+    }
+    static func decode(_ data:Data)->Decoded? {
+        guard data.count<=maximumSegmentBytes else{return nil}
+        let lines=data.split(separator:10,omittingEmptySubsequences:false)
+        guard let first=lines.first,let header=try? JSONDecoder().decode(Header.self,from:Data(first)),(header.schema==2 || header.schema==3),header.generation>0,header.generation<9_000_000_000_000_000 else{return nil}
+        var events:[Event]=[],incomplete=0
+        for (offset,line) in lines.dropFirst().enumerated() {
+            if line.isEmpty && offset==lines.count-2{continue}
+            if let event=try? JSONDecoder().decode(Event.self,from:Data(line)),event.valid{events.append(event)}else{incomplete+=1}
+        }
+        return Decoded(generation:header.generation,events:events,incomplete:incomplete)
+    }
+    static func readFiles(_ dir:Int32)throws ->[(String,Data)] {
+        var result:[(String,Data)]=[]
+        for name in try DiagnosticOwnedIO.names(dir).filter({filenames.contains($0) || validName($0)}) {
+            let fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+            if fd<0 {if errno==ENOENT{continue};throw DiagnosticLogExport.Failure.unavailable}
+            defer{close(fd)}
+            var info=stat()
+            guard fstat(fd,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o7777==0o600,
+                  info.st_nlink==1,info.st_size>=0,info.st_size<=maximumSegmentBytes else{throw DiagnosticLogExport.Failure.unavailable}
+            let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:Int(info.st_size)) ?? Data()
+            guard data.count==info.st_size else{throw DiagnosticLogExport.Failure.unavailable}
+            result.append((String(name.dropFirst()),data))
+        }
+        return result
+    }
+    static func validName(_ name:String)->Bool {
+        name.hasPrefix(".critical-") && name.contains("-v3-") && name.hasSuffix(".jsonl") && !name.contains("/")
+    }
+    private func same(_ a:stat,_ b:stat)->Bool {
+        a.st_dev==b.st_dev && a.st_ino==b.st_ino && a.st_size==b.st_size &&
+        a.st_mtimespec.tv_sec==b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec==b.st_mtimespec.tv_nsec &&
+        a.st_ctimespec.tv_sec==b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec==b.st_ctimespec.tv_nsec
+    }
+    private func policyFailure(_ code:Int) {
+        lock.lock();writeFailures+=1;lastErrno=0;lastPolicy=code;lock.unlock();blocked=true
+        Logger(subsystem:"taek.in.hanq",category:"critical-storage").error("criticalStorage policy=\(code,privacy:.public)")
+    }
+    private func failed(_ code:Int32) {
+        lock.lock();writeFailures+=1;lastErrno=Int(code);lock.unlock()
+        Logger(subsystem:"taek.in.hanq",category:"critical-storage").error("criticalStorage errno=\(code,privacy:.public)")
+        if !DiagnosticWriteBudget.transient(.posix(.storageWrite,code)){blocked=true}
+        retryAt=clock()+retryDelay;retryDelay=min(60,retryDelay*2)
+    }
+    private func openDirectory()->Int32? {
+        for path in [directory.deletingLastPathComponent().path,directory.path] {
+            var info=stat()
+            if lstat(path,&info)<0 {
+                guard errno==ENOENT,directoryIdentity==nil else{failed(errno);return nil}
+                if mkdir(path,0o700) != 0 && errno != EEXIST{failed(errno);return nil}
+                guard lstat(path,&info)==0 else{failed(errno);return nil}
+            }
+            guard info.st_mode&S_IFMT==S_IFDIR,info.st_uid==getuid(),info.st_mode&0o077==0 else{policyFailure(1);return nil}
+        }
+        let dir=open(directory.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
+        guard dir>=0 else{failed(errno);return nil}
+        var info=stat()
+        guard fstat(dir,&info)==0 else{let code=errno;close(dir);failed(code);return nil}
+        if let old=directoryIdentity,old.st_dev != info.st_dev || old.st_ino != info.st_ino{close(dir);policyFailure(1);return nil}
+        directoryIdentity=info
+        if lockFD<0 {
+            let fd=openat(dir,".critical-writer-v2.lock",O_RDWR|O_CREAT|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC,0o600)
+            var file=stat()
+            guard fd>=0 else{let code=errno;close(dir);failed(code);return nil}
+            guard fstat(fd,&file)==0,file.st_mode&S_IFMT==S_IFREG,file.st_uid==getuid(),file.st_mode&0o7777==0o600,file.st_nlink==1,
+                  flock(fd,LOCK_EX|LOCK_NB)==0 else{close(fd);close(dir);policyFailure(1);return nil}
+            lockFD=fd;lockIdentity=file
+        }else {
+            var file=stat()
+            guard let old=lockIdentity,fstatat(dir,".critical-writer-v2.lock",&file,AT_SYMLINK_NOFOLLOW)==0,same(old,file) else{close(dir);policyFailure(1);return nil}
+        }
+        return dir
+    }
+    private func prepare(_ dir:Int32)->Bool {
+        if descriptor>=0 {
+            var info=stat()
+            guard let old=identities[current],fstatat(dir,currentName,&info,AT_SYMLINK_NOFOLLOW)==0,same(old,info) else{policyFailure(1);return false}
+            return true
+        }
+        return rotate(dir,to:0)
+    }
+    private func rotate(_ dir:Int32,to index:Int)->Bool {
+        let name=".critical-\(lane)-v3-\(run)-\(generation+1).jsonl"
+        let fd=openat(dir,name,O_WRONLY|O_APPEND|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0o600)
+        guard fd>=0 else{failed(errno);return false}
+        let now=wallClock()
+        let data=(try! JSONEncoder().encode(Header(schema:3,generation:generation+1,createdMilliseconds:Int64(now*1000),lane:lane,session:run)))+Data([10])
+        // Header writes use the real writer: an interrupted initialization is
+        // preserved as a partial file; the next retry creates a new unique file.
+        if let error=OperationalIO.writeAll(data,to:fd,stage:.storageWrite,write:{[self] fd,p,n in
+            let value=writer(fd,p,n);if value>0{lock.lock();writtenBytes+=value;lock.unlock()};return value
+        }){close(fd);generation+=1;failed(Int32(clamping:error.underlyingPOSIX));return false}
+        guard fsync(fd)==0 else{close(fd);generation+=1;failed(errno);return false}
+        var info=stat();guard fstat(fd,&info)==0 else{close(fd);failed(errno);return false}
+        if descriptor>=0{close(descriptor)}
+        descriptor=fd;current=0;identities[0]=info;currentName=name;generation+=1;created=now
+        lock.lock();if generation>1{rotations+=1};lock.unlock()
+        guard fsync(dir)==0 else{failed(errno);return false}
+        return true
+    }
+    private func prune(_ dir:Int32) {
+        guard !preserve,wallClock()-lastPruned>=60 else{return}
+        lastPruned=wallClock()
+        do {
+            for name in try DiagnosticOwnedIO.names(dir) where Self.validName(name) && name != currentName {
+                let url=directory.appendingPathComponent(name)
+                // Unknown or crash-partial files are evidence, never garbage.
+                guard let bytes=try? DiagnosticOwnedIO.read(url,maximum:Self.maximumSegmentBytes),
+                      let first=bytes.split(separator:10).first,
+                      let header=try? JSONDecoder().decode(Header.self,from:Data(first)),header.schema==3,
+                      header.lane==lane,let session=header.session,UUID(uuidString:session) != nil,
+                      name==".critical-\(lane)-v3-\(session)-\(header.generation).jsonl",
+                      let started=header.createdMilliseconds,wallClock()*1000>=Double(started)+72*3600*1000+60000 else{continue}
+                let fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);guard fd>=0 else{continue};defer{close(fd)}
+                let original=try DiagnosticOwnedIO.regular(fd,maximum:Self.maximumSegmentBytes)
+                var actual=stat();guard fstatat(dir,name,&actual,AT_SYMLINK_NOFOLLOW)==0,same(original,actual) else{policyFailure(1);return}
+                if unlinkat(dir,name,0) != 0{failed(errno);return}
+            }
+        }catch{policyFailure(2)}
+    }
+    private func drain(all:Bool) {
+        defer{
+            lock.lock();let more = !pending.isEmpty && !blocked && clock()>=retryAt
+            scheduled=more;lock.unlock()
+            if more{queue.async{[weak self] in self?.drain(all:false)}}
+        }
+        lock.lock();let needed = !pending.isEmpty;lock.unlock()
+        guard !blocked,clock()>=retryAt else{return}
+        if !needed && wallClock()-lastPruned<60{return}
+        guard let dir=openDirectory() else{return};defer{close(dir)}
+        if inFlight==nil,descriptor>=0,wallClock()-created>=60{close(descriptor);descriptor = -1;currentName=""}
+        prune(dir)
+        guard needed,prepare(dir) else{return}
+        repeat {
+            if inFlight == nil {
+                lock.lock();let events=Array(pending.prefix(min(8,max(1,segmentBytes/1024-1))));lock.unlock()
+                guard !events.isEmpty else{return}
+                let encoder=JSONEncoder()
+                var data=Data()
+                for (event,_) in events {
+                    guard let encoded=try? encoder.encode(event),encoded.count<=1024 else{policyFailure(1);return}
+                    data.append(encoded);data.append(10)
+                }
+                guard data.count+512<=segmentBytes else{policyFailure(1);return}
+                if Int(identities[current]?.st_size ?? 0)+data.count>segmentBytes || wallClock()-created>=60 {
+                    guard rotate(dir,to:0) else{return}
+                }
+                inFlight=data;inFlightOffset=0;inFlightCount=events.count
+            }
+            guard let data=inFlight else{return}
+            let failure=data.withUnsafeBytes{bytes->OperationalFailure? in
+                while inFlightOffset<bytes.count {
+                    let count=writer(descriptor,bytes.baseAddress!.advanced(by:inFlightOffset),bytes.count-inFlightOffset)
+                    if count<0 {let code=errno;if code==EINTR{continue};return .posix(.storageWrite,code)}
+                    guard count>0,count<=bytes.count-inFlightOffset else{return .policy(.storageWrite,1)}
+                    inFlightOffset+=count;lock.lock();writtenBytes+=count;lock.unlock()
+                }
+                return nil
+            }
+            var info=stat()
+            guard fstat(descriptor,&info)==0 else{failed(errno);return}
+            identities[current]=info
+            if let failure{failed(Int32(clamping:failure.underlyingPOSIX));return}
+            guard fsync(descriptor)==0 else{failed(errno);return}
+            lock.lock();pending.removeFirst(inFlightCount)
+            for (code,total,reported) in [(1,droppedErrors,reportedErrors),(2,droppedObservations,reportedObservations)] where total>reported {
+                nextSequence+=1
+                let context=Context(trace:run,incident:0,sequence:0,lane:0,kind:0,category:0,count:total-reported,episode:0)
+                pending.append((Event(run:run,sequence:nextSequence,milliseconds:Int64(wallClock()*1000),failure:.policy(.journalOverflow,code),context:context),false))
+            }
+            reportedErrors=droppedErrors;reportedObservations=droppedObservations
+            lock.unlock()
+            inFlight=nil;inFlightCount=0;inFlightOffset=0;retryAt=0;retryDelay=1;lock.lock();lastErrno=0;lock.unlock()
+            if !all{return}
+        }while true
     }
 }
 
@@ -937,6 +1219,7 @@ final class InputIncidentTrace {
     struct CaptureRequest:Codable {
         let trigger:Int;let milliseconds:Int;let afterSequence:Int
         let lane:Int;let detail:Int;let event:Int;let inputOrigin:Int
+        var requestID:String?=nil
     }
     struct CapturePreservation:Codable {
         let deferred:Bool;let requests:[CaptureRequest]
@@ -1025,7 +1308,13 @@ final class InputIncidentTrace {
     struct KeyboardSample: Codable { let status: Int; let bursts: [KeyboardBurst] }
     // Set only by the production app, before the trace starts. Called on the metadata worker.
     var keyboardSample: (([Frame], Int) -> KeyboardSample?)?
+    struct CaptureCoverage:Codable {
+        let requestedFromMilliseconds:Int,requestedThroughMilliseconds:Int
+        let firstAvailableMilliseconds:Int?,lastAvailableMilliseconds:Int?
+        let frames:Int,sequenceGaps:Int,historyEvictions:Int,historyByteEvictions:Int,encodingFailures:Int
+    }
     struct Capture:Encodable {
+        var coverage:CaptureCoverage?=nil
         var keyboardOrigin: KeyboardSample? = nil
         let schema=1
         let runID:String
@@ -1039,7 +1328,7 @@ final class InputIncidentTrace {
         let decisionDelivery:DecisionDelivery
         let observationDelivery:ObservationDelivery
         let captureTiming:DecisionTiming
-        let trigger:Trigger;let incident:Int;let phase:Int;let discardedOldFrames:Int;let frames:[Frame]
+        let trigger:Trigger;let incident:Int;let phase:Int;let discardedOldFrames:Int;var frames:DiagnosticFrameSelection
         // Prior completed writes only. The companion status includes this write.
         var storageBeforeWrite:DiagnosticLogStore.Status?=nil
         var shapeBaselines:[ShapeBaseline]?=nil
@@ -1048,6 +1337,22 @@ final class InputIncidentTrace {
         var clockOriginMicros:Int?=nil
         var recoveryFailures:[RecoveryFailure]?=nil
         var monitorStatus:MonitorStatus?=nil
+        // Conservative admission accounting for the captured dictionaries and
+        // arrays, not an assertion about allocator/RSS bytes. Four slots per
+        // entry cover hash-table spare capacity and value storage.
+        var metadataMemoryCharge:Int {
+            func dictionary<K,V>(_ value:[K:V])->Int{128+value.count*4*(MemoryLayout<K>.stride+MemoryLayout<V>.stride+16)}
+            var result=MemoryLayout<Self>.stride+4096
+            result+=dictionary(skippedEvents)+dictionary(skippedAuxiliary)+dictionary(decisionDelivery.overflow)+dictionary(decisionDelivery.waits)+dictionary(decisionDelivery.coalesced ?? [:])
+            result+=dictionary(observationDelivery.processed)+dictionary(observationDelivery.overflow)+dictionary(observationDelivery.omitted)+dictionary(observationDelivery.coalesced)+dictionary(observationDelivery.waits)
+            if let backlog=captureBacklog{for value in [backlog.requested,backlog.merged,backlog.deferred,backlog.requestOverflow,backlog.windowOverflow,backlog.postOverflow,backlog.discardedOnDisable,backlog.rateSuppressed ?? [:]]{result+=dictionary(value)}}
+            result+=(shapeBaselines?.count ?? 0)*MemoryLayout<ShapeBaseline>.stride*2
+            result+=(capturePreservation?.requests.count ?? 1)*(MemoryLayout<CaptureRequest>.stride+64)*2
+            result+=(recoveryFailures?.count ?? 0)*MemoryLayout<RecoveryFailure>.stride*2
+            result+=(keyboardOrigin?.bursts.count ?? 0)*MemoryLayout<KeyboardBurst>.stride*2
+            result+=(monitorStatus?.transitions.count ?? 0)*MemoryLayout<MonitorSample>.stride*2
+            return max(65536,result)
+        }
     }
     private struct Identity:Hashable {let token:UInt64;let type:UInt32;let domain:Int}
     // Scalar reference only: never retain/read a mutable CGEvent asynchronously.
@@ -1095,18 +1400,19 @@ final class InputIncidentTrace {
     private final class CaptureWindow {
         var before:Capture;var after:Capture?
         var requests:[CaptureRequest];let deferred:Bool;let generation:Int32
-        var post:[Frame]=[];var postOmitted=0;var revision=0;var closed=false;var submitted=false
+        var post:[DiagnosticPackedFrame]=[];var postLease:DiagnosticCaptureLease?;var postOmitted=0;var revision=0;var closed=false;var submitted=false
         var closedMilliseconds:Int?;var endedOnShutdown=false
         init(_ before:Capture,_ request:CaptureRequest,deferred:Bool,generation:Int32){
             self.before=before;self.requests=[request];self.deferred=deferred;self.generation=generation
         }
     }
     private var windows:[Int:CaptureWindow]=[:]
+    private let captureMemory=DiagnosticCaptureMemory()
     private var drainScheduled=false
     private var captureRequested:[Int:Int]=[:],captureMerged:[Int:Int]=[:],captureDeferred:[Int:Int]=[:]
     private var captureRequestOverflow:[Int:Int]=[:],captureWindowOverflow:[Int:Int]=[:],capturePostOverflow:[Int:Int]=[:],captureDiscarded:[Int:Int]=[:]
     private var submittedWindows=0,completedWindows=0
-    private var captureRateSuppressed:[Int:Int]=[:],lastAutomaticKind:[Int:Double]=[:]
+    private var captureRateSuppressed:[Int:Int]=[:]
     private let decisionCapacity:Int
     private let importantCredits:DispatchSemaphore,routineCredits:DispatchSemaphore
     // Fixed scalar counters avoid one async allocation per overflow. Only the
@@ -1119,13 +1425,16 @@ final class InputIncidentTrace {
     private let observationClock:()->UInt64
     private var observationWaits:[Int:DecisionWaitStats]=[:]
     private let storage:DiagnosticLogStore?
+    private let sharedStore:DiagnosticSharedStore?
+    let preservesDiagnostics:Bool
+    private var storageRetryTimer:DispatchSourceTimer?
     private let limitsWrites:Bool
     private let clock:()->Double
     // Default remains the live OS security state; synthetic fixtures inject their state.
     fileprivate let secureInput:()->Bool
     private let callbackCPU:()->UInt64?
     private let origin:Double
-    private var ring:[Frame?]
+    private var ring:DiagnosticFrameHistory
     private var position=0,stored=0,sequence=0,overwritten=0,eventSequence=0
     private var identities:[Identity:Int]=[:]
     private var lastDecisions:[DecisionSite:DecisionReason]=[:]
@@ -1135,7 +1444,8 @@ final class InputIncidentTrace {
     private var fields:[UInt:Int]=[:]
     private var nextField=0,lastEdit = -Double.infinity,lastTrigger = -Double.infinity
     private var captures=0
-    private var reads:[UUID:(id:Int,began:Double)]=[:]
+    private var reads:[UUID:(id:Int,began:Double,lane:Lane)]=[:]
+    private var slowReads=Set<Int>()
     private var readSequence=0
     private var timer:DispatchSourceTimer?
     // The writer drains fixed overflow/omission signals into these legacy
@@ -1144,7 +1454,8 @@ final class InputIncidentTrace {
     private let writer:((Capture)->Void)?
     private var storageObserver:(()->Void)?
     private var lastStorageNotice:Int?
-    init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=4096,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,writer:((Capture)->Void)?=nil){
+    private var acceptedPres=Set<Int>() // Serial writer only; bounded by open windows.
+    init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=65536,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,sharedWriter:OperationalIO.Write?=nil,writer:((Capture)->Void)?=nil){
         self.secureInput=secureInput
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
         eventCredits=DispatchSemaphore(value:self.observationCapacity/2)
@@ -1162,28 +1473,40 @@ final class InputIncidentTrace {
         routineCredits=DispatchSemaphore(value:self.decisionCapacity-important)
         overflowSignals=(destination != nil || writer != nil) ? (0..<310).map{_ in DispatchSemaphore(value:0)}:[]
         self.destinationDirectory=destination
+        self.preservesDiagnostics=archiveDirectory != nil || retention.maximumAutomaticBytes==Int.max
         self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory,requiresBoundedPriorPolicy:boundedStorage,
             writeBudget:persistentOwnership && archiveDirectory==nil && retention.maximumAutomaticBytes != Int.max ? DiagnosticWriteBudget():nil)}
+        let sharedFormat=retention.maximumAutomaticBytes==Int.max || (retention.maximumAutomaticFiles==64 && retention.maximumAutomaticBytes==32*1024*1024 && retention.maximumManualBytes==16*1024*1024)
+        self.sharedStore=writer==nil && !boundedStorage && sharedFormat ? destination.map{DiagnosticSharedStore(directory:$0,preserve:archiveDirectory != nil || retention.maximumAutomaticBytes==Int.max,writer:sharedWriter ?? {Darwin.write($0,$1,$2)})}:nil
         self.limitsWrites=persistentOwnership && archiveDirectory==nil && retention.maximumAutomaticBytes != Int.max
         self.configured=destination != nil || writer != nil;self.gate=DiagnosticCollectionGate(self.configured && initiallyEnabled)
-        self.capacity=max(1,min(capacity,16384));self.clock=clock;self.callbackCPU=callbackCPU;origin=clock();self.writer=writer
-        ring=Array(repeating:nil,count:self.configured ? self.capacity:0)
+        self.capacity=max(1,min(capacity,65536));self.clock=clock;self.callbackCPU=callbackCPU;origin=clock();self.writer=writer
+        ring=DiagnosticFrameHistory(capacity:self.configured && initiallyEnabled ? self.capacity:0)
         if enabled{decisionQueue.async{[self] in
             // Establish ownership and prove an actual write/read on the writer
             // before assigning any capture IDs or accepting test readiness.
             queue.sync {
-                if let token=DiagnosticStorageStartup.token {
+                _ = storage?.verifyReadiness()
+                let sharedReady=sharedStore?.prepare() ?? true
+                if sharedReady,let token=DiagnosticStorageStartup.token {
                     let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID,bounded:boundedStorage))
                     _ = storage?.verifyReadiness(receipt:receipt,name:DiagnosticReadinessReceipt.name(token))
-                }else{_ = storage?.verifyReadiness()}
-                captures=storage?.lastCaptureIncident ?? 0
+                }
+                captures=max(storage?.lastCaptureIncident ?? 0,sharedStore?.lastCaptureIncident ?? 0)
+
             }
         }}
+        if sharedStore != nil {
+            let retry=DispatchSource.makeTimerSource(queue:queue)
+            retry.schedule(deadline:.now()+1,repeating:1)
+            retry.setEventHandler{[weak self] in guard let self,self.enabled || (self.sharedStore?.stats.pendingBytes ?? 0)>0 else{return};_ = self.sharedStore?.drain()}
+            storageRetryTimer=retry;retry.resume()
+        }
     }
     func storageHealth(_ completion:@escaping(DiagnosticStorageHealth)->Void){
         decisionQueue.async{[self] in queue.async{[self] in
-            let readiness=storage?.readiness ?? .unavailable
-            let missing=storage.map{$0.status.unavailable+$0.status.encodingFailures+$0.status.limited+$0.status.statusWriteFailures} ?? 0
+            let readiness=(sharedStore?.stats.lastFailure == nil) ? (storage?.readiness ?? .unavailable):.unavailable
+            let missing=(storage.map{$0.status.unavailable+$0.status.encodingFailures+$0.status.limited+$0.status.statusWriteFailures} ?? 0)+(sharedStore.map{$0.stats.failures+$0.stats.rejected+$0.stats.incompleteFiles} ?? 0)
             let budget=storage?.status.writeBudget
             completion(DiagnosticStorageHealth(readiness:readiness,missingWrites:missing,
                 suppressedWrites:(budget?["suppressedAutomatic"] ?? 0)+(budget?["suppressedManual"] ?? 0)))
@@ -1205,9 +1528,10 @@ final class InputIncidentTrace {
         // OFF counts cancelled protected requests even if publication was queued.
         decisionQueue.async{[self] in queue.async{[self] in
             guard gate.generation==paused else{DispatchQueue.main.async{completion?()};return}
-            if active,configured{_ = storage?.verifyReadiness()}
+            acceptedPres.removeAll()
+            if active,configured{_ = storage?.verifyReadiness();_ = sharedStore?.prepare()}
             else{storage?.withdrawReadiness()}
-            let last=storage?.lastCaptureIncident ?? 0
+            let last=max(storage?.lastCaptureIncident ?? 0,sharedStore?.lastCaptureIncident ?? 0)
             decisionQueue.async{[self] in
                 guard gate.generation==paused else{DispatchQueue.main.async{completion?()};return}
                 lock.lock()
@@ -1215,8 +1539,8 @@ final class InputIncidentTrace {
                     for request in window.requests{captureDiscarded[request.trigger,default:0]+=1}
                 }
                 windows.removeAll();drainScheduled=false
-                ring=Array(repeating:nil,count:configured ? capacity:0);position=0;stored=0
-                reads.removeAll();shapes.removeAll();identities.removeAll();lastDecisions.removeAll();lastOnsetDecisions.removeAll();lastSourceEvidence.removeAll()
+                ring=DiagnosticFrameHistory(capacity:configured && active ? capacity:0);position=0;stored=0
+                reads.removeAll();slowReads.removeAll();shapes.removeAll();identities.removeAll();lastDecisions.removeAll();lastOnsetDecisions.removeAll();lastSourceEvidence.removeAll()
                 fields.removeAll();lastEdit = -Double.infinity;lastTrigger = -Double.infinity
                 lastSpaceDown.removeAll();lastSpaceCapture.removeAll()
                 monitorStatus=nil
@@ -1228,34 +1552,53 @@ final class InputIncidentTrace {
         }}
     }
     private func append(_ lane:Lane,_ kind:Kind,observedAt:Double?=nil,decisionTiming:DecisionTiming?=nil,observationTiming:DecisionTiming?=nil,event:Int=0,edge:Int=0,category:Int=0,inputOrigin:Int=0,consumed:Bool=false,duration:Double=0,count:Int=0,selected:Bool=false,field:Int=0){
+        preservePreviousFrame()
+        ring.trim(now:Int(max(0,(clock()-origin)*1000)))
         sequence+=1
         ring[position]=Frame(sequence:sequence,milliseconds:Int(max(0,(observedAt ?? clock())-origin)*1000),lane:lane,kind:kind,event:event,edge:edge,category:category,inputOrigin:inputOrigin,consumed:consumed,durationMicros:Int(max(0,min(duration,60))*1_000_000),count:count,selected:selected,field:field,decisionTiming:decisionTiming,observationTiming:observationTiming)
         position=(position+1)%capacity
         if stored<capacity{stored+=1}else{overwritten+=1}
-        let frame=ring[(position-1+capacity)%capacity]!
+    }
+    private func preservePreviousFrame(){
+        guard let frame=ring[(position-1+capacity)%capacity],let packet=ring.packet(at:(position-1+capacity)%capacity) else{return}
         for window in windows.values where !window.closed {
-            if window.post.count<capacity{window.post.append(frame)}else{
-                window.postOmitted+=1;capturePostOverflow[window.before.trigger.rawValue,default:0]+=1
+            let after=window.requests.first?.afterSequence ?? 0
+            guard frame.sequence>after,frame.milliseconds<=(window.requests.last?.milliseconds ?? 0)+3000 else{continue}
+            if let previous=window.post.last,previous.sequence==frame.sequence {
+                if previous.data != packet.data {
+                    if sharedStore==nil || window.postLease?.grow(max(0,packet.accountedBytes-previous.accountedBytes))==true{window.post[window.post.count-1]=packet}
+                    else{window.postOmitted+=1;capturePostOverflow[window.before.trigger.rawValue,default:0]+=1}
+                }
+                continue
             }
+            if window.post.count<capacity,(sharedStore==nil || window.postLease?.grow(packet.accountedBytes)==true){window.post.append(packet)}else{window.postOmitted+=1;capturePostOverflow[window.before.trigger.rawValue,default:0]+=1}
         }
     }
-    private func updatePreservedLastFrame(){
-        guard let frame=ring[(position-1+capacity)%capacity] else{return}
-        for window in windows.values where !window.closed && window.post.last?.sequence==frame.sequence {
-            window.post[window.post.count-1]=frame
-        }
-    }
-    private func snapshot(_ reason:Trigger,timing:DecisionTiming,incident:Int,phase:Int=0,frames:[Frame]?=nil)->Capture {
-        let start=(position-stored+capacity)%capacity
-        var value=Capture(runID:runID,skippedEvents:skippedEvents,skippedAuxiliary:skippedAuxiliary,decisionDelivery:DecisionDelivery(capacity:decisionCapacity,overflow:decisionOverflow,waits:decisionWaits,coalesced:decisionCoalesced),observationDelivery:observationSnapshot(),captureTiming:timing,trigger:reason,incident:incident,phase:phase,discardedOldFrames:overwritten,frames:frames ?? (0..<stored).compactMap{ring[(start+$0)%capacity]},shapeBaselines:shapeSnapshot(),captureBacklog:backlogSnapshot())
+    private func updatePreservedLastFrame(){preservePreviousFrame()}
+    private func snapshot(_ reason:Trigger,timing:DecisionTiming,incident:Int,phase:Int=0,frames:[DiagnosticPackedFrame]?=nil,requestedFrom:Int?=nil,requestedThrough:Int?=nil)->Capture {
+        let now=Int(max(0,(clock()-origin)*1000))
+        ring.trim(now:now)
+        let selected=frames.map(DiagnosticFrameSelection.init) ?? ring.selection(from:max(0,now-(reason == .manual ? 60000:10000)),through:now)
+        var value=Capture(runID:runID,skippedEvents:skippedEvents,skippedAuxiliary:skippedAuxiliary,decisionDelivery:DecisionDelivery(capacity:decisionCapacity,overflow:decisionOverflow,waits:decisionWaits,coalesced:decisionCoalesced),observationDelivery:observationSnapshot(),captureTiming:timing,trigger:reason,incident:incident,phase:phase,discardedOldFrames:ring.dropped,frames:selected,shapeBaselines:shapeSnapshot(),captureBacklog:backlogSnapshot())
+        let sequenceGaps=zip(selected.packets,selected.packets.dropFirst()).reduce(0){$0+max(0,$1.1.sequence-$1.0.sequence-1)}
+        value.coverage=CaptureCoverage(requestedFromMilliseconds:requestedFrom ?? max(0,now-(reason == .manual ? 60000:10000)),requestedThroughMilliseconds:requestedThrough ?? now,
+            firstAvailableMilliseconds:selected.packets.first?.milliseconds,lastAvailableMilliseconds:selected.packets.last?.milliseconds,frames:selected.count,sequenceGaps:sequenceGaps,historyEvictions:ring.dropped,historyByteEvictions:ring.byteEvictions,encodingFailures:ring.encodingFailures)
         value.clockOriginMicros=Int(max(0,min(origin*1_000_000,9_000_000_000_000_000)))
         value.recoveryFailures=recentRecoveryFailures.isEmpty ? nil:recentRecoveryFailures
         if reason == .manual, let origin = value.clockOriginMicros, let keyboardSample {
             // Counter drains may lag the loss. Restart comparison after the entire window ages out.
             let missing = lastKeyboardDownLoss.map { clock() - $0 <= 60 } ?? false
-            value.keyboardOrigin = missing ? KeyboardSample(status: 5, bursts: []) : keyboardSample(value.frames, origin)
+            value.keyboardOrigin = missing ? KeyboardSample(status: 5, bursts: []) : (try? value.frames.unpacked()).flatMap{keyboardSample($0,origin)} ?? KeyboardSample(status:5,bursts:[])
         }
         value.monitorStatus=monitorStatus
+        return value
+    }
+    private func criticalContext(incident:Int,episode:Int?=nil,observedTime:Double?=nil)->DiagnosticCriticalJournal.Context {
+        let previous=ring.isEmpty ? nil:ring[(position-1+capacity)%capacity]
+        var value=DiagnosticCriticalJournal.Context(trace:runID,incident:incident,sequence:sequence,lane:previous?.lane.rawValue ?? 0,
+                     kind:previous?.kind.rawValue ?? 0,category:previous?.category ?? 0,count:previous?.count ?? 0,
+                     episode:episode ?? previous?.onsetObservation?.episode ?? 0)
+        value.observedMilliseconds=Int(max(0,((observedTime ?? clock())-origin)*1000))
         return value
     }
     func recoveryFailure(rollback:Bool,site:String,reason:String){
@@ -1263,7 +1606,7 @@ final class InputIncidentTrace {
     }
     func recordFailure(action:Int,site:String,reason:String){
         let generation=gate.generation
-        guard generation>0,!secureInput() else{return}
+        let detailed=generation>0 && !secureInput()
         let time=clock()
         let stage=String(site.prefix(while:{$0 != "("}))
         let condition=reason.hasPrefix(stage+"_") ? String(reason.dropFirst(stage.count+1)):reason
@@ -1272,7 +1615,10 @@ final class InputIncidentTrace {
                                    condition:RecoveryFailure.conditions.firstIndex(of:reason) ?? RecoveryFailure.conditions.firstIndex(of:condition) ?? 0)
         // A terminal transition is rare and must survive a full event/observation queue.
         decisionQueue.async{[self] in
-            guard gate.generation==generation else{return}
+            if action != 4 {
+                OperationalDiagnostics.shared.record(.policy(.recoveryFailure,action*100000+record.stage*1000+record.condition),context:detailed ? criticalContext(incident:0,observedTime:time):nil)
+            }
+            guard detailed,gate.generation==generation else{return}
             lock.lock();defer{lock.unlock()}
             // A normal direct switch can recur often. Keep only its latest
             // eligibility decision so it cannot evict a series of real failures.
@@ -1305,7 +1651,7 @@ final class InputIncidentTrace {
         }
     }
     private func backlogSnapshot()->CaptureBacklog {
-        CaptureBacklog(automaticCapacity:16,manualCapacity:4,requestCapacityPerTrigger:16,requestsPerWindow:32,
+        CaptureBacklog(automaticCapacity:sharedStore==nil ? 16:128,manualCapacity:4,requestCapacityPerTrigger:16,requestsPerWindow:32,
             pendingAutomatic:windows.values.filter{$0.before.trigger != .manual}.count,pendingManual:windows.values.filter{$0.before.trigger == .manual}.count,
             requested:captureRequested,merged:captureMerged,deferred:captureDeferred,requestOverflow:captureRequestOverflow,windowOverflow:captureWindowOverflow,postOverflow:capturePostOverflow,discardedOnDisable:captureDiscarded,submittedWindows:submittedWindows,completedWindows:completedWindows,rateSuppressed:limitsWrites ? captureRateSuppressed:nil)
     }
@@ -1401,16 +1747,21 @@ final class InputIncidentTrace {
             if op==1{skippedEvents[lane,default:0]+=count}else{skippedAuxiliary[lane,default:0]+=count}
         }
     }
-    private func requestCapture(_ reason:Trigger,lane:Lane = .main,detail:Int=0,event:CGEvent?=nil){
+    private func requestCapture(_ reason:Trigger,lane:Lane = .main,detail:Int=0,event:CGEvent?=nil,episode:Int?=nil,duration:Double?=nil){
         guard enabled else{return}
-        requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock())
+        requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock(),episode:episode,duration:duration)
     }
-    private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double){
-        let generation=gate.generation;guard generation>0 else{return}
-        // Bounded admission only. The input caller never waits for a lock, copies
+    private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double,episode:Int?=nil,duration:Double?=nil){
+        let generation=gate.generation;guard generation>0,reason != .onsetObservation else{return}
+        let requestID=UUID().uuidString
+        var requestContext=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:0,lane:lane.rawValue,kind:reason.rawValue,category:detail,count:0,episode:episode ?? 0)
+        requestContext.observedMilliseconds=Int(max(0,(time-origin)*1000));requestContext.requestID=requestID
+        if let duration,duration.isFinite,duration>=0{requestContext.durationMicros=Int(min(duration,60)*1_000_000);requestContext.durationClipped=duration>60}
+        OperationalDiagnostics.shared.record(.policy(.incidentTrigger,reason.rawValue),context:requestContext,observation:true)
+        // Bounded admission only. The input caller never copies
         // a ring, encodes JSON, or performs file I/O.
         guard captureCredits[reason.rawValue-1].wait(timeout:.now()) == .success else{
-            captureOverflowSignals[reason.rawValue-1].signal();return
+            captureOverflowSignals[reason.rawValue-1].signal();OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:requestContext,observation:true);return
         }
         let enqueued=observationClock()
         decisionQueue.async{[self] in
@@ -1421,43 +1772,46 @@ final class InputIncidentTrace {
                 guard gate.generation==generation else{return}
                 mergeObservationCounters(counters)
                 let (identifier,origin)=reference.map{eventIdentity($0)} ?? (0,0)
-                let request=CaptureRequest(trigger:reason.rawValue,milliseconds:Int(max(0,time-self.origin)*1000),afterSequence:sequence,lane:lane.rawValue,detail:detail,event:identifier,inputOrigin:origin)
+                var request=CaptureRequest(trigger:reason.rawValue,milliseconds:Int(max(0,time-self.origin)*1000),afterSequence:sequence,lane:lane.rawValue,detail:detail,event:identifier,inputOrigin:origin)
+                request.requestID=requestID
                 captureRequested[reason.rawValue,default:0]+=1
-                if !limitsWrites,reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
+                if sharedStore==nil,!limitsWrites,reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
                     window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
                     let code=reason == window.before.trigger ? reason.rawValue%8:reason.rawValue%8+8
                     observationOmitted[observationCode(.capture,.main,code),default:0]+=1
                     scheduleClose(window);return
                 }
-                if limitsWrites,reason != .manual {
-                    // Suppression is counted by trigger, not presented as a
-                    // merged incident. A different trigger is independently admitted.
-                    let key=reason.rawValue
-                    if let last=lastAutomaticKind[key],time-last<10 {
-                        captureRateSuppressed[key,default:0]+=1;return
-                    }
-                    lastAutomaticKind[key]=time
-                }
+                captures+=1
+                var coreContext=criticalContext(incident:captures,episode:episode,observedTime:time);coreContext.requestID=requestID
+                // The request occurrence was recorded before detailed admission.
                 let pending=windows.values.filter{($0.before.trigger == .manual)==(reason == .manual)}.count
-                guard pending<(reason == .manual ? 4:16) else{
-                    captureWindowOverflow[reason.rawValue,default:0]+=1;return
+                guard pending<(reason == .manual ? 4:(sharedStore==nil ? 16:128)) else{
+                    captureWindowOverflow[reason.rawValue,default:0]+=1
+                    OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:coreContext,observation:true);return
                 }
                 // An older frozen pre must reach the ordered store first. A newer
                 // immediate pre would retire that older automatic incident.
                 let intervalBlocked=clock()-lastTrigger<10
                 let orderBlocked=windows.values.contains{$0.deferred && !$0.submitted}
-                let deferred = !limitsWrites && reason != .manual && (intervalBlocked || orderBlocked)
+                let deferred = sharedStore==nil && !limitsWrites && reason != .manual && (intervalBlocked || orderBlocked)
                 if deferred{
                     captureDeferred[reason.rawValue,default:0]+=1
                     observationOmitted[observationCode(.capture,.main,reason.rawValue%8+8),default:0]+=1
                 }else if reason != .manual{lastTrigger=clock()}
-                captures+=1
                 let before=snapshot(reason,timing:timing,incident:captures)
+                let preLease=sharedStore==nil ? nil:captureMemory.lease(before.frames.packets.reduce(before.metadataMemoryCharge){$0+$1.accountedBytes},manual:reason == .manual)
+                let postLease=sharedStore==nil ? nil:captureMemory.lease(before.metadataMemoryCharge,manual:reason == .manual)
+                guard sharedStore==nil || (preLease != nil && postLease != nil) else {
+                    captureWindowOverflow[reason.rawValue,default:0]+=1
+                    OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:coreContext,observation:true);return
+                }
                 let window=CaptureWindow(before,request,deferred:deferred,generation:generation)
+                window.postLease=postLease
                 windows[captures]=window
-                if !deferred && !limitsWrites {
+                if !deferred {
                     var value=before;value.capturePreservation=preservation(window);value.captureBacklog=backlogSnapshot()
-                    queue.async{[self] in if gate.generation==generation{write(value)}}
+                    queue.async{[self] in if gate.generation==generation{write(value,lease:preLease)}}
+                    if sharedStore != nil{window.before.frames=DiagnosticFrameSelection([])}
                 }
                 scheduleClose(window)
             }
@@ -1469,18 +1823,20 @@ final class InputIncidentTrace {
     private func scheduleClose(_ window:CaptureWindow){
         window.revision+=1
         let revision=window.revision,incident=window.before.incident,generation=window.generation
-        decisionQueue.asyncAfter(deadline:.now()+1){[self] in
+        decisionQueue.asyncAfter(deadline:.now()+3){[weak self] in
+            guard let self else{return}
             guard gate.generation==generation,let current=windows[incident],!current.closed,current.revision==revision else{return}
             closeWindow(current)
         }
     }
     private func closeWindow(_ window:CaptureWindow){
+        preservePreviousFrame()
         collectDecisionOverflow();collectCaptureOverflow();let counters=collectObservationCounters()
         let time=clock(),enqueued=observationClock()
         withObservation(.capture,.main,window.before.trigger.rawValue%8+24,observedAt:time,enqueuedAt:enqueued){timing in
             guard gate.generation==window.generation,windows[window.before.incident] === window else{return}
             mergeObservationCounters(counters);window.closed=true;window.closedMilliseconds=Int(max(0,clock()-origin)*1000)
-            window.after=snapshot(window.before.trigger,timing:timing,incident:window.before.incident,phase:1,frames:window.post)
+            window.after=snapshot(window.before.trigger,timing:timing,incident:window.before.incident,phase:1,frames:window.post,requestedFrom:window.requests.first?.milliseconds,requestedThrough:window.requests.last.map{$0.milliseconds+3000})
             if window.deferred{drainDeferred()}else{submitWindow(window)}
         }
     }
@@ -1508,14 +1864,20 @@ final class InputIncidentTrace {
         let value=preservation(window),backlog=backlogSnapshot()
         before.capturePreservation=value;before.captureBacklog=backlog
         after.capturePreservation=value;after.captureBacklog=backlog
-        let writeBefore=window.deferred,generation=window.generation,incident=before.incident
+        if sharedStore != nil,window.postLease?.grow(after.metadataMemoryCharge) != true {
+            capturePostOverflow[before.trigger.rawValue,default:0]+=max(1,after.frames.count)
+            var context=DiagnosticCriticalJournal.Context(trace:runID,incident:before.incident,sequence:sequence,lane:0,kind:before.trigger.rawValue,category:1,count:after.frames.count,episode:0);context.requestID=window.requests.first?.requestID
+            OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:context,observation:true)
+            windows.removeValue(forKey:before.incident);return
+        }
+        let writeBefore=window.deferred,generation=window.generation,incident=before.incident,postLease=window.postLease
         queue.async{[self] in
             let attemptedPost=gate.generation==generation
             if limitsWrites {
-                if attemptedPost{writePair(before,after)}
+                if attemptedPost{write(after,lease:postLease)}
             }else {
                 if writeBefore,attemptedPost{write(before)}
-                if attemptedPost{write(after)}
+                if attemptedPost{write(after,lease:postLease)}
             }
             decisionQueue.async{[self] in
                 lock.lock();defer{lock.unlock()}
@@ -1527,28 +1889,35 @@ final class InputIncidentTrace {
             }
         }
     }
-    private func write(_ capture:Capture){
+    private func write(_ capture:Capture,lease:DiagnosticCaptureLease?=nil){
         if let writer{writer(capture);return}
+        if let sharedStore {
+            _ = sharedStore.save(capture,lease:lease)
+            storageObserver?()
+            return
+        }
         guard let storage else{return}
+        var result=0
+        defer {
+            if capture.phase==1{acceptedPres.remove(capture.incident)}
+            let frame=capture.frames.last
+            OperationalDiagnostics.shared.record(.policy(.captureDisposition,result),context:.init(trace:capture.runID,incident:capture.incident,
+                sequence:frame?.sequence ?? 0,lane:frame?.lane.rawValue ?? 0,kind:frame?.kind.rawValue ?? 0,
+                category:capture.phase,count:frame?.count ?? 0,episode:frame?.onsetObservation?.episode ?? 0),observation:true)
+            if result != lastStorageNotice || !storage.readiness.ready || capture.trigger == .manual {
+                lastStorageNotice=result;storageObserver?()
+            }
+        }
+        if limitsWrites,capture.phase==1,!acceptedPres.contains(capture.incident){result=7;return}
+        if let rejection=storage.rejectBeforeEncoding(automatic:capture.trigger != .manual,phase:capture.phase){result=rejection.rawValue;return}
         var annotated=capture;annotated.storageBeforeWrite=storage.status
         do {
             let data=try JSONEncoder().encode(annotated)
-            _ = storage.save(data,incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual)
-        } catch {storage.encodingFailed(incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual)}
-        let result=storage.status.lastResult
-        if result != lastStorageNotice || !storage.readiness.ready || capture.trigger == .manual {
-            lastStorageNotice=result;storageObserver?()
+            result=storage.save(data,incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual).rawValue
+            if capture.phase==0,result==DiagnosticLogStore.Result.saved.rawValue{acceptedPres.insert(capture.incident)}
+        } catch {
+            storage.encodingFailed(incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual);result=5
         }
-    }
-    private func writePair(_ before:Capture,_ after:Capture) {
-        if let writer{writer(before);writer(after);return}
-        guard let storage else{return}
-        var pre=before,post=after
-        pre.storageBeforeWrite=storage.status;post.storageBeforeWrite=storage.status
-        do {
-            _ = storage.savePair(try JSONEncoder().encode(pre),try JSONEncoder().encode(post),incident:pre.incident,automatic:pre.trigger != .manual)
-        }catch{storage.encodingFailed(incident:pre.incident,phase:0,automatic:pre.trigger != .manual)}
-        storageObserver?()
     }
     // No extra event tag, AX call, event copy, key post or source selection.
     func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0,started:CallbackStart?=nil){
@@ -1586,7 +1955,7 @@ final class InputIncidentTrace {
             }
         }
         // Preserve the request even when event queue capacity was exhausted.
-        if duration>=0.05{requestCapture(.callbackDelay,lane:lane,event:event)}
+        if duration>=0.05{requestCapture(.callbackDelay,lane:lane,event:event,duration:duration)}
     }
     // Called only while holding the trace lock; never writes to the event.
     private func eventIdentity(_ event:CGEvent,type:CGEventType)->(Int,Int) {
@@ -1727,7 +2096,7 @@ final class InputIncidentTrace {
             guard reads.count<readCapacity else {
                 observationOverflow[observationCode(.readStart,lane),default:0]+=1;return
             }
-            readSequence+=1;reads[span.token]=(readSequence,span.began)
+            readSequence+=1;reads[span.token]=(readSequence,span.began,lane)
             append(lane,.read,observedAt:span.began,observationTiming:timing,event:readSequence,category:1)
             }
         }
@@ -1746,6 +2115,11 @@ final class InputIncidentTrace {
             guard let read=reads.removeValue(forKey:span.token) else {
                 observationOmitted[observationCode(.readEnd,lane),default:0]+=1;return
             }
+            if duration>=0.05 {
+                if slowReads.insert(read.id).inserted{recordSlowRead(id:read.id,lane:lane,began:read.began,observed:read.began,phase:1)}
+                recordSlowRead(id:read.id,lane:lane,began:read.began,observed:ended,phase:2,outcome:outcome)
+            }
+            slowReads.remove(read.id)
             append(lane,.read,observedAt:ended,observationTiming:timing,event:read.id,category:2,duration:duration)
             ring[(position-1+capacity)%capacity]?.workEvidence=work
             ring[(position-1+capacity)%capacity]?.readOutcome=outcome
@@ -1753,7 +2127,13 @@ final class InputIncidentTrace {
             updatePreservedLastFrame()
             }
         }
-        if gate.generation==span.generation,duration>=0.05{requestCapture(.axDelay,lane:lane)}
+        if gate.generation==span.generation,duration>=0.05{requestCapture(.axDelay,lane:lane,duration:duration)}
+    }
+    private func recordSlowRead(id:Int,lane:Lane,began:Double,observed:Double,phase:Int,outcome:ReadOutcome?=nil){
+        var context=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:sequence,lane:lane.rawValue,kind:Kind.read.rawValue,category:phase,count:1,episode:0)
+        context.operationID=id;context.beganMilliseconds=Int(max(0,(began-origin)*1000));context.observedMilliseconds=Int(max(0,(observed-origin)*1000))
+        let duration=max(0,observed-began);context.durationMicros=Int(min(duration,60)*1_000_000);context.durationClipped=duration>60;context.outcome=outcome?.rawValue
+        OperationalDiagnostics.shared.record(.policy(.slowRead,phase),context:context,observation:true)
     }
     func start(){
         guard enabled,timer==nil else{return}
@@ -1764,7 +2144,11 @@ final class InputIncidentTrace {
             guard let self,self.gate.generation==generation else{return}
             let time=self.clock()
             _ = self.submit(.timer,.main,observedAt:time){[self] _ in
-                if self.reads.values.contains(where:{time-$0.began>=0.1}){self.requestCapture(.axDelay)}
+                self.ring.trim(now:Int(max(0,(time-self.origin)*1000)))
+                for read in self.reads.values where time-read.began>=0.1 && self.slowReads.insert(read.id).inserted {
+                    self.recordSlowRead(id:read.id,lane:read.lane,began:read.began,observed:time,phase:1)
+                }
+                if let read=self.reads.values.filter({time-$0.began>=0.1}).min(by:{$0.began<$1.began}){self.requestCapture(.axDelay,lane:read.lane,duration:time-read.began)}
             }
         }
         timer=source;source.resume()
@@ -1884,7 +2268,7 @@ final class InputIncidentTrace {
             append(.onset,.onsetObservation,observedAt:time,observationTiming:timing)
             ring[(position-1+capacity)%capacity]?.onsetObservation=value
             updatePreservedLastFrame()
-            if capture{requestCapture(.onsetObservation,lane:.onset)}
+            if capture{requestCapture(.onsetObservation,lane:.onset,episode:value.episode)}
         }
     }
     func sourceEvidence(_ action:SourceEvidenceAction,_ value:SourceEvidence,event:CGEvent?=nil){
@@ -1979,12 +2363,23 @@ final class InputIncidentTrace {
         queue.async{[self] in
             do {
                 guard let storage else{throw DiagnosticLogExport.Failure.noLogs}
-                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request)
+                let sharedPresent=sharedStore.map{FileManager.default.fileExists(atPath:$0.directory.path)} ?? false
+                if sharedPresent{_ = sharedStore?.prepare()}
+                let hasSharedCaptures=(sharedStore?.lastCaptureIncident ?? 0)>0
+                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request,includeEmpty:hasSharedCaptures)
+                if sharedPresent{try sharedStore?.copySnapshot(into:directory)}
                 completion(.success(()))
             }catch{completion(.failure(error))}
         }
     }
     #if HANQ_DIAGNOSTIC_TESTING
+    func replayFrameForTest(_ frame:Frame){decisionQueue.sync{
+        preservePreviousFrame();ring.trim(now:frame.milliseconds);ring[position]=frame
+        position=(position+1)%capacity;sequence=frame.sequence;stored=min(capacity,stored+1)
+    }}
+    func sharedStatsForTest()->DiagnosticSharedStore.Stats?{queue.sync{sharedStore?.stats}}
+    func historyBytesForTest()->Int{decisionQueue.sync{ring.accountedBytes}}
+    func captureMemoryForTest()->DiagnosticCaptureMemory.Status{captureMemory.status}
     func captureForTest(_ reason:Trigger){requestCapture(reason)}
     func flushCaptureWorkerForTest(){decisionQueue.sync{}}
     func finishCaptureWindowsForTest(){decisionQueue.sync{for window in windows.values where !window.closed{closeWindow(window)}}}
@@ -1999,17 +2394,18 @@ final class InputIncidentTrace {
         timer?.cancel();timer=nil
         decisionQueue.sync{
             lock.lock();defer{lock.unlock()}
+            preservePreviousFrame()
             for window in windows.values.sorted(by:{$0.before.incident<$1.before.incident}) where !window.submitted {
                 if !window.closed {
                     window.closed=true;window.closedMilliseconds=Int(max(0,clock()-origin)*1000);window.endedOnShutdown=true
-                    window.after=snapshot(window.before.trigger,timing:DecisionTiming(queueMicros:0,lockWaitMicros:0,contended:false,clipped:false),incident:window.before.incident,phase:1,frames:window.post)
+                    window.after=snapshot(window.before.trigger,timing:DecisionTiming(queueMicros:0,lockWaitMicros:0,contended:false,clipped:false),incident:window.before.incident,phase:1,frames:window.post,requestedFrom:window.requests.first?.milliseconds,requestedThrough:window.requests.last.map{$0.milliseconds+3000})
                 }
                 submitWindow(window)
             }
         }
         flush();_ = gate.pause()
     }
-    deinit{timer?.cancel()}
+    deinit{timer?.cancel();storageRetryTimer?.cancel()}
 }
 enum DiagnosticLogExport {
     enum Failure:LocalizedError {
@@ -2155,14 +2551,22 @@ final class DiagnosticWriteBudget {
     private let writer:OperationalIO.Write
     private var ledger:Ledger?
     private var identity:stat?
-    private var failed=false
+    private var failed=false,permanentFailure=false
+    private var retryAt=0.0,retryDelay=1.0
+    private let retryClock:()->Double
+    private let name:String,requiredMarker:String
     private(set) var lastFailure:OperationalFailure?
     private(set) var suppressedAutomatic=0,suppressedManual=0,persistenceFailures=0
     private(set) var actualBytes=0
-    private static let name=".write-budget-v1.ledger"
     init(limits:Limits=Limits(),clock:@escaping ()->Double={Date().timeIntervalSince1970},
+         retryClock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},
+         name:String=".write-budget-v1.ledger",requiredMarker:String=".automatic-ownership-v1.index",
          writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}) {
-        self.limits=limits;self.clock=clock;self.writer=writer
+        self.limits=limits;self.clock=clock;self.retryClock=retryClock;self.writer=writer
+        self.name=name;self.requiredMarker=requiredMarker
+    }
+    static func transient(_ error:OperationalFailure)->Bool {
+        [ENOSPC,EDQUOT,EIO,EAGAIN,EINTR,EMFILE,ENFILE,ENOMEM,EBUSY].contains(Int32(clamping:error.domain == .posix ? error.code:error.underlyingPOSIX))
     }
     var summary:[String:Int] {
         let v=ledger
@@ -2176,22 +2580,29 @@ final class DiagnosticWriteBudget {
     }
     private func fault(_ error:OperationalFailure)->Bool {
         lastFailure=error
-        failed=true;persistenceFailures=min(persistenceFailures,Int.max-1)+1
+        failed=true;permanentFailure = !Self.transient(error)
+        retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
+        persistenceFailures=min(persistenceFailures,Int.max-1)+1
         OperationalDiagnostics.shared.record(error);return false
     }
     private func prepare(_ dir:Int32)->Bool {
-        if failed{return false};if ledger != nil{return true}
+        if failed {
+            guard !permanentFailure,retryClock()>=retryAt else{return false}
+            failed=false
+        }
+        lastFailure=nil
+        if ledger != nil{return true}
         let now=clock();guard now.isFinite,now>=0 else{return fault(.policy(.budgetPersistence,1))}
-        let fd=openat(dir,Self.name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+        let fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
         if fd<0 {
             let code=errno;guard code==ENOENT else{return fault(.posix(.budgetPersistence,code))}
             // A ledger missing from an upgraded store is damage, not new credit.
-            let index=openat(dir,".automatic-ownership-v1.index",O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+            let index=openat(dir,requiredMarker,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
             if index>=0 {
                 defer{close(index)}
                 guard let data=try? FileHandle(fileDescriptor:index,closeOnDealloc:false).read(upToCount:8*1024*1024+1),
                       let object=try? JSONSerialization.jsonObject(with:data) as? [String:Any],
-                      object["writeBudgetRequired"] as? Bool != true else{return fault(.policy(.budgetPersistence,2))}
+                      (object["writeBudgetRequired"] as? Bool != true && requiredMarker == ".automatic-ownership-v1.index") else{return fault(.policy(.budgetPersistence,2))}
             }else if errno != ENOENT{return fault(.posix(.budgetPersistence,errno))}
             ledger=Ledger(hour:now,day:now,last:now);return true
         }
@@ -2210,6 +2621,16 @@ final class DiagnosticWriteBudget {
         left.st_dev==right.st_dev && left.st_ino==right.st_ino && left.st_size==right.st_size &&
         left.st_mtimespec.tv_sec==right.st_mtimespec.tv_sec && left.st_mtimespec.tv_nsec==right.st_mtimespec.tv_nsec &&
         left.st_ctimespec.tv_sec==right.st_ctimespec.tv_sec && left.st_ctimespec.tv_nsec==right.st_ctimespec.tv_nsec
+    }
+    var waitingForRecovery:Bool{failed && (permanentFailure || retryClock()<retryAt)}
+    func rejectExhaustedEvent()->Bool {
+        guard let value=ledger else{return false}
+        let wall=clock();guard wall.isFinite,wall>=0 else{return false}
+        let now=max(value.last,wall)
+        let blocked=(now-value.hour<3600 && value.eventsHour>=limits.automaticEventsHour) ||
+            (now-value.day<86400 && value.eventsDay>=limits.automaticEventsDay)
+        if blocked{suppressedAutomatic=min(suppressedAutomatic,Int.max-1)+1}
+        return blocked
     }
     func reserve(_ bytes:Int,automatic:Bool,event:Bool,dir:Int32)->Bool {
         guard bytes>=0,bytes<=Int.max-4096,prepare(dir) else{return false}
@@ -2233,26 +2654,32 @@ final class DiagnosticWriteBudget {
         guard let data=try? JSONEncoder().encode(value),data.count<=4096 else{return fault(.policy(.budgetPersistence,4))}
         if let identity {
             var current=stat()
-            guard fstatat(dir,Self.name,&current,AT_SYMLINK_NOFOLLOW)==0,same(identity,current) else{return fault(.policy(.budgetPersistence,5))}
+            guard fstatat(dir,name,&current,AT_SYMLINK_NOFOLLOW)==0,same(identity,current) else{return fault(.policy(.budgetPersistence,5))}
         }
-        let name=".budget-"+UUID().uuidString
-        let fd=openat(dir,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
+        // Charge the attempted transaction in memory BEFORE I/O. A failed or
+        // partially written reservation is never refunded on a later retry.
+        ledger=value
+        let temporary=".budget-"+UUID().uuidString
+        let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
         guard fd>=0 else{return fault(.posix(.budgetPersistence,errno))}
-        defer{close(fd);unlinkat(dir,name,0)}
+        defer{close(fd);unlinkat(dir,temporary,0)}
         if let failure=OperationalIO.writeAll(data,to:fd,stage:.budgetPersistence,write:{[self] fd,p,n in
             let count=writer(fd,p,n);if count>0{actualBytes+=count};return count
         }){return fault(failure)}
         guard fsync(fd)==0 else{return fault(.posix(.budgetPersistence,errno))}
         if identity == nil {
-            guard linkat(dir,name,dir,Self.name,0)==0 else{return fault(.posix(.budgetPersistence,errno))}
+            guard linkat(dir,temporary,dir,name,0)==0 else{return fault(.posix(.budgetPersistence,errno))}
         }else {
-            guard renameat(dir,name,dir,Self.name)==0 else{return fault(.posix(.budgetPersistence,errno))}
+            guard renameat(dir,temporary,dir,name)==0 else{return fault(.posix(.budgetPersistence,errno))}
         }
-        guard fsync(dir)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        // Remember OUR published inode even if the directory sync fails. A
+        // retry must neither mistake our replacement for tampering nor reload
+        // older credit. External replacements still fail the identity check.
+        if identity == nil{guard unlinkat(dir,temporary,0)==0 else{return fault(.posix(.budgetPersistence,errno))}}
         var info=stat();guard fstat(fd,&info)==0 else{return fault(.posix(.budgetPersistence,errno))}
-        // Initial link temporarily has two names; unlink before remembering ctime.
-        if identity == nil{guard unlinkat(dir,name,0)==0,fstat(fd,&info)==0 else{return fault(.posix(.budgetPersistence,errno))}}
-        identity=info;ledger=value;return true
+        identity=info
+        guard fsync(dir)==0 else{return fault(.posix(.budgetPersistence,errno))}
+        ledger=value;lastFailure=nil;retryDelay=1;return true
     }
 }
 
@@ -2301,6 +2728,9 @@ final class DiagnosticLogStore {
     private var statusFile:File?
     private var failureStage=0,failureErrno:Int32=0
     private let writeBudget:DiagnosticWriteBudget?
+    private let payloadWriter:OperationalIO.Write
+    private let retryClock:()->Double
+    private var retryAt=0.0,retryDelay=1.0,transientStorageFailure=false,repairOwnership=false
     private var writeCredit=0,budgetAutomatic=true,reservationActive=false
     private var reservationFailure:OperationalFailure?
     private(set) var actualWrittenBytes=0
@@ -2308,7 +2738,11 @@ final class DiagnosticLogStore {
     private(set) var readiness=DiagnosticStorageReadiness.notChecked
     private var readinessReceipt:File?
     private func storageFault(_ stage:OperationalStage,_ code:Int32=0,policy:Int=1)->Bool {
-        OperationalDiagnostics.shared.record(code == 0 ? .policy(stage,policy):.posix(stage,code));return false
+        let failure:OperationalFailure=code == 0 ? .policy(stage,policy):.posix(stage,code)
+        if DiagnosticWriteBudget.transient(failure) {
+            transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
+        }
+        OperationalDiagnostics.shared.record(failure);return false
     }
     private func failed(_ stage:Int,_ code:Int32=0)->Result {
         failureStage=stage;failureErrno=code
@@ -2321,7 +2755,10 @@ final class DiagnosticLogStore {
     var usage:Usage {Usage(files:groups.reduce(0){$0+$1.files.count},bytes:groups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     var manualUsage:Usage {Usage(files:manualGroups.reduce(0){$0+$1.files.count},bytes:manualGroups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     private(set) var lastResult:Result?
-    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,requiresBoundedPriorPolicy:Bool=false,writeBudget:DiagnosticWriteBudget?=nil){
+    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,requiresBoundedPriorPolicy:Bool=false,writeBudget:DiagnosticWriteBudget?=nil,
+         retryClock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},
+         writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}){
+        self.payloadWriter=writer;self.retryClock=retryClock
         self.directory=directory;self.policy=policy;self.persistentOwnership=persistentOwnership
         self.archiveDirectory=archiveDirectory
         self.requiresBoundedPriorPolicy=requiresBoundedPriorPolicy
@@ -2472,6 +2909,31 @@ final class DiagnosticLogStore {
     private static func digest(_ data:Data)->String {SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()}
     private(set) var lastCaptureIncident=0
     func prepareOwnership(){
+        if ownershipPrepared,!ownershipHealthy,transientStorageFailure {
+            guard retryClock()>=retryAt else{return}
+            transientStorageFailure=false
+            if repairOwnership {
+                // Repair only this still-owned in-memory transaction. Reloading
+                // an older index here would lose a published capture or refund
+                // pruning. Changed/missing evidence is never adopted or erased.
+                guard let dir=openDirectory() else{return};defer{close(dir)}
+                guard groups.allSatisfy({$0.files.allSatisfy{owned($0,dir)}}),
+                      manualGroups.allSatisfy({$0.files.allSatisfy{owned($0,dir)}}),
+                      ownershipFile.map({owned($0,dir)}) ?? true,
+                      statusFile.map({owned($0,dir)}) ?? true else{return}
+                if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
+                guard reserveWrite(metadataAllowance(),automatic:budgetAutomatic,event:false) else{
+                    if let failure=reservationFailure,DiagnosticWriteBudget.transient(failure){transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)}
+                    return
+                }
+                reservationActive=limitsWrites
+                defer{reservationActive=false;writeCredit=0}
+                guard writeStatus(),persistOwnership(dir) else{return}
+                ownershipHealthy=true;repairOwnership=false;retryDelay=1
+                return
+            }
+            ownershipPrepared=false
+        }
         if requiresBoundedPriorPolicy && !persistentOwnership {
             ownershipPrepared=true;ownershipHealthy=false;return
         }
@@ -2760,15 +3222,27 @@ final class DiagnosticLogStore {
         let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
         guard fd>=0 else{return storageFault(.storageOwnership,errno)};defer{close(fd);unlinkat(dir,temporary,0)}
         guard writeAll(data,fd) else{return false}
+        guard fsync(fd)==0 else{return storageFault(.storageOwnership,errno)}
         if let old=ownershipFile {
             guard owned(old,dir) else{return storageFault(.storageOwnership,policy:3)}
             guard renameat(dir,temporary,dir,ownershipName)==0 else{return storageFault(.storageOwnership,errno)}
         }else{guard linkat(dir,temporary,dir,ownershipName,0)==0,unlinkat(dir,temporary,0)==0 else{return storageFault(.storageOwnership,errno)}}
         var info=stat();guard fstat(fd,&info)==0 else{return storageFault(.storageOwnership,errno)}
-        ownershipFile=File(name:ownershipName,phase:0,identity:info);return true
+        ownershipFile=File(name:ownershipName,phase:0,identity:info)
+        guard fsync(dir)==0 else{return storageFault(.storageOwnership,errno)}
+        return true
     }
 
+    func rejectBeforeEncoding(automatic:Bool,phase:Int)->Result? {
+        if transientStorageFailure,retryClock()<retryAt{return .unavailable}
+        if writeBudget?.waitingForRecovery==true{return .unavailable}
+        if automatic,phase==0,writeBudget?.rejectExhaustedEvent()==true {
+            status.writeBudget=writeBudget?.summary;lastResult = .limit;return .limit
+        }
+        return nil
+    }
     @discardableResult func save(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
+        if transientStorageFailure,retryClock()<retryAt{return rejectedRecoveryDelay(incident:incident,phase:phase,automatic:automatic)}
         budgetAutomatic=automatic
         if limitsWrites,!reservationActive {
             prepareOwnership()
@@ -2783,6 +3257,7 @@ final class DiagnosticLogStore {
     // Reserve both encoded phases before either becomes visible. Reservation
     // failures update memory only; there is no deferred catch-up write queue.
     @discardableResult func savePair(_ before:Data,_ after:Data,incident:Int,automatic:Bool)->Result {
+        if transientStorageFailure,retryClock()<retryAt{return rejectedRecoveryDelay(incident:incident,phase:0,automatic:automatic)}
         prepareOwnership();budgetAutomatic=automatic
         guard ownershipHealthy else{lastResult = .unavailable;return .unavailable}
         let retainedLimit=automatic ? policy.maximumAutomaticBytes:policy.maximumManualBytes
@@ -2821,6 +3296,13 @@ final class DiagnosticLogStore {
         finishAttempt(incident:incident,phase:phase,automatic:automatic,result:4,began:DispatchTime.now().uptimeNanoseconds,persist:false)
         invalidateReadiness();return .unavailable
     }
+    private func rejectedRecoveryDelay(incident:Int,phase:Int,automatic:Bool)->Result {
+        // Keep the actual failure from readiness/publishing visible during
+        // backoff. This rejected request must not write status or reset errno.
+        lastResult = .unavailable
+        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:4,began:DispatchTime.now().uptimeNanoseconds,persist:false)
+        return .unavailable
+    }
     private func saveReserved(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
         let began=DispatchTime.now().uptimeNanoseconds
         let previousStatusFailures=status.statusWriteFailures
@@ -2828,7 +3310,10 @@ final class DiagnosticLogStore {
         let result=publish(data,incident:incident,phase:phase,automatic:automatic)
         lastResult=result
         finishAttempt(incident:incident,phase:phase,automatic:automatic,result:result.rawValue,began:began)
-        if result != .saved || !ownershipHealthy || status.statusWriteFailures>previousStatusFailures{invalidateReadiness()}
+        if result != .saved || !ownershipHealthy || status.statusWriteFailures>previousStatusFailures{
+            invalidateReadiness()
+            if result == .saved{lastResult = .unavailable;return .unavailable}
+        }else{readiness = .ready;retryDelay=1;transientStorageFailure=false}
         return result
     }
     func encodingFailed(incident:Int,phase:Int,automatic:Bool){
@@ -2867,7 +3352,10 @@ final class DiagnosticLogStore {
                 ownershipFailed = !persistOwnership(dir);close(dir)
             }else{ownershipFailed=true}
             if ownershipFailed {
-                ownershipHealthy=false
+                ownershipHealthy=false;repairOwnership=true
+                if let failure=writeBudget?.lastFailure,DiagnosticWriteBudget.transient(failure){
+                    transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
+                }
                 if !statusFailed{status.statusWriteFailures+=1}
             }
         }
@@ -2894,6 +3382,7 @@ final class DiagnosticLogStore {
         guard fd>=0 else{return storageFault(.storageStatus,errno)}
         defer{close(fd);unlinkat(dir,temporary,0)}
         guard writeAll(data,fd) else{return false}
+        guard fsync(fd)==0 else{return storageFault(.storageStatus,errno)}
         if let old=statusFile {
             guard owned(old,dir) else{return storageFault(.storageStatus,policy:3)}
             guard renameat(dir,temporary,dir,statusName)==0 else{return storageFault(.storageStatus,errno)}
@@ -2902,21 +3391,27 @@ final class DiagnosticLogStore {
         }
         var info=stat();guard fstat(fd,&info)==0 else{return storageFault(.storageStatus,errno)}
         statusFile=File(name:statusName,phase:0,identity:info,digest:Self.digest(data))
+        guard fsync(dir)==0 else{return storageFault(.storageStatus,errno)}
         return true
     }
     private func writeAll(_ data:Data,_ fd:Int32)->Bool {
         let standalone=limitsWrites && !reservationActive
         defer{if standalone{writeCredit=0}}
         if limitsWrites {
-            if standalone {guard reserveWrite(data.count,automatic:budgetAutomatic,event:false) else{return false}}
+            if standalone {guard reserveWrite(data.count,automatic:budgetAutomatic,event:false) else{
+                if let failure=reservationFailure,DiagnosticWriteBudget.transient(failure){
+                    transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
+                }
+                return false
+            }}
             guard data.count<=writeCredit else{OperationalDiagnostics.shared.record(.policy(.storageWrite,1));return false}
             writeCredit-=data.count
         }
         if let failure=OperationalIO.writeAll(data,to:fd,stage:.storageWrite,write:{[self] fd,p,n in
-            let count=Darwin.write(fd,p,n);if count>0{actualWrittenBytes+=count};return count
+            let count=payloadWriter(fd,p,n);if count>0{actualWrittenBytes+=count};return count
         }) {
-            OperationalDiagnostics.shared.record(failure)
-            failureErrno=Int32(failure.underlyingPOSIX);errno=failureErrno
+            _ = storageFault(.storageWrite,Int32(clamping:failure.underlyingPOSIX))
+            failureErrno=Int32(clamping:failure.underlyingPOSIX);errno=failureErrno
             return false
         }
         return true
@@ -2925,14 +3420,16 @@ final class DiagnosticLogStore {
         if persistentOwnership {
             let parent=directory.deletingLastPathComponent().path;var p=stat()
             if lstat(parent,&p) != 0 {
-                guard errno==ENOENT,mkdir(parent,S_IRWXU)==0 else{_ = failed(2,errno);return nil}
+                guard errno==ENOENT else{_ = failed(2,errno);return nil}
+                if mkdir(parent,S_IRWXU) != 0 && errno != EEXIST{_ = failed(2,errno);return nil}
             }
             guard lstat(parent,&p)==0 else{_ = failed(2,errno);return nil}
             guard p.st_mode&S_IFMT==S_IFDIR,p.st_uid==getuid(),p.st_mode&0o077==0 else{_ = failed(2);return nil}
         }
         var info=stat()
         if lstat(directory.path,&info) != 0 {
-            guard errno==ENOENT,directoryIdentity==nil,mkdir(directory.path,S_IRWXU)==0 else{_ = failed(2,errno);return nil}
+            guard errno==ENOENT,directoryIdentity==nil else{_ = failed(2,errno);return nil}
+            if mkdir(directory.path,S_IRWXU) != 0 && errno != EEXIST{_ = failed(2,errno);return nil}
         } else {guard (info.st_mode & S_IFMT)==S_IFDIR,info.st_uid==getuid(),(info.st_mode & 0o077)==0 else{_ = failed(2);return nil}}
         let dir=open(directory.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
         guard dir>=0 else{_ = failed(2,errno);return nil}
@@ -2953,13 +3450,14 @@ final class DiagnosticLogStore {
         var info=stat()
         return fstatat(fd,file.name,&info,AT_SYMLINK_NOFOLLOW)==0 && matches(file.identity,info)
     }
-    func copyExportSnapshot(to destination:URL,reviewMetadata:Bool=false,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),availableBytes:(()->UInt64?)?=nil)throws {
+    func copyExportSnapshot(to destination:URL,reviewMetadata:Bool=false,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),availableBytes:(()->UInt64?)?=nil,includeEmpty:Bool=false)throws {
         try request.check()
         prepareOwnership()
         guard ownershipHealthy,let dir=openDirectory() else{throw DiagnosticLogExport.Failure.unavailable}
         defer{close(dir)}
         let captures=(groups+manualGroups).flatMap{$0.files}
-        guard !captures.isEmpty else{throw DiagnosticLogExport.Failure.noLogs}
+        let critical=try DiagnosticCriticalJournal.readFiles(dir)
+        guard includeEmpty || !captures.isEmpty || !critical.isEmpty else{throw DiagnosticLogExport.Failure.noLogs}
         try FileManager.default.createDirectory(at:destination,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
         var completed=false
         defer{if !completed{try? FileManager.default.removeItem(at:destination)}}
@@ -3000,6 +3498,11 @@ final class DiagnosticLogStore {
             guard fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
             request.report(.copying,index+1,captures.count)
+        }
+        for (name,data) in critical {
+            let path=destination.appendingPathComponent(name)
+            try data.write(to:path,options:.withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
         }
         if let data=try? JSONEncoder().encode(StatusDocument(status:status)) {
             let path=destination.appendingPathComponent("storage-status.json")
@@ -3059,7 +3562,7 @@ final class DiagnosticLogStore {
         let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
         guard fd>=0 else{return failed(4,errno)}
         defer{close(fd);unlinkat(dir,temporary,0)}
-        guard writeAll(data,fd),linkat(dir,temporary,dir,filename,0)==0 else{return failed(4,errno)}
+        guard writeAll(data,fd),fsync(fd)==0,linkat(dir,temporary,dir,filename,0)==0 else{return failed(4,errno)}
         var info=stat()
         guard unlinkat(dir,temporary,0)==0,fstat(fd,&info)==0 else{let code=errno;unlinkat(dir,filename,0);return failed(4,code)}
         let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data),header:DiagnosticReviewCaptureHeader.read(data))

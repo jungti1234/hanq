@@ -6,7 +6,7 @@ stage=$(hanq_test_stage recovery-app)
 trap 'rm -rf "$stage"' EXIT
 app="$stage/HanQRecoveryTest.app"
 mkdir -p "$app/Contents/MacOS"
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Sources/HanQ/PermissionRecovery.swift Tests/RecoveryApp/main.swift -o "$app/Contents/MacOS/HanQRecoveryTest"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/PermissionRecovery.swift Tests/RecoveryApp/main.swift -o "$app/Contents/MacOS/HanQRecoveryTest"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

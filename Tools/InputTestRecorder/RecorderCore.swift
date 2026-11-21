@@ -404,15 +404,16 @@ struct RecorderStorageDocument:Codable {
 
 struct RecorderCaptureRequest:Codable {
     let trigger:Int;let milliseconds:Int;let afterSequence:Int;let lane:Int;let detail:Int;let event:Int;let inputOrigin:Int
+    var requestID:String?=nil
     var valid:Bool{
-        (1...8).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...31).contains(detail) && event>=0 && (0...3).contains(inputOrigin) &&
+        (requestID.map{UUID(uuidString:$0) != nil} ?? true) && (1...8).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...31).contains(detail) && event>=0 && (0...3).contains(inputOrigin) &&
         (trigger != 6 || (event==0 && inputOrigin==0 && ((lane==4 && ((1...6).contains(detail) || detail==10)) || (lane==3 && (7...9).contains(detail))))) && (trigger != 7 || ((1...5).contains(lane) && (1...4).contains(detail) && event>0 && (1...3).contains(inputOrigin))) && (trigger != 8 || (lane==3 && detail==0 && event==0 && inputOrigin==0))
     }
 }
 struct RecorderCapturePreservation:Codable {
     let deferred:Bool;let requests:[RecorderCaptureRequest];let postCapacity:Int;let postOmittedFrames:Int;let closed:Bool
     let closedMilliseconds:Int?;let endedOnShutdown:Bool
-    var valid:Bool{!requests.isEmpty && requests.count<=32 && requests.allSatisfy{$0.valid} && (1...16384).contains(postCapacity) && postOmittedFrames>=0 && (closed == (closedMilliseconds != nil)) && (closedMilliseconds ?? 0)>=0 && (!endedOnShutdown || closed)}
+    var valid:Bool{!requests.isEmpty && requests.count<=32 && requests.allSatisfy{$0.valid} && (1...65536).contains(postCapacity) && postOmittedFrames>=0 && (closed == (closedMilliseconds != nil)) && (closedMilliseconds ?? 0)>=0 && (!endedOnShutdown || closed)}
 }
 struct RecorderCaptureBacklog:Codable {
     let automaticCapacity:Int;let manualCapacity:Int;let requestCapacityPerTrigger:Int;let requestsPerWindow:Int
@@ -422,7 +423,7 @@ struct RecorderCaptureBacklog:Codable {
     let rateSuppressed:[String:Int]?
     static let keys:Set<String>=["automaticCapacity","manualCapacity","requestCapacityPerTrigger","requestsPerWindow","pendingAutomatic","pendingManual","requested","merged","deferred","requestOverflow","windowOverflow","postOverflow","discardedOnDisable","submittedWindows","completedWindows"]
     var valid:Bool{
-        automaticCapacity==16 && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...16).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable,rateSuppressed ?? [:]].allSatisfy{d in d.count<=8 && d.allSatisfy{e in Int(e.key).map{(1...8).contains($0) && String($0)==e.key} == true && e.value>0}}
+        [16,128].contains(automaticCapacity) && manualCapacity==4 && requestCapacityPerTrigger==16 && requestsPerWindow==32 && (0...automaticCapacity).contains(pendingAutomatic) && (0...4).contains(pendingManual) && submittedWindows>=0 && (0...submittedWindows).contains(completedWindows) && [requested,merged,deferred,requestOverflow,windowOverflow,postOverflow,discardedOnDisable,rateSuppressed ?? [:]].allSatisfy{d in d.count<=8 && d.allSatisfy{e in Int(e.key).map{(1...8).contains($0) && String($0)==e.key} == true && e.value>0}}
     }
 }
 struct RecorderMonitorSample:Codable {
@@ -447,6 +448,7 @@ struct RecorderMonitorStatus:Codable {
     }
 }
 struct RecorderTrace: Codable {
+    var coverage:[String:Int]?=nil
     let schema: Int
     let runID:String?
     let clockOriginMicros:Int?
@@ -526,9 +528,9 @@ struct RecorderTrace: Codable {
     }
 
     static func decode(_ data: Data) throws -> RecorderTrace {
-        guard data.count <= 4 * 1024 * 1024,
+        guard data.count <= 16 * 1024 * 1024,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog","keyboardOrigin"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
+              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog","keyboardOrigin","coverage"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
               let rows = object["frames"] as? [[String: Any]], rows.count <= 16384 else { throw RecorderError.invalidTrace }
         if let raw = object["keyboardOrigin"] {
             func integer(_ raw: Any?, in range: ClosedRange<Int>) -> Int? {
@@ -557,8 +559,11 @@ struct RecorderTrace: Codable {
                       outcome == 0 || (outcome == 1 ? d == q : d < q) else { throw RecorderError.invalidTrace }
             }
         }
+        if let coverage=object["coverage"] {
+            guard let v=coverage as? [String:Any],Set(v.keys).subtracting(["firstAvailableMilliseconds","lastAvailableMilliseconds"])==Set(["requestedFromMilliseconds","requestedThroughMilliseconds","frames","sequenceGaps","historyEvictions","historyByteEvictions","encodingFailures"]),v.values.allSatisfy({($0 as? NSNumber).map{CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue>=0 && $0.doubleValue==Double($0.int64Value)} ?? false}) else{throw RecorderError.invalidTrace}
+        }
         if let value=object["capturePreservation"] {
-            guard let v=value as? [String:Any],Set(v.keys).subtracting(["closedMilliseconds"])==Set(["deferred","requests","postCapacity","postOmittedFrames","closed","endedOnShutdown"]),let requests=v["requests"] as? [[String:Any]],requests.allSatisfy({Set($0.keys)==Set(["trigger","milliseconds","afterSequence","lane","detail","event","inputOrigin"])}) else{throw RecorderError.invalidTrace}
+            guard let v=value as? [String:Any],Set(v.keys).subtracting(["closedMilliseconds"])==Set(["deferred","requests","postCapacity","postOmittedFrames","closed","endedOnShutdown"]),let requests=v["requests"] as? [[String:Any]],requests.allSatisfy({Set($0.keys).subtracting(["requestID"])==Set(["trigger","milliseconds","afterSequence","lane","detail","event","inputOrigin"])}) else{throw RecorderError.invalidTrace}
         }
         if let value=object["captureBacklog"] {
             guard let v=value as? [String:Any],Set(v.keys).subtracting(["rateSuppressed"])==RecorderCaptureBacklog.keys,
@@ -705,6 +710,15 @@ final class RecorderSession {
     private var ended = false
     private(set) var storageStatuses=0, rejectedStorageStatuses=0
     private let baseline: Set<String>
+    static func sourceEntries(_ source:URL)throws->[String]{
+        var names=try FileManager.default.contentsOfDirectory(atPath:source.path)
+        let shared=source.appendingPathComponent("Shared-v1")
+        if FileManager.default.fileExists(atPath:shared.path){
+            let fd=try directoryFD(shared);defer{close(fd)}
+            names += try FileManager.default.contentsOfDirectory(atPath:shared.path).filter(DiagnosticArchiveReader.validName).map{"Shared-v1/"+$0}
+        }
+        return names
+    }
 
     static func directoryFD(_ url: URL) throws -> Int32 {
         let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -719,7 +733,7 @@ final class RecorderSession {
     init(source: URL, outputRoot: URL, product: [String: Any]) throws {
         self.source = source
         sourceFD = try Self.directoryFD(source)
-        baseline = Set((try? FileManager.default.contentsOfDirectory(atPath: source.path)) ?? [])
+        baseline = Set(try Self.sourceEntries(source))
         do {
             try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let rootFD = try Self.directoryFD(outputRoot); close(rootFD)
@@ -762,28 +776,39 @@ final class RecorderSession {
         let verify = try Self.directoryFD(source); defer { close(verify) }
         var old = stat(), current = stat()
         guard fstat(sourceFD, &old) == 0, fstat(verify, &current) == 0, old.st_dev == current.st_dev, old.st_ino == current.st_ino else { throw RecorderError.invalidDirectory }
-        for name in try FileManager.default.contentsOfDirectory(atPath: source.path) {
-            guard name.range(of: "^incident-[0-9]+-[01]-[0-9A-Fa-f-]{36}\\.json$", options: .regularExpression) != nil,
-                  !baseline.contains(name), !seen.contains(name) else { continue }
-            guard copied < 128, bytes < 64 * 1024 * 1024 else { throw RecorderError.limit }
-            let fd = openat(sourceFD, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-            guard fd >= 0 else { seen.insert(name); rejected += 1; continue }; defer { close(fd) }
-            var info = stat()
-            guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(), info.st_mode & 0o077 == 0,
-                  info.st_size > 0, info.st_size <= 4 * 1024 * 1024 else { seen.insert(name); rejected += 1; continue }
-            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-            let data = try handle.read(upToCount: 4 * 1024 * 1024 + 1) ?? Data()
-            let trace: RecorderTrace
-            do { trace = try RecorderTrace.decode(data) }
-            catch { seen.insert(name); rejected += 1; continue }
-            let sanitized = try JSONEncoder().encode(trace)
-            guard bytes + sanitized.count <= 64 * 1024 * 1024 else { throw RecorderError.limit }
-            try Self.write(sanitized, to: directory.appendingPathComponent("incidents").appendingPathComponent(name))
-            seen.insert(name); copied += 1; bytes += sanitized.count
-            builds.insert(trace.build)
-            if trace.trigger == 1 && trace.phase == 0 { try record("hanq_manual_snapshot", scenario: scenario) }
+        for name in try Self.sourceEntries(source) {
+            let shared=name.hasPrefix("Shared-v1/") && DiagnosticArchiveReader.validName(String(name.dropFirst(10)))
+            guard shared || name.range(of:"^incident-[0-9]+-[01]-[0-9A-Fa-f-]{36}\\.json$",options:.regularExpression) != nil else{continue}
+            guard !baseline.contains(name),!seen.contains(name) else{continue}
+            guard copied<128,bytes<64*1024*1024 else{throw RecorderError.limit}
+            let data:Data,outputName:String
+            do {
+                if shared {
+                    let directory=source.appendingPathComponent("Shared-v1"),file=String(name.dropFirst(10))
+                    let fd=try Self.directoryFD(directory);defer{close(fd)}
+                    var before=stat(),after=stat();guard fstat(fd,&before)==0 else{throw RecorderError.invalidDirectory}
+                    let header=try DiagnosticArchiveReader.readHeader(directory.appendingPathComponent(file)).0
+                    if header.role==1{seen.insert(name);continue}
+                    data=try DiagnosticArchiveReader.normalized(file,in:directory)
+                    guard lstat(directory.path,&after)==0,before.st_dev==after.st_dev,before.st_ino==after.st_ino else{throw RecorderError.invalidDirectory}
+                    outputName="incident-\(header.incident)-\(header.phase)-"+String(file.dropFirst(7).dropLast(7))+".json"
+                }else {
+                    let fd=openat(sourceFD,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+                    guard fd>=0 else{throw RecorderError.invalidDirectory};defer{close(fd)}
+                    var info=stat()
+                    guard fstat(fd,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,info.st_size>0,info.st_size<=16*1024*1024 else{throw RecorderError.invalidDirectory}
+                    data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:16*1024*1024+1) ?? Data();outputName=name
+                }
+                let trace=try RecorderTrace.decode(data),sanitized=try JSONEncoder().encode(trace)
+                guard bytes+sanitized.count<=64*1024*1024 else{throw RecorderError.limit}
+                try Self.write(sanitized,to:directory.appendingPathComponent("incidents").appendingPathComponent(outputName))
+                seen.insert(name);copied+=1;bytes+=sanitized.count;builds.insert(trace.build)
+                if trace.trigger==1 && trace.phase==0{try record("hanq_manual_snapshot",scenario:scenario)}
+            }catch RecorderError.limit{throw RecorderError.limit}
+            catch{seen.insert(name);rejected+=1;continue}
         }
     }
+
     private func collectStorageStatuses()throws {
         let verify=try Self.directoryFD(source);defer{close(verify)}
         var old=stat(),current=stat()

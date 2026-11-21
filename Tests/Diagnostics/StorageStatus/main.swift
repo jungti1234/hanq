@@ -40,7 +40,9 @@ check(store.save(bytes(20),incident:7,phase:0,automatic:true) == .unavailable,"c
 check(try document(dir).status.unavailable==1 && document(dir).status.lastFailureStage==3,"ownership failure distinguished from byte limit")
 check(try Data(contentsOf:owned)==bytes(21),"externally replaced file retained")
 let replacement=bytes(3);try fm.removeItem(at:statusPath);try replacement.write(to:statusPath)
-check(store.save(bytes(1),incident:8,phase:0,automatic:false) == .saved,"companion refusal does not stop manual evidence")
+check(store.save(bytes(1),incident:8,phase:0,automatic:false) == .unavailable,"companion failure cannot acknowledge a fully durable capture")
+let partialManual=names(dir).first{$0.lastPathComponent.hasPrefix("incident-8-0-")}!
+check(try Data(contentsOf:partialManual)==bytes(1),"published manual payload survives its companion failure")
 check(store.status.statusWriteFailures==1,"companion failure counted in memory")
 check(try Data(contentsOf:statusPath)==replacement,"changed companion never overwritten")
 let recoveredDir=root.appendingPathComponent("recovery")

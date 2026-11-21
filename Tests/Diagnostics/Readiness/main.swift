@@ -69,7 +69,7 @@ let published=DispatchSemaphore(value:0)
 trace.observeStorage{published.signal()}
 trace.mark()
 check(published.wait(timeout:.now()+3) == .success,"manual save completion notifies UI")
-check((try FileManager.default.contentsOfDirectory(atPath:traceParent.appendingPathComponent("incidents").path)).contains{$0.hasPrefix("incident-") && $0.hasSuffix(".json")},"UI completion is sent after an actual incident exists")
+check((try FileManager.default.contentsOfDirectory(atPath:traceParent.appendingPathComponent("incidents/Shared-v1").path)).contains{DiagnosticSharedStore.validName($0)},"UI completion is sent after an actual incident exists")
 trace.stopAndFlush()
 #if HANQ_DIAGNOSTIC_TESTING
 let automaticParent=try folder("automatic-status-failure"),automaticDirectory=automaticParent.appendingPathComponent("incidents",isDirectory:true)
@@ -82,8 +82,7 @@ automaticTrace.captureForTest(.callbackDelay);automaticTrace.flush()
 check(automaticPublished.wait(timeout:.now()) == .success,"initial automatic save notifies export state")
 automaticTrace.finishCaptureWindowsForTest();automaticTrace.flush()
 while automaticPublished.wait(timeout:.now()) == .success {}
-let statusName=try FileManager.default.contentsOfDirectory(atPath:automaticDirectory.path).first{$0.hasPrefix(".storage-") && $0.hasSuffix(".status")}!
-let statusURL=automaticDirectory.appendingPathComponent(statusName)
+let statusURL=automaticDirectory.appendingPathComponent("Shared-v1/owner-v1.json")
 try Data("unowned replacement".utf8).write(to:statusURL,options:.atomic)
 try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:statusURL.path)
 automaticTime=20

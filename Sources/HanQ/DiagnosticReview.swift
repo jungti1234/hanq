@@ -131,11 +131,19 @@ struct DiagnosticReviewOriginal {
     let bytes: Int
     let digest: String
     let header: DiagnosticReviewCaptureHeader
+    var shared:Bool{DiagnosticSharedStore.validName(filename)}
     func load() throws -> (Data, DiagnosticReviewDocument) {
         let data=try DiagnosticReviewSnapshot.read(url)
         guard data.count==bytes,SHA256.hash(data:data).map({String(format:"%02x",$0)}).joined()==digest,
-              DiagnosticReviewCaptureHeader.read(data)==header else{throw DiagnosticReviewError.invalidCapture}
-        let object=try DiagnosticReviewSnapshot.object(data)
+              (shared || DiagnosticReviewCaptureHeader.read(data)==header) else{throw DiagnosticReviewError.invalidCapture}
+        let object:[String:Any]
+        if shared {
+            let expanded=try DiagnosticSharedStore.expand(filename,in:owner.url)
+            guard expanded.header.runID==header.runID,expanded.header.incident==header.incident,expanded.header.phase==header.phase,expanded.header.trigger==header.trigger else{throw DiagnosticReviewError.invalidCapture}
+            var value=try DiagnosticReviewSnapshot.object(JSONEncoder().encode(expanded.metadata))
+            value["frames"]=try JSONSerialization.jsonObject(with:JSONEncoder().encode(expanded.frames))
+            object=value
+        }else{object=try DiagnosticReviewSnapshot.object(data)}
         guard object["frames"] is [[String:Any]] else{throw DiagnosticReviewError.invalidCapture}
         return (data,try DiagnosticReviewSnapshot.capture(object,phase:header.phase))
     }
@@ -173,6 +181,10 @@ final class DiagnosticReviewSnapshot {
     let incidents: [DiagnosticReviewIncident]
     let storage: DiagnosticReviewDocument
     private let storageData: Data
+    private let sharedStatus:DiagnosticReviewFile?
+    private let criticalFiles:[DiagnosticReviewFile]
+    let critical:DiagnosticReviewDocument?
+    var hasRecords:Bool{!incidents.isEmpty || critical != nil}
     private static let maximumFileBytes = 32 * 1024 * 1024
     init(directory: URL, request: DiagnosticSnapshotRequest=DiagnosticSnapshotRequest()) throws {
         self.directory = directory
@@ -181,12 +193,15 @@ final class DiagnosticReviewSnapshot {
         let datesURL = directory.appendingPathComponent("review-dates.json")
         let dates = try JSONDecoder().decode([String: Double].self, from: Self.read(datesURL))
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasPrefix("incident-") && $0.pathExtension == "json" }
+            .filter { file in
+                if DiagnosticSharedStore.validName(file.lastPathComponent){return try DiagnosticSharedStore.readHeader(file).0.role != 1}
+                return file.lastPathComponent.hasPrefix("incident-") && file.pathExtension == "json"
+            }
         let catalogURL=directory.appendingPathComponent("review-catalog.json")
         let catalog:DiagnosticReviewCatalog?
         if FileManager.default.fileExists(atPath:catalogURL.path) {
             let value=try JSONDecoder().decode(DiagnosticReviewCatalog.self,from:Self.read(catalogURL))
-            guard value.schema==1,Set(value.files.keys)==Set(files.map(\.lastPathComponent)) else{throw DiagnosticReviewError.invalidCapture}
+            guard value.schema==1,Set(value.files.keys)==Set(files.filter{!DiagnosticSharedStore.validName($0.lastPathComponent)}.map(\.lastPathComponent)) else{throw DiagnosticReviewError.invalidCapture}
             catalog=value
         }else{catalog=nil}
         var groups: [String: (Int, Date?, Int, [Int: DiagnosticReviewOriginal])] = [:]
@@ -194,7 +209,11 @@ final class DiagnosticReviewSnapshot {
         for (index,file) in files.enumerated() {
             try request.check()
             let header:DiagnosticReviewCaptureHeader,bytes:Int,digest:String
-            if let entry=catalog?.files[file.lastPathComponent] {
+            if DiagnosticSharedStore.validName(file.lastPathComponent) {
+                let (value,_)=try DiagnosticSharedStore.readHeader(file)
+                header=DiagnosticReviewCaptureHeader(schema:1,trigger:value.trigger,incident:value.incident,phase:value.phase,runID:value.runID)
+                let data=try Self.read(file);bytes=data.count;digest=SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()
+            }else if let entry=catalog?.files[file.lastPathComponent] {
                 guard entry.header.valid,entry.bytes>=0,entry.bytes<=Self.maximumFileBytes,
                       entry.digest.range(of:"^[0-9a-f]{64}$",options:.regularExpression) != nil else{throw DiagnosticReviewError.invalidCapture}
                 var info=stat()
@@ -211,7 +230,7 @@ final class DiagnosticReviewSnapshot {
             let number=header.incident,phase=header.phase,trigger=header.trigger
             let run=header.runID.flatMap{UUID(uuidString:$0)?.uuidString} ?? "legacy"
             let id = run + ":\(number)"
-            let seconds = dates[file.lastPathComponent]
+            let seconds = dates[file.lastPathComponent] ?? (DiagnosticSharedStore.validName(file.lastPathComponent) ? (try? DiagnosticSharedStore.readHeader(file)).map{Double($0.0.milliseconds)/1000}:nil)
             let date = seconds.flatMap { $0.isFinite && $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
             var group = groups[id] ?? (number, date, trigger, [:])
             guard group.2 == trigger, group.3[phase] == nil else { throw DiagnosticReviewError.invalidCapture }
@@ -232,6 +251,50 @@ final class DiagnosticReviewSnapshot {
         let status = try Self.object(storageData)
         guard Self.integer(status["schema"]) == 1, let values = status["status"] as? [String: Any] else { throw DiagnosticReviewError.invalidCapture }
         storage = Self.storageDocument(values)
+        var criticalFiles:[DiagnosticReviewFile]=[],sections:[DiagnosticReviewSection]=[]
+        let sharedURL=directory.appendingPathComponent("shared-storage-status.json")
+        if FileManager.default.fileExists(atPath:sharedURL.path) {
+            let data=try Self.read(sharedURL),stats=try JSONDecoder().decode(DiagnosticSharedStore.Stats.self,from:data)
+            let document=DiagnosticReviewDocument("공유 상세 저장 상태",[.init(title:"저장과 중복 제거",fields:[
+                .init(label:"완료 · 대기 바이트",value:"\(stats.saved) · \(stats.pendingBytes)"),
+                .init(label:"새 관측 · 재사용 관측",value:"\(stats.storedFrames) · \(stats.reusedFrames)"),
+                .init(label:"실패 · 대기 초과 · 부분 파일",value:"\(stats.failures) · \(stats.rejected) · \(stats.incompleteFiles)"),
+                .init(label:"누적 파일 쓰기 바이트",value:"\(stats.writtenBytes)")])])
+            sharedStatus=DiagnosticReviewFile("shared-storage-status.json","공유 상세 저장 상태",original:data,preview:document)
+        }else{sharedStatus=nil}
+        for name in try FileManager.default.contentsOfDirectory(atPath:directory.path).filter(DiagnosticCriticalJournal.exportedName).sorted() {
+            let url=directory.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath:url.path) else{continue}
+            let data=try Self.read(url)
+            guard let decoded=DiagnosticCriticalJournal.decode(data) else{
+                let document=DiagnosticReviewDocument("불완전한 최소 사건 기록",[.init(title:"부분 저장",fields:[.init(label:"상태",value:"파일 머리말을 읽을 수 없습니다. 원본 바이트를 보존합니다.")])])
+                criticalFiles.append(DiagnosticReviewFile(name,"불완전한 최소 사건 기록",original:data,preview:document));sections+=document.sections;continue
+            }
+            let omitted=decoded.events.filter{$0.failure.stage == .captureDisposition && $0.failure.code != 1}.count
+            var fields:[DiagnosticReviewField]=[.init(label:"개별 사건 수",value:"\(decoded.events.count)"),
+                .init(label:"상세 저장 대기·실패 기록",value:"\(omitted)"),
+                .init(label:"해석하지 못한 부분 기록",value:"\(decoded.incomplete)"),
+                .init(label:"보관 구간 번호",value:"\(decoded.generation)")]
+            if let first=decoded.events.first,let last=decoded.events.last {
+                fields.append(.init(label:"최초 · 최종 기록 시각 (UTC 밀리초)",value:"\(first.milliseconds) · \(last.milliseconds)"))
+            }
+            for code in [1,2] {
+                let dropped=decoded.events.filter{$0.failure.stage == .journalOverflow && $0.failure.code==code}.reduce(0){$0+($1.context?.count ?? 0)}
+                if dropped>0{fields.append(.init(label:code==1 ? "대기 용량 초과로 파일에 남지 못한 오류":"대기 용량 초과로 파일에 남지 못한 일반 관측",value:"\(dropped)"))}
+            }
+            let summary=DiagnosticReviewSection(title:"최소 사건 기록",fields:fields)
+            sections.append(summary)
+            let recent=decoded.events.suffix(20).map{event in
+                DiagnosticReviewSection(title:"사건 \(event.sequence) · 단계 \(event.failure.stage.rawValue)",fields:[
+                    .init(label:"실행 · 시각",value:"\(event.run) · \(event.milliseconds)"),
+                    .init(label:"영역 · 코드 · errno",value:"\(event.failure.domain.rawValue) · \(event.failure.code) · \(event.failure.underlyingPOSIX)"),
+                    .init(label:"상세 사건 · 첫 입력 관측 구간",value:"\(event.context?.incident ?? 0) · \(event.context?.episode ?? 0)")])
+            }
+            let preview=DiagnosticReviewDocument("최소 사건 기록 · 최근 20건 미리보기",[summary]+recent)
+            criticalFiles.append(DiagnosticReviewFile(name,"최소 사건 기록",original:data,preview:preview))
+        }
+        self.criticalFiles=criticalFiles
+        critical=sections.isEmpty ? nil:DiagnosticReviewDocument("최소 사건 기록",sections)
         owner.owned=true
     }
 
@@ -311,6 +374,12 @@ final class DiagnosticReviewSnapshot {
             ("lookup",["미측정","유효 표본 확인","같은 입력칸 표본 없음","입력 전 표본 없음","입력 전 표본 기한","시계 불일치","표본 보관 기한","준비 조건 상실","전면·소유 관계 변경","현재 창 조회 불가","현재 창 변경","조회 후 준비 조건 상실","조회 후 전면 변경"]),
             ("history",["미측정","이력 개수 조건","선택·범위 조건","이력 자판 미확인","첫 자음 조건","Shift 공백 제외","지원하지 않는 입력 위치","후속 모음 조건","전체 본문·커서 불일치"])
         ]
+        if let coverage=object["coverage"] as? [String:Any] {
+            counts["요청 구간(ms) \(integer(coverage["requestedFromMilliseconds"]) ?? 0)…\(integer(coverage["requestedThroughMilliseconds"]) ?? 0)",default:0]+=1
+            counts["확보 관측",default:0]+=integer(coverage["frames"]) ?? 0
+            counts["관측 순번 공백(키 누락 판정 아님)",default:0]+=integer(coverage["sequenceGaps"]) ?? 0
+            counts["메모리 용량으로 만료한 과거 관측",default:0]+=integer(coverage["historyByteEvictions"]) ?? 0
+        }
         for frame in frames {
             let kind = integer(frame["kind"]) ?? 0, code = integer(frame["category"]) ?? 0
             let duration = integer(frame["durationMicros"])
@@ -517,7 +586,7 @@ final class DiagnosticReviewSnapshot {
     func files(selected: Set<String>, environment: DiagnosticReviewEnvironment,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest()) throws -> [DiagnosticReviewFile] {
         try request.check()
         let chosen = incidents.filter { selected.contains($0.id) }
-        guard !chosen.isEmpty, chosen.count == selected.count else { throw DiagnosticReviewError.emptySelection }
+        guard (!chosen.isEmpty || !criticalFiles.isEmpty), chosen.count == selected.count else { throw DiagnosticReviewError.emptySelection }
         guard chosen.count <= Self.selectionLimit else { throw DiagnosticReviewError.tooManySelections }
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ko_KR"); formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         let preview = DiagnosticReviewDocument("요약", [
@@ -540,6 +609,21 @@ final class DiagnosticReviewSnapshot {
                 }
             }
         }
+        var included=Set(files.map(\.path))
+        for original in chosen.flatMap({Array($0.originals.values)}) where original.shared {
+            for name in try DiagnosticSharedStore.expand(original.filename,in:directory).dependencies.sorted() where included.insert(name).inserted {
+                let data=try Self.read(directory.appendingPathComponent(name))
+                files.append(DiagnosticReviewFile(name,"공유 전후 관측",original:data,preview:DiagnosticReviewDocument("공유 전후 관측",[.init(title:"함께 저장하는 자료",fields:[.init(label:"내용",value:"선택한 사건을 복원하는 공유 관측과 메타데이터입니다. 공유 구간과 공통 정보에 필요한 다른 사건의 일부 정보가 포함될 수 있습니다.")])])))
+            }
+        }
+        let selectedOriginals=chosen.flatMap{Array($0.originals.values)}.map(\.filename).sorted()
+        let sharedDependencies=files.map(\.path).filter{DiagnosticSharedStore.validName($0) && !selectedOriginals.contains($0)}.sorted()
+        if !sharedDependencies.isEmpty || selectedOriginals.contains(where:DiagnosticSharedStore.validName){
+            let manifest=try JSONSerialization.data(withJSONObject:["schema":1,"captures":selectedOriginals,"sharedDependencies":sharedDependencies],options:[.sortedKeys])
+            files.append(DiagnosticReviewFile("selection-manifest.json","선택한 원본과 공유 자료",original:manifest,preview:DiagnosticReviewDocument("선택한 원본과 공유 자료",[.init(title:"내보내기 구성",fields:[.init(label:"선택한 원본 파일",value:selectedOriginals.joined(separator:"\n")),.init(label:"공유 자료 수",value:"\(sharedDependencies.count)")])])))
+        }
+        if let sharedStatus{files.append(sharedStatus)}
+        files.append(contentsOf:criticalFiles)
         files.append(DiagnosticReviewFile("storage-status.json", "저장 상태", original: storageData, preview: storage))
         return files
     }

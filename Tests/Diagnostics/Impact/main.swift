@@ -144,7 +144,7 @@ let elapsed=DispatchTime.now().uptimeNanoseconds-began
 if profile=="blocked"{guard busyDone.wait(timeout:.now()+2) == .success else{exit(4)}}
 if profile=="storage",enabled{guard storageDone.wait(timeout:.now()+4) == .success else{exit(5)}}
 // Capture after all callback samples; waiting/JSON analysis is outside samples.
-trace.mark();trace.flush();Thread.sleep(forTimeInterval:1.2);trace.flush();drainMain()
+trace.mark();trace.flush();Thread.sleep(forTimeInterval:3.2);trace.flush();drainMain()
 if profile=="capture"{trace.stopAndFlush()}
 func stats(_ values:[UInt64])->[String:Double]{
  let s=values.sorted();guard !s.isEmpty else{return [:]}

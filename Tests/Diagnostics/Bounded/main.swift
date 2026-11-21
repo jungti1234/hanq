@@ -138,6 +138,9 @@ let contender=DiagnosticLogStore(directory:fresh,policy:policy,persistentOwnersh
 check(!contender.verifyReadiness().ready,"a second bounded writer is rejected")
 check(contender.save(payload(5,0),incident:5,phase:0,automatic:true) == .unavailable,"rejected writer cannot publish after readiness failure")
 check(contender.status.lastFailureStage==3,"rejected writer uses compatible ownership failure stage")
+check(contender.status.lastErrno==Int(EWOULDBLOCK),"backoff preserves the actual writer-lock errno")
+check(contender.savePair(payload(5,0),payload(5,1),incident:5,automatic:true) == .unavailable,"paired request also respects writer recovery delay")
+check(contender.status.lastFailureStage==3 && contender.status.lastErrno==Int(EWOULDBLOCK) && contender.status.attempts==2,"paired backoff retains cause and counts without publishing")
 check(try snapshot(fresh)==beforeContender,"rejected writer changes no capture, status or ownership bytes")
 bounded=nil
 let resumed=DiagnosticLogStore(directory:fresh,policy:policy,persistentOwnership:true,requiresBoundedPriorPolicy:true)

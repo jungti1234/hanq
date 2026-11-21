@@ -93,13 +93,19 @@ heldTrace.flush();heldTrace.finishCaptureWindowsForTest();heldTrace.flush()
 check(heldCaptures.last?.captureBacklog?.requestOverflow[3]==1,"ingress overflow distinguished from window overflow")
 check(heldCaptures.last?.capturePreservation?.requests.count==16,"all admitted contended requests retain scalar context")
 
-// Real timer closes one second after the last merged request.
-var timedCaptures:[InputIncidentTrace.Capture]=[]
-let timed=InputIncidentTrace(secureInput:{false},destination:nil,writer:{timedCaptures.append($0)})
-timed.captureForTest(.axDelay);timed.flush();Thread.sleep(forTimeInterval:0.6)
-timed.captureForTest(.boundaryInterrupted);timed.flush();Thread.sleep(forTimeInterval:0.6);timed.flush()
-check(timedCaptures.count==1,"merged request extends post instead of ending at first request plus one second")
-Thread.sleep(forTimeInterval:0.6);timed.flush()
+// Real timer closes three seconds after the last merged request. Keep the
+// admission clock deterministic and measure the actual timer with uptime so
+// unrelated compiler load cannot turn the merge fixture into a deferred one.
+var timedCaptures:[InputIncidentTrace.Capture]=[],timedClock=100.0
+let timedPost=DispatchSemaphore(value:0)
+let timed=InputIncidentTrace(secureInput:{false},destination:nil,clock:{timedClock},writer:{timedCaptures.append($0);if $0.phase==1{timedPost.signal()}})
+timed.captureForTest(.axDelay);timed.flush();timedClock+=0.1
+let lastTimedRequest=ProcessInfo.processInfo.systemUptime
+timed.captureForTest(.boundaryInterrupted);timed.flush()
+check(timedCaptures.count==1,"merged request retains one pre")
+check(timedPost.wait(timeout:.now()+8) == .success,"real three-second post timer fires")
+timed.flush()
+check(ProcessInfo.processInfo.systemUptime-lastTimedRequest>=2.9,"post timer retains the full three-second interval")
 check(timedCaptures.count==2 && timedCaptures.last?.capturePreservation?.requests.count==2,"real delayed post includes both trigger requests")
 
 // Shutdown flushes a deferred window and identifies shortened post coverage.
@@ -148,11 +154,11 @@ check(stalledCaptures.count==4,"writer resumes and receives both complete groups
 check(stalledCaptures.contains{$0.phase==0 && $0.frames.contains{$0.kind == .sourceBoundary && $0.category==31 && $0.count==29}},"deferred pre was frozen before writer and ring overwrite")
 check(stalledCaptures.allSatisfy{strict($0)},"stalled writer snapshots remain strict and bounded")
 
-// An older deferred pre cannot be retired by a newer immediate automatic pre.
-let folder=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("hanq-capture-order-"+UUID().uuidString)
+// The legacy custom-retention writer still orders deferred and immediate pres.
+let folder=URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("hanq-capture-order-"+UUID().uuidString)
 defer{try? FileManager.default.removeItem(at:folder)}
 var orderTime=800.0
-let ordered=InputIncidentTrace(secureInput:{false},destination:folder,clock:{orderTime})
+let ordered=InputIncidentTrace(secureInput:{false},destination:folder,clock:{orderTime},retention:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:1024*1024))
 ordered.captureForTest(.axDelay);ordered.flush();ordered.finishCaptureWindowsForTest();ordered.flush()
 orderTime=802;ordered.sourceBoundary(.manualEditUnverified,queued:31,awaitingOnset:1);ordered.flush()
 orderTime=811;ordered.captureForTest(.callbackDelay);ordered.flush()

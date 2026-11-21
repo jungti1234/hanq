@@ -206,7 +206,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var permissionContent: NSView!
     var permissionTimer: Timer?
     var safetyPulseTimer: Timer?
-    let inputSafety = InputSafetyWatchdog()
+    let inputSafety = InputSafetyWatchdog(terminate:{
+        OperationalDiagnostics.shared.record(.policy(.watchdog,70))
+        _ = OperationalDiagnostics.shared.flushCritical()
+        _exit(70)
+    })
     let permissionRecovery = PermissionRecovery()
     let freshPermissionGate=FreshPermissionGate()
     private(set) var permissionProbeFailure:OperationalFailure?
@@ -1021,7 +1025,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         DispatchQueue.global(qos:.utility).async{[weak self] in
-            let found=((try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []).contains{$0.hasPrefix("incident-") && $0.hasSuffix(".json")}
+            let found=((try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []).contains{($0.hasPrefix("incident-") && $0.hasSuffix(".json")) || DiagnosticCriticalJournal.filenames.contains($0) || DiagnosticCriticalJournal.laneDirectories.contains($0) || $0==DiagnosticSharedStore.directoryName}
             DispatchQueue.main.async{self?.hasDiagnosticLogs=found;self?.refreshStatus()}
         }
     }
@@ -1231,6 +1235,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         safetyPulseTimer?.invalidate()
         hud.hide()
         stopMapping()
+        OperationalDiagnostics.shared.record(.policy(.termination,0))
+        _ = OperationalDiagnostics.shared.flushCritical()
         InputIncidentTrace.shared.stopAndFlush()
         stopKeyboardObservation()
     }
@@ -1247,6 +1253,11 @@ app.setActivationPolicy(.accessory)
 guard let instanceLock = AppInstanceLock() else {
     StatusItemController.requestRunningInstanceRepair()
     exit(0)
+}
+// Production UI bootstrap only. Merely constructing .shared in a unit/helper
+// process must not create operational files in the user's real diagnostic root.
+if let directory=InputIncidentTrace.shared.destinationDirectory {
+    OperationalDiagnostics.shared.installJournal(DiagnosticCriticalJournal(directory:directory,preserve:InputIncidentTrace.shared.preservesDiagnostics))
 }
 let delegate = AppDelegate()
 app.delegate = delegate

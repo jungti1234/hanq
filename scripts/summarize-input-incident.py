@@ -43,6 +43,7 @@ import collections
 import json
 import pathlib
 import re
+import uuid
 
 
 STORAGE_FIELDS=set(['maximumAutomaticFiles', 'maximumAutomaticBytes', 'automaticFiles', 'automaticBytes', 'attempts', 'saved', 'limited', 'retired', 'unavailable', 'encodingFailures', 'evictedGroups', 'evictedFiles', 'evictedBytes', 'lastIncident', 'lastPhase', 'lastAutomatic', 'lastResult', 'lastFailureStage', 'lastErrno', 'lastWriteMicros', 'maxWriteMicros', 'writeTimingClipped', 'statusWriteFailures'])
@@ -356,24 +357,30 @@ def control_evidence(value):
 def capture_preservation(value):
     keys={'deferred','requests','postCapacity','postOmittedFrames','closed','endedOnShutdown'}
     if not isinstance(value,dict) or set(value)-{'closedMilliseconds'}!=keys:raise ValueError('invalid capture preservation')
-    if any(type(value[k]) is not bool for k in ['deferred','closed','endedOnShutdown']) or type(value['postCapacity']) is not int or not 1<=value['postCapacity']<=16384 or type(value['postOmittedFrames']) is not int or value['postOmittedFrames']<0:raise ValueError('invalid capture preservation bounds')
+    if any(type(value[k]) is not bool for k in ['deferred','closed','endedOnShutdown']) or type(value['postCapacity']) is not int or not 1<=value['postCapacity']<=65536 or type(value['postOmittedFrames']) is not int or value['postOmittedFrames']<0:raise ValueError('invalid capture preservation bounds')
     closed=value.get('closedMilliseconds')
     if value['closed']!=(closed is not None) or (closed is not None and (type(closed) is not int or closed<0)) or value['endedOnShutdown'] and not value['closed']:raise ValueError('invalid capture closing state')
     requests=value['requests']
     if not isinstance(requests,list) or not 1<=len(requests)<=32:raise ValueError('invalid capture requests')
     for row in requests:
-        if not isinstance(row,dict) or set(row)!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for n in row.values()) or not 1<=row['trigger']<=8 or not 1<=row['lane']<=8 or not 0<=row['detail']<=31 or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
+        if not isinstance(row,dict) or set(row)-{'requestID'}!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for k,n in row.items() if k != "requestID") or not 1<=row['trigger']<=8 or not 1<=row['lane']<=8 or not 0<=row['detail']<=31 or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
+        if 'requestID' in row:uuid.UUID(row['requestID'])
         if row['trigger']==6 and not (row['event']==0 and row['inputOrigin']==0 and ((row['lane']==4 and row['detail'] in [1,2,3,4,5,6,10]) or (row['lane']==3 and row['detail'] in [7,8,9]))):raise ValueError('invalid recovery detection')
         if row['trigger']==7 and not (1<=row['lane']<=5 and 1<=row['detail']<=4 and row['event']>0 and 1<=row['inputOrigin']<=3):raise ValueError('invalid space observation')
         if row['trigger']==8 and not (row['lane']==3 and row['detail']==0 and row['event']==0 and row['inputOrigin']==0):raise ValueError('invalid onset observation request')
     return value
+
+def capture_coverage(value):
+    required={'requestedFromMilliseconds','requestedThroughMilliseconds','frames','sequenceGaps','historyEvictions','historyByteEvictions','encodingFailures'}
+    if not isinstance(value,dict) or set(value)-{'firstAvailableMilliseconds','lastAvailableMilliseconds'}!=required or any(type(v) is not int or v<0 for v in value.values()):raise ValueError('invalid capture coverage')
+    return dict(value,interpretation='available_observations_only; sequence_gaps_do_not_prove_key_loss')
 
 def capture_backlog(value):
     groups=['requested','merged','deferred','requestOverflow','windowOverflow','postOverflow','discardedOnDisable']
     keys={'automaticCapacity','manualCapacity','requestCapacityPerTrigger','requestsPerWindow','pendingAutomatic','pendingManual','submittedWindows','completedWindows'}|set(groups)
     if not isinstance(value,dict) or set(value)-{'rateSuppressed'}!=keys:raise ValueError('invalid capture backlog')
     if 'rateSuppressed' in value:groups.append('rateSuppressed')
-    if any(type(value[k]) is not int or value[k]<0 for k in keys-set(groups)) or (value['automaticCapacity'],value['manualCapacity'],value['requestCapacityPerTrigger'],value['requestsPerWindow'])!=(16,4,16,32) or value['pendingAutomatic']>16 or value['pendingManual']>4 or value['completedWindows']>value['submittedWindows']:raise ValueError('invalid capture backlog bounds')
+    if any(type(value[k]) is not int or value[k]<0 for k in keys-set(groups)) or (value['automaticCapacity'],value['manualCapacity'],value['requestCapacityPerTrigger'],value['requestsPerWindow']) not in ((16,4,16,32),(128,4,16,32)) or value['pendingAutomatic']>value['automaticCapacity'] or value['pendingManual']>4 or value['completedWindows']>value['submittedWindows']:raise ValueError('invalid capture backlog bounds')
     for key in groups:
         d=value[key]
         if not isinstance(d,dict) or len(d)>8 or any(k not in ['1','2','3','4','5','6','7','8'] or type(v) is not int or v<=0 for k,v in d.items()):raise ValueError('invalid capture backlog counters')
@@ -740,7 +747,7 @@ def summarize(data):
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,
-            'capture_preservation':preservation,'capture_backlog':backlog,'monitor_status':monitor, 'recovery_failures':recovery_failures(data.get('recoveryFailures', [])),
+            'capture_coverage':capture_coverage(data['coverage']) if 'coverage' in data else None,'capture_preservation':preservation,'capture_backlog':backlog,'monitor_status':monitor, 'recovery_failures':recovery_failures(data.get('recoveryFailures', [])),
             'observation_wait_totals':observation_totals,'observation_lock_waits':observation_lock_waits,'capture_timing':capture_timing,
             'decision_wait_totals':timing_totals,'decision_lock_waits':lock_waits,'decision_delays':decision_delays,'observation_delays':observation_delays,
             'detection_decision_counts':dict(decision_counts),'correlated_detection_decisions':event_decisions,
@@ -755,7 +762,13 @@ def main():
     parser.add_argument('incident',type=pathlib.Path,nargs='+')
     args=parser.parse_args()
     for path in args.incident:
-        with path.open() as stream:data=json.load(stream)
+        if path.suffix==".hqdiag":
+            from shared_diagnostic import read, expand
+            if read(path)[0].get("role",0)==1:
+                continue
+            data=expand(path)
+        else:
+            with path.open() as stream:data=json.load(stream)
         print(json.dumps(summarize_storage_document(data) if 'status' in data else summarize(data),ensure_ascii=False,indent=2))
 
 

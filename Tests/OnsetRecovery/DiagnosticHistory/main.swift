@@ -141,7 +141,7 @@ check(InputIncidentTrace.OnsetRuntime.parse(invalidRuntime)==nil && RecorderOnse
 
 check(evidence.allSatisfy{$0.valid},"all branch payloads valid")
 
-// Product sample() -> observer -> ordinary automatic capture, with only
+// Product sample() -> memory observer -> manual capture, with only
 // OS-facing reads injected. All original events must still pass the real gate.
 var engineCaptures:[InputIncidentTrace.Capture]=[]
 let engineTrace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{engineCaptures.append($0)})
@@ -165,7 +165,7 @@ for code:UInt16 in [15,40] {
         check(engineGate.receive(event.type,event) != nil,"integration passes original event")
     }
 }
-engine.sample();engineTrace.flush();engineTrace.finishCaptureWindowsForTest();engineTrace.flush()
+engine.sample();engineTrace.flush();check(engineCaptures.isEmpty,"normal first-pair observation remains memory only");engineTrace.mark();engineTrace.flush();engineTrace.finishCaptureWindowsForTest();engineTrace.flush()
 let recorded=engineCaptures.flatMap{$0.frames}.compactMap{$0.onsetObservation?.runtime}
 check(recorded.contains{$0.marked==1 && $0.observedKeys==2 && $0.receiverCoverage==1},"actual engine sample is wired to product incident writer")
 check(snapshotReads==1 && rangeWrites==0 && posts==0,"diagnostics add no read, selection write or replay")
@@ -178,7 +178,8 @@ var saved:[InputIncidentTrace.Capture]=[]
 let trace=InputIncidentTrace(secureInput:{false},destination:nil,writer:{saved.append($0)})
 for value in evidence{trace.onsetObservation(value,capture:value.phase==1 && value.keys==2)}
 trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
-check(!saved.isEmpty,"automatic capture without manual marker")
+check(saved.isEmpty,"ordinary first-pair comparison creates no automatic archive")
+trace.mark();trace.flush()
 for capture in saved{
     let data=try! JSONEncoder().encode(capture)
     if (try? RecorderTrace.decode(data))==nil {
@@ -212,4 +213,4 @@ for value in evidence{secure.onsetObservation(value,capture:true)}
 secure.flush();secure.finishCaptureWindowsForTest();secure.flush()
 check(secureWrites==0,"secure input generates no runtime writes");secure.stopAndFlush()
 try! encoded.write(to:URL(fileURLWithPath:CommandLine.arguments[1]))
-print("PASS \(checks) retained first-pair diagnostics, ambiguity, lifecycle, privacy and automatic capture checks")
+print("PASS \(checks) retained first-pair diagnostics, ambiguity, lifecycle, privacy and memory-only/manual capture checks")

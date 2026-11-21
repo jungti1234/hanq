@@ -3,10 +3,18 @@ import Darwin
 var checks=0
 func check(_ value:@autoclosure ()throws->Bool,_ message:String){checks+=1;if (try? value()) != true{fputs("FAIL: \(message)\n",stderr);exit(1)}}
 let fm=FileManager.default
-let root=fm.temporaryDirectory.appendingPathComponent("hanq-export-tests-"+UUID().uuidString)
+let root=URL(fileURLWithPath:fm.currentDirectoryPath).appendingPathComponent("hanq-export-tests-"+UUID().uuidString)
 try fm.createDirectory(at:root,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
 defer{try? fm.removeItem(at:root)}
-func files(_ dir:URL)->[URL]{((try? fm.contentsOfDirectory(at:dir,includingPropertiesForKeys:nil)) ?? []).filter{$0.lastPathComponent.hasPrefix("incident-")}}
+func files(_ dir:URL)->[URL]{
+    var result=((try? fm.contentsOfDirectory(at:dir,includingPropertiesForKeys:nil)) ?? []).filter{$0.lastPathComponent.hasPrefix("incident-")}
+    let nested=dir.appendingPathComponent(DiagnosticSharedStore.directoryName)
+    let shared=fm.fileExists(atPath:nested.path) ? nested:dir
+    for file in (try? fm.contentsOfDirectory(at:shared,includingPropertiesForKeys:nil)) ?? [] {
+        if DiagnosticSharedStore.validName(file.lastPathComponent),(try? DiagnosticSharedStore.readHeader(file).0.role) != 1{result.append(file)}
+    }
+    return result
+}
 let policy=DiagnosticLogRetentionPolicy(maximumAutomaticFiles:64,maximumAutomaticBytes:100,maximumManualBytes:60)
 let dir=root.appendingPathComponent("quotas")
 let store=DiagnosticLogStore(directory:dir,policy:policy,persistentOwnership:true)
@@ -108,7 +116,7 @@ try unzip.run();unzip.waitUntilExit();check(unzip.terminationStatus==0,"ZIP extr
 let exported=extract.appendingPathComponent("HanQ-Diagnostics")
 check(files(exported).count==82,"export includes pending latest before/after pair")
 check(!fm.fileExists(atPath:exported.appendingPathComponent("unrelated.txt").path),"export excludes unrelated files and ownership index")
-for file in files(exported){check(try Data(contentsOf:file)==Data(contentsOf:traceDir.appendingPathComponent(file.lastPathComponent)),"exported contents match stable source snapshot")}
+for file in files(exported){check(try Data(contentsOf:file)==Data(contentsOf:(file.pathExtension=="hqdiag" ? traceDir.appendingPathComponent(DiagnosticSharedStore.directoryName):traceDir).appendingPathComponent(file.lastPathComponent)),"exported contents match stable source snapshot")}
 check(try RecorderStorageDocument.decode(Data(contentsOf:exported.appendingPathComponent("storage-status.json"))).status.valid,"export storage status strict decode")
 check(try Data(contentsOf:extra)==Data("private non-log".utf8),"original unrelated evidence unchanged")
 trace.stopAndFlush()

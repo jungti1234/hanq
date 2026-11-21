@@ -32,7 +32,7 @@ check(ProcessInfo.processInfo.systemUptime-began<0.1,"input caller does not wait
 // Later event mutation and tag cleanup must not alter delayed correlation.
 event.timestamp=987654321;event.type = .keyUp
 event.setIntegerValueField(.eventSourceUserData,value:Int64(bitPattern:0x48414B5300000001))
-time=200
+time=100.1 // Delayed processing remains inside the specified 60s manual window.
 release.signal();check(finished.wait(timeout:.now()+2) == .success,"metadata lock released")
 trace.mark();trace.flush()
 let capture=captures[0],decisions=capture.frames.filter{$0.kind == .detectionDecision}

@@ -65,6 +65,8 @@ final class PermissionRecovery {
     func exitAfterPermissionLoss() -> Never {
         let requested = requestRelaunch()
         InputDiagnostics.shared.record("recovery.exit requested=\(requested)")
+        OperationalDiagnostics.shared.record(.policy(.termination,72))
+        _ = OperationalDiagnostics.shared.flushCritical()
         _exit(72)
     }
 

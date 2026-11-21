@@ -61,24 +61,24 @@ let failure=DiagnosticWriteBudget(clock:{time},writer:{_,_,_ in errno=ENOSPC;ret
 check(!failure.reserve(10,automatic:true,event:true,dir:failedFD) && failure.persistenceFailures==1,"ENOSPC reservation failure prevents payload writes")
 check(!failure.reserve(10,automatic:true,event:true,dir:failedFD) && failure.persistenceFailures==1,"logger/ledger failures do not recurse or retry unboundedly");close(failedFD)
 
-// Production capture worker: independent trigger, pair, flood, manual, no catch-up.
+// Explicit bounded compatibility worker: independent trigger, pair, flood, manual, no catch-up.
 var tick=100.0
 let traceDir=root.appendingPathComponent("trace")
-let trace=InputIncidentTrace(secureInput:{false},destination:traceDir,persistentOwnership:true,clock:{tick})
+let trace=InputIncidentTrace(secureInput:{false},destination:traceDir,persistentOwnership:true,clock:{tick},boundedStorage:true)
 for _ in 0..<4096{trace.context();trace.flush()}
 trace.captureForTest(.axDelay);trace.flush()
-check(!snapshot(traceDir).keys.contains{$0.hasPrefix("incident-")},"normal mode waits for complete pair before reservation")
-for _ in 0..<1000{trace.captureForTest(.axDelay);trace.flush()}
+check(snapshot(traceDir).keys.filter{$0.hasPrefix("incident-")}.count==1,"normal mode publishes durable pre without waiting for post window")
+for _ in 0..<3{trace.captureForTest(.axDelay);trace.flush()}
 trace.captureForTest(.callbackDelay);trace.flush()
 trace.mark();trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
 let captures=snapshot(traceDir).filter{$0.key.hasPrefix("incident-")}
-check(captures.count==6,"first kind, new kind and manual each retain pre/post")
+check(captures.count==12,"four same-kind events within ten seconds, another kind and manual retain pre/post")
 let decoded=captures.values.map{try! RecorderTrace.decode($0)}
 check(decoded.allSatisfy{$0.captureBacklog?.deferred.isEmpty == true},"normal mode never queues a deferred burst")
-check(decoded.contains{$0.captureBacklog?.rateSuppressed?["3"]==1000},"suppression counts survive into evidence")
+check(decoded.allSatisfy{$0.captureBacklog?.rateSuppressed?.isEmpty == true},"same kind and time no longer cause event suppression")
 let sizes=captures.values.map{$0.count}
 print("MEASURE 4096-frame capture phase bytes: \(sizes.sorted()); total=\(sizes.reduce(0,+))")
 tick=10000;trace.drainCapturesForTest();trace.flush()
-check(snapshot(traceDir).filter{$0.key.hasPrefix("incident-")}.count==6,"time advance does not flush suppressed requests")
+check(snapshot(traceDir).filter{$0.key.hasPrefix("incident-")}.count==12,"time advance does not invent deferred requests")
 trace.stopAndFlush()
 print("PASS \(checks) write budget, restart, failed persistence, paired capture and flood checks; no app/TCC/keys")

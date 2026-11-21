@@ -162,17 +162,18 @@ var off:InputIncidentTrace?=InputIncidentTrace(secureInput:{false},destination:o
 off!.mark();off!.flush()
 check(!fm.fileExists(atPath:offDir.path),"disabled startup does not create storage")
 toggle(off!,true);off!.mark();off!.flush();off!.finishCaptureWindowsForTest();off!.flush()
-let savedFiles=files(offDir),savedData=try savedFiles.map{try Data(contentsOf:$0)}
+let sharedDir=offDir.appendingPathComponent(DiagnosticSharedStore.directoryName)
+let savedFiles=try fm.contentsOfDirectory(at:sharedDir,includingPropertiesForKeys:nil).filter{DiagnosticSharedStore.validName($0.lastPathComponent)},savedData=try savedFiles.map{try Data(contentsOf:$0)}
 toggle(off!,false)
 check(try savedFiles.map{try Data(contentsOf:$0)}==savedData,"OFF preserves existing disk evidence")
-let previousRun=(try JSONSerialization.jsonObject(with:Data(contentsOf:savedFiles[0])) as! [String:Any])["runID"] as! String
+let previousRun=try DiagnosticSharedStore.readHeader(savedFiles[0]).0.runID
 off!.stopAndFlush();off=nil
 Thread.sleep(forTimeInterval:1.1) // let the old capture close callback release the old writer
 let resumed=InputIncidentTrace(secureInput:{false},destination:offDir,persistentOwnership:true)
 resumed.mark();resumed.flush();resumed.finishCaptureWindowsForTest();resumed.flush()
-check(files(offDir).contains{$0.lastPathComponent.hasPrefix("incident-2-0-")},"new trace instance advances persistent capture identity")
-let newFile=files(offDir).first{$0.lastPathComponent.hasPrefix("incident-2-0-")}!
-let newRun=(try JSONSerialization.jsonObject(with:Data(contentsOf:newFile)) as! [String:Any])["runID"] as! String
+let resumedHeaders=try fm.contentsOfDirectory(at:sharedDir,includingPropertiesForKeys:nil).filter{DiagnosticSharedStore.validName($0.lastPathComponent)}.map{try DiagnosticSharedStore.readHeader($0).0}
+check(resumedHeaders.contains{$0.incident==2 && $0.phase==0},"new trace instance advances persistent capture identity")
+let newRun=resumedHeaders.first{$0.incident==2}!.runID
 check(newRun != previousRun,"restarted trace never shares event/sequence identity with previous run")
 
 resumed.stopAndFlush()

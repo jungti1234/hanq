@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 source scripts/test-workspace.sh
 stage=$(hanq_test_stage space-diagnostics)
 trap 'rm -rf "$stage"' EXIT
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/SpaceObservation/main.swift -o "$stage/tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/SpaceObservation/main.swift -o "$stage/tests"
 hanq_test_run "$stage/tests" "$stage/capture.json"
 python3 -B scripts/summarize-input-incident.py "$stage/capture.json" > "$stage/summary.json"
 python3 - "$stage/summary.json" <<'PY'

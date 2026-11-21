@@ -33,11 +33,11 @@ if mode == "errors" {
     var now:UInt64=1,emissions:[OperationalDiagnostics.Entry]=[]
     let recorder=OperationalDiagnostics(clock:{now},sink:{emissions.append($0)})
     for _ in 0..<10000{recorder.record(failure)}
-    precondition(emissions.count==1 && recorder.snapshot().entries[0].count==10000)
+    precondition(emissions.count==10000 && recorder.snapshot().entries[0].count==10000)
     now+=30_000_000_000;recorder.record(failure)
-    precondition(emissions.count==2 && emissions.last!.count==10001)
+    precondition(emissions.count==10001 && emissions.last!.count==10001)
     for i in 0..<100{recorder.record(.policy(.probeToken,i))}
-    precondition(recorder.snapshot().entries.count==64 && recorder.snapshot().evicted==37 && emissions.count<=9)
+    precondition(recorder.snapshot().entries.count==64 && recorder.snapshot().evicted==37 && emissions.count==10101)
     let url=PrivateProbeDirectory.root.appendingPathComponent("hanq-permission-"+UUID().uuidString)
     try! FileManager.default.createDirectory(at:url,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
     let workspace=PrivateProbeDirectory.open(url,prefix:"hanq-permission-")!

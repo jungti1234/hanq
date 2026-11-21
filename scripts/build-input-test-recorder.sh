@@ -9,7 +9,7 @@ if [[ -e "$app" ]]; then
     exit 1
 fi
 mkdir -p "$app/Contents/MacOS"
-swiftc -module-cache-path .build/hanq/module-cache Tools/InputTestRecorder/RecorderCore.swift Tools/InputTestRecorder/main.swift -o "$app/Contents/MacOS/HanQInputTestRecorder"
+swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tools/InputTestRecorder/RecorderCore.swift Tools/InputTestRecorder/main.swift -o "$app/Contents/MacOS/HanQInputTestRecorder"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

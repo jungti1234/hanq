@@ -109,15 +109,16 @@ defer{try? FileManager.default.removeItem(at:root)}
 let directory=root.appendingPathComponent("records")
 let disk=InputIncidentTrace(secureInput:{false},destination:directory)
 disk.mark();disk.flush()
-let files=(try! FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil)).filter{$0.pathExtension=="json"}
+let sharedDirectory=directory.appendingPathComponent(DiagnosticSharedStore.directoryName)
+let files=(try! FileManager.default.contentsOfDirectory(at:sharedDirectory,includingPropertiesForKeys:nil)).filter{$0.pathExtension=="hqdiag" && (try? DiagnosticSharedStore.readHeader($0).0.role) != 1}
 check(files.count==1,"manual marker writes one new prehistory file")
-let body=try! Data(contentsOf:files[0]);check((try! JSONSerialization.jsonObject(with:body)) is [String:Any],"saved metadata decodes")
+let body=try! DiagnosticSharedStore.expand(files[0].lastPathComponent,in:sharedDirectory);check(body.header.phase==0,"saved metadata decodes")
 let mode=try! FileManager.default.attributesOfItem(atPath:files[0].path)[.posixPermissions] as! NSNumber
 check(mode.intValue==0o600,"incident file is private")
 let symlink=root.appendingPathComponent("link")
 try! FileManager.default.createSymbolicLink(at:symlink,withDestinationURL:directory)
 let refusal=InputIncidentTrace(secureInput:{false},destination:symlink);refusal.mark();refusal.flush()
-check((try! FileManager.default.contentsOfDirectory(atPath:directory.path)).filter{$0.hasSuffix(".json")}.count==1,"symlink output directory refused")
+check((try! FileManager.default.contentsOfDirectory(atPath:sharedDirectory.path)).filter{$0.hasSuffix(".hqdiag") && (try? DiagnosticSharedStore.readHeader(sharedDirectory.appendingPathComponent($0)).0.role) != 1}.count==1,"symlink output directory refused")
 let bad=root.appendingPathComponent("missing/records")
 let unavailable=InputIncidentTrace(secureInput:{false},destination:bad);unavailable.mark();unavailable.flush()
 check(!FileManager.default.fileExists(atPath:bad.path),"unavailable destination never changes input or creates parents")
@@ -128,7 +129,7 @@ let linked=InputIncidentTrace(secureInput:{false},destination:nil,writer:{captur
     if capture.phase==0{preID=capture.incident}else{check(capture.incident==preID,"pre/post captures share incident identity");post.signal()}
 })
 linked.mark();linked.flush()
-check(post.wait(timeout:.now()+2) == .success,"post-incident window is actually persisted")
+check(post.wait(timeout:.now()+4) == .success,"post-incident window is actually persisted")
 // The linked writer has a different queue. Drain an in-progress disk publish
 // before inspecting its temporary files; the linked signal cannot join it.
 disk.flush()

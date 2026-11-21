@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 source scripts/test-workspace.sh
 stage=$(hanq_test_stage recovery-tests)
 trap 'rm -rf "$stage"' EXIT
-swiftc -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Sources/HanQ/PermissionRecovery.swift Tests/Recovery/main.swift -o "$stage/recovery-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/PermissionRecovery.swift Tests/Recovery/main.swift -o "$stage/recovery-tests"
 python3 - "$stage/recovery-tests" <<'PY'
 import os, pathlib, subprocess, sys, tempfile, time
 with tempfile.TemporaryDirectory(prefix='hanq-recovery-test-', dir='/private/tmp') as directory:

@@ -61,8 +61,8 @@ trace.recordFailure(action:3,site:"safariActivationRetry",reason:"source_switch_
 trace.mark(); trace.flush()
 let pending = try manifest(directory)
 let pendingFiles = pending.keys.filter { $0.hasPrefix("incident-") }.count
-check(pendingFiles==0 || pendingFiles==2, "normal capture publishes no pre-only pair before reservation (observed \(pendingFiles), total \(pending.count))")
-print("INFO: review integration starts with \(pendingFiles) capture files (zero means the pair is pending)")
+check(pendingFiles==1 || pendingFiles==2, "normal capture persists pre before post closure (observed \(pendingFiles), total \(pending.count))")
+print("INFO: review integration starts with \(pendingFiles) capture files (one means the post is pending)")
 DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { trace.finishCaptureWindowsForTest() }
 let firstURL = root.appendingPathComponent("first")
 try snapshot(trace, to: firstURL)

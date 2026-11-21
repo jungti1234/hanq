@@ -5,7 +5,7 @@ source scripts/test-workspace.sh
 stage=$(hanq_test_stage status-item)
 trap 'rm -rf "$stage"' EXIT
 swiftc -target arm64-apple-macosx13.0 -module-cache-path .build/hanq/module-cache \
-  Sources/HanQ/InputDiagnostics.swift Sources/HanQ/StatusItemController.swift \
+  Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/StatusItemController.swift \
   Sources/HanQ/MenuBarRecoveryNotice.swift \
   Tests/StatusItem/main.swift -o "$stage/status-item-tests"
 cp Resources/HanQ-MenuBar-Template.pdf "$stage/icon.pdf"

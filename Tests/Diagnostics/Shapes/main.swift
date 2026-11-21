@@ -104,7 +104,7 @@ let afterDone=DispatchSemaphore(value:0);var afterCapture:InputIncidentTrace.Cap
 let after=InputIncidentTrace(secureInput:{false},destination:nil,capacity:2,writer:{value in if value.phase==1{afterCapture=value;afterDone.signal()}})
 after.shape(.onsetAX,identity:1,count:4,selected:false,editing:false);after.flush();after.mark();after.flush()
 for _ in 0..<4{let read=after.beginRead(.onsetAX);after.endRead(.onsetAX,read);after.flush()}
-check(afterDone.wait(timeout:.now()+3) == .success,"post capture actually published")
+check(afterDone.wait(timeout:.now()+5) == .success,"post capture actually published")
 check(afterCapture?.shapeBaselines?.first?.current.count==4 && afterCapture!.frames.allSatisfy{$0.kind != .shape},"post phase preserves baseline outside ring")
 check((try? RecorderTrace.decode(JSONEncoder().encode(afterCapture!))) != nil,"post baseline strict decode")
 // A large AX-style NSString must not fall into an unoptimized Swift unit loop.

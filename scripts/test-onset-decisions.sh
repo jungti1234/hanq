@@ -21,7 +21,7 @@ finish() {
     return "$status"
 }
 trap finish EXIT
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/InputDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/OnsetDecisions/main.swift -o "$stage/decisions"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/OnsetDecisions/main.swift -o "$stage/decisions"
 hanq_test_run "$stage/decisions" "$stage/decisions.json"
 python3 -B scripts/summarize-input-incident.py "$stage/decisions.json" > "$stage/summary.json"
 python3 - "$stage/summary.json" <<'PY'

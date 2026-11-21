@@ -33,7 +33,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     private static let worker = DispatchQueue(label: "hanq.diagnostics.review", qos: .utility)
     private let environment: DiagnosticReviewEnvironment
     private var snapshot: DiagnosticReviewSnapshot?
-    var hasRecords: Bool { snapshot?.incidents.isEmpty == false }
+    var hasRecords: Bool { snapshot?.hasRecords == true }
     private var selected = Set<String>()
     private var archive: DiagnosticReviewArchive?
     private var generation = 0
@@ -125,7 +125,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         self.snapshot = snapshot
         selected.removeAll()
         if let first = snapshot.incidents.first { selected = [first.id] }
-        countLabel.stringValue = "전체 \(snapshot.incidents.count)건 · 최신순"
+        countLabel.stringValue = "전체 \(snapshot.incidents.count)건 · 최신순" + (snapshot.critical != nil ? " · 최소 사건 기록 포함":"")
         prepareSelection()
         if !snapshot.incidents.isEmpty { recordTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
     }
@@ -317,7 +317,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         finderButton.isHidden = true; feedbackButton.isHidden = true
         saveButton.isEnabled = false; fileTable.reloadData(); textView.string = ""
         previewTitle.stringValue = "미리보기"
-        guard let snapshot, !selected.isEmpty else {
+        guard let snapshot, !selected.isEmpty || snapshot.critical != nil else {
             statusLabel.stringValue = snapshot?.incidents.isEmpty == true ? "보관 중인 기록이 없습니다." : "저장할 기록을 하나 이상 선택해 주세요."
             return
         }
