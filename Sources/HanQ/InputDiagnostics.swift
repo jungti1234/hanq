@@ -4,6 +4,74 @@ import CryptoKit
 import Darwin
 import Carbon
 import OSLog
+import AppKit
+
+// Only existing snapshot PIDs enter the diagnostic worker. No window title,
+// URL, document path, input text or AX object is accepted by this interface.
+struct DiagnosticApplicationPIDs {
+    let target:pid_t
+    var owner:pid_t?=nil
+}
+// Decision-worker-owned bounded cache. A running-app object distinguishes a
+// terminated process from a later process reusing its PID. Names are fetched
+// once per cached process; ordinary frames carry only numeric references.
+final class DiagnosticApplicationRegistry {
+    struct Resolved {
+        var name:String?,bundleID:String?,version:String?,build:String?,launchMilliseconds:Int64?
+        var isCurrent:()->Bool={true}
+    }
+    private struct Entry {let record:DiagnosticApplicationRecord,isCurrent:()->Bool;var used:Int}
+    private let resolve:(pid_t)->Resolved?,capacity:Int
+    private var entries:[Int:Entry]=[:],byPID:[pid_t:Int]=[:],next=0,use=0
+    init(capacity:Int=128,resolve:@escaping (pid_t)->Resolved?=DiagnosticApplicationRegistry.runningApplication){self.capacity=max(1,min(128,capacity));self.resolve=resolve}
+    static func runningApplication(_ pid:pid_t)->Resolved? {
+        guard let app=NSRunningApplication(processIdentifier:pid),!app.isTerminated,app.processIdentifier==pid else{return nil}
+        let info=app.bundleURL.flatMap{Bundle(url:$0)?.infoDictionary}
+        let result=Resolved(name:app.localizedName,bundleID:app.bundleIdentifier,
+            version:info?["CFBundleShortVersionString"] as? String,build:info?["CFBundleVersion"] as? String,
+            launchMilliseconds:app.launchDate.map{Int64(max(0,min($0.timeIntervalSince1970*1000,9_000_000_000_000_000)))},
+            isCurrent:{!app.isTerminated && app.processIdentifier==pid})
+        return result.isCurrent() ? result:nil
+    }
+    func reset(){entries=[:];byPID=[:]}
+    private func reference(_ pid:pid_t?)->Int {
+        guard let pid,pid>0,next<Int(Int32.max) else{return 0};use+=1
+        if let id=byPID[pid],var entry=entries[id],entry.isCurrent(){entry.used=use;entries[id]=entry;return id}
+        let value=resolve(pid)
+        next+=1
+        var record=DiagnosticApplicationRecord(id:next,pid:pid,launchMilliseconds:value?.launchMilliseconds)
+        func bounded(_ text:String?,_ limit:Int)->String? {
+            guard let text else{return nil};var output=String.UnicodeScalarView(),visited=0
+            for scalar in text.unicodeScalars {
+                if output.count>=limit || visited>=limit*4{record.shortened=true;break};visited+=1
+                if CharacterSet.controlCharacters.contains(scalar){record.shortened=true;continue}
+                output.append(scalar)
+            }
+            return output.isEmpty ? nil:String(output)
+        }
+        record.name=bounded(value?.name,256);record.bundleID=bounded(value?.bundleID,256)
+        record.version=bounded(value?.version,64);record.build=bounded(value?.build,64)
+        if entries.count>=capacity,let oldest=entries.min(by:{$0.value.used<$1.value.used}) {
+            entries.removeValue(forKey:oldest.key)
+            if byPID[oldest.value.record.pid]==oldest.key{byPID.removeValue(forKey:oldest.value.record.pid)}
+        }
+        entries[next]=Entry(record:record,isCurrent:value?.isCurrent ?? {true},used:use);byPID[pid]=next
+        return next
+    }
+    func references(_ pids:DiagnosticApplicationPIDs?)->DiagnosticApplicationReferences? {
+        guard let pids else{return nil}
+        let result=DiagnosticApplicationReferences(target:reference(pids.target),owner:reference(pids.owner))
+        return result.packed==0 ? nil:result
+    }
+    func snapshot(_ ids:Set<Int>)->DiagnosticApplicationSnapshot? {
+        guard !ids.isEmpty else{return nil}
+        let records=ids.sorted().compactMap{entries[$0]?.record}
+        return DiagnosticApplicationSnapshot(records:records,unavailableReferences:ids.subtracting(records.map(\.id)).sorted())
+    }
+    #if HANQ_DIAGNOSTIC_TESTING
+    var countForTest:Int{entries.count}
+    #endif
+}
 
 // Operational failures are independent of opt-in input tracing. Only fixed
 // stages/domains and numeric error codes cross this boundary, never paths or
@@ -178,6 +246,8 @@ final class DiagnosticCriticalLane {
         var detailPolicy:Int?=nil // 1 full detail, 2 compact background observation
         var readToken:String?=nil
         var axResult:InputIncidentAXResult?=nil
+        var applicationReferences:DiagnosticApplicationReferences?=nil
+        var applicationInfo:DiagnosticApplicationSnapshot?=nil
     }
     struct Event:Codable {
         let run:String,sequence:Int,milliseconds:Int64,failure:OperationalFailure,context:Context?
@@ -819,17 +889,23 @@ final class InputIncidentFocusProbe {
         private(set) var first:AXUIElement?,last:AXUIElement?,subject:AXUIElement?
         private(set) var route=0,ownerRelation=0,role=0
         private var lastRoute=0,lastOwnerRelation=0,reads=0,changed=false,missing=false
+        private var observedOwner:pid_t?,subjectOwner:pid_t?
+        var applications:DiagnosticApplicationPIDs{.init(target:target,owner:subject==nil ? observedOwner:subjectOwner)}
         mutating func observe(_ element:AXUIElement?,owner:pid_t?,route:Int) {
             reads+=1
             if let element {
                 if let first {if !CFEqual(first,element){changed=true}}else{first=element}
             }else{missing=true}
             last=element;lastRoute=route;lastOwnerRelation=owner.map{$0==target ? 1:2} ?? 3
+            // Fallback can report a frontmost PID even when no AX element was
+            // read. It is not evidence of an observed element's owner.
+            observedOwner=element == nil ? nil:owner
             if subject==nil {self.route=lastRoute;ownerRelation=lastOwnerRelation}
         }
         mutating func observedRole(_ value:String?) {
             role=InputIncidentFocusEvidence.role(value)
             subject=last;route=lastRoute;ownerRelation=lastOwnerRelation
+            subjectOwner=observedOwner
         }
         fileprivate var element:AXUIElement? {subject ?? first}
         fileprivate var withinRead:Int {changed ? 2:(missing ? 3:(reads>1 ? 1:0))}
@@ -884,15 +960,21 @@ final class InputIncidentShapeCorrelation {
     func observe(_ value:String,field:UInt,generation:Int32,window:Int,identityEpoch:Int,activity:Int64)->(revision:Int,previous:Int?)? {
         // Reject large values before creating an additional Foundation bridge.
         guard value.utf16.count<=8192 else{reset();return nil}
-        let sameContext=self.field==field && self.generation==generation && self.window==window && self.identityEpoch==identityEpoch && self.activity==activity
+        let sameIdentity=self.field==field && self.generation==generation && self.identityEpoch==identityEpoch && self.activity==activity
+        // A path that did not read AXWindow reports 0. Retain the last known
+        // window for this exact field/context; two different known windows
+        // still break continuity, including when unmeasured reads intervene.
+        let sameContext=sameIdentity && (self.window==0 || window==0 || self.window==window)
+        let resolvedWindow=sameContext && window==0 ? self.window:window
         let sameText=text.map{CFStringCompare($0 as CFString,value as CFString,CFStringCompareFlags(rawValue:0)) == .compareEqualTo} ?? false
         if !sameContext || !sameText {
             previous=sameContext && text != nil ? revision:nil
             revision+=1
             // Own the small value, never retain a slice of a large AX string.
             text=String(decoding:Array(value.utf8),as:UTF8.self)
-            self.field=field;self.generation=generation;self.window=window;self.identityEpoch=identityEpoch;self.activity=activity
+            self.field=field;self.generation=generation;self.identityEpoch=identityEpoch;self.activity=activity
         }
+        self.window=resolvedWindow
         return (revision,previous)
     }
 }
@@ -1339,6 +1421,7 @@ final class InputIncidentTrace {
         var ax:InputIncidentAXEvidence?=nil
         var caretPrecedingClass:Int?=nil
         var selectionMotion:Int?=nil
+        var applications:DiagnosticApplicationReferences?=nil
     }
     struct ShapePoint:Codable {let field:Int;let count:Int;let selected:Bool;var evidence:ShapeEvidence}
     struct ShapeBaseline:Codable {let lane:Lane;let active:Bool;let current:ShapePoint;let previous:ShapePoint?}
@@ -1358,6 +1441,7 @@ final class InputIncidentTrace {
         var onsetEvidence:OnsetEvidence?=nil
         var boundaryEvidence:BoundaryEvidence?=nil
         var onsetObservation:OnsetObservation?=nil
+        var applications:DiagnosticApplicationReferences?=nil
     }
     struct DecisionDelivery:Codable {let capacity:Int;let overflow:[Int:Int];let waits:[Int:DecisionWaitStats];var coalesced:[Int:Int]?=nil}
     // Fixed code: ((operation-1)*8+(lane-1))*32+detail. No arbitrary payload.
@@ -1489,6 +1573,7 @@ final class InputIncidentTrace {
         var clockOriginMicros:Int?=nil
         var recoveryFailures:[RecoveryFailure]?=nil
         var monitorStatus:MonitorStatus?=nil
+        var applicationInfo:DiagnosticApplicationSnapshot?=nil
         // Conservative admission accounting for the captured dictionaries and
         // arrays, not an assertion about allocator/RSS bytes. Four slots per
         // entry cover hash-table spare capacity and value storage.
@@ -1499,6 +1584,7 @@ final class InputIncidentTrace {
             result+=dictionary(observationDelivery.processed)+dictionary(observationDelivery.overflow)+dictionary(observationDelivery.omitted)+dictionary(observationDelivery.coalesced)+dictionary(observationDelivery.waits)
             if let backlog=captureBacklog{for value in [backlog.requested,backlog.merged,backlog.deferred,backlog.requestOverflow,backlog.windowOverflow,backlog.postOverflow,backlog.discardedOnDisable,backlog.rateSuppressed ?? [:]]{result+=dictionary(value)}}
             result+=(shapeBaselines?.count ?? 0)*MemoryLayout<ShapeBaseline>.stride*2
+            result+=(applicationInfo?.records.reduce(0){$0+$1.memoryCharge} ?? 0)+(applicationInfo?.unavailableReferences.count ?? 0)*16
             result+=(capturePreservation?.requests.count ?? 1)*(MemoryLayout<CaptureRequest>.stride+64)*2
             result+=(recoveryFailures?.count ?? 0)*MemoryLayout<RecoveryFailure>.stride*2
             result+=(keyboardOrigin?.bursts.count ?? 0)*MemoryLayout<KeyboardBurst>.stride*2
@@ -1529,6 +1615,7 @@ final class InputIncidentTrace {
     private let runID=UUID().uuidString
     private var recentRecoveryFailures:[RecoveryFailure]=[]
     private var monitorStatus:MonitorStatus?
+    private var applicationRegistry=DiagnosticApplicationRegistry()
     private let gate:DiagnosticCollectionGate
     private var preparingQuit:Int32=0
     private var quitGeneration:Int32=0
@@ -1613,8 +1700,9 @@ final class InputIncidentTrace {
     private var manualCapacityLimited=false // Writer queue; refresh only while admission is blocked.
     private var lastStorageNotice:Int?
     private var acceptedPres=Set<Int>() // Serial writer only; bounded by open windows.
-    init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=65536,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,sharedWriter:OperationalIO.Write?=nil,writer:((Capture)->Void)?=nil){
+    init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=65536,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,sharedWriter:OperationalIO.Write?=nil,applicationResolver:((pid_t)->DiagnosticApplicationRegistry.Resolved?)?=nil,writer:((Capture)->Void)?=nil){
         self.secureInput=secureInput
+        if let applicationResolver{applicationRegistry=DiagnosticApplicationRegistry(resolve:applicationResolver)}
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
         eventCredits=DispatchSemaphore(value:self.observationCapacity/2)
         shapeCredits=DispatchSemaphore(value:max(1,self.observationCapacity/8))
@@ -1754,6 +1842,7 @@ final class InputIncidentTrace {
                 lastSpaceDown.removeAll();lastSpaceCapture.removeAll()
                 monitorStatus=nil
                 recentRecoveryFailures.removeAll()
+                applicationRegistry.reset()
                 if active,configured{captures=max(captures,last);_ = gate.activate(paused)}
                 lock.unlock()
                 DispatchQueue.main.async{[weak self] in self?.start();completion?()}
@@ -1800,6 +1889,12 @@ final class InputIncidentTrace {
             value.keyboardOrigin = missing ? KeyboardSample(status: 5, bursts: []) : (try? value.frames.unpacked()).flatMap{keyboardSample($0,origin)} ?? KeyboardSample(status:5,bursts:[])
         }
         value.monitorStatus=monitorStatus
+        var applicationIDs=Set<Int>()
+        for packet in selected.packets{applicationIDs.formUnion(DiagnosticApplicationReferences.ids(packet.applicationReferences))}
+        for baseline in value.shapeBaselines ?? [] {
+            for point in [baseline.current,baseline.previous].compactMap({$0}){applicationIDs.formUnion(DiagnosticApplicationReferences.ids(point.evidence.applications?.packed ?? 0))}
+        }
+        value.applicationInfo=applicationRegistry.snapshot(applicationIDs)
         return value
     }
     private func criticalContext(incident:Int,episode:Int?=nil,observedTime:Double?=nil)->DiagnosticCriticalJournal.Context {
@@ -2337,16 +2432,18 @@ final class InputIncidentTrace {
         }
         return span
     }
-    func endRead(_ lane:Lane,_ span:ReadSpan?,outcome:ReadOutcome?=nil,focus:InputIncidentFocusEvidence?=nil,axResult:InputIncidentAXResult?=nil){
+    func endRead(_ lane:Lane,_ span:ReadSpan?,outcome:ReadOutcome?=nil,focus:InputIncidentFocusEvidence?=nil,axResult:InputIncidentAXResult?=nil,applications:DiagnosticApplicationPIDs?=nil){
         guard let span else{if enabled{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         guard span.reserveEnd() else{if gate.generation==span.generation{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         let ended=clock(),duration=ended-span.began
         let unchanged=span.activity==activityEpoch
         let work=workEvidence(began:span.began,ended:ended)
+        let applicationPIDs=secureInput() || [.secureInput,.secureField,.accessibilityPermission].contains(outcome) ? nil:applications
         let enqueued=observationClock()
         decisionQueue.async{[self,span] in
             defer{span.finish()}
             guard gate.generation==span.generation else{reads.removeValue(forKey:span.token);return}
+            let applicationRefs=secureInput() ? nil:applicationRegistry.references(applicationPIDs)
             withObservation(.readEnd,lane,observedAt:ended,enqueuedAt:enqueued){timing in
             guard let read=reads.removeValue(forKey:span.token) else {
                 observationOmitted[observationCode(.readEnd,lane),default:0]+=1;return
@@ -2354,7 +2451,7 @@ final class InputIncidentTrace {
             if duration>=0.05 {
                 let compact = !span.watchdogCaptured && axResult?.hasFailure != true && Self.compactRead(span.purpose,outcome,activityUnchanged:unchanged)
                 if slowReads.insert(read.id).inserted{recordSlowRead(id:read.id,lane:lane,began:read.began,observed:read.began,phase:1,span:span)}
-                recordSlowRead(id:read.id,lane:lane,began:read.began,observed:ended,phase:2,outcome:outcome,span:span,unchanged:unchanged,compact:compact,axResult:axResult)
+                recordSlowRead(id:read.id,lane:lane,began:read.began,observed:ended,phase:2,outcome:outcome,span:span,unchanged:unchanged,compact:compact,axResult:axResult,applications:applicationRefs)
                 if !compact{requestCapture(.axDelay,lane:lane,detail:outcome?.rawValue ?? 0,reference:nil,time:ended,duration:duration,correlation:span.token.uuidString)}
             }
             slowReads.remove(read.id)
@@ -2362,15 +2459,20 @@ final class InputIncidentTrace {
             ring[(position-1+capacity)%capacity]?.workEvidence=work
             ring[(position-1+capacity)%capacity]?.readOutcome=outcome
             ring[(position-1+capacity)%capacity]?.focusEvidence=focus
+            ring[(position-1+capacity)%capacity]?.applications=applicationRefs
             updatePreservedLastFrame()
             }
         }
     }
-    private func recordSlowRead(id:Int,lane:Lane,began:Double,observed:Double,phase:Int,outcome:ReadOutcome?=nil,span:ReadSpan?=nil,unchanged:Bool?=nil,compact:Bool=false,axResult:InputIncidentAXResult?=nil){
+    private func recordSlowRead(id:Int,lane:Lane,began:Double,observed:Double,phase:Int,outcome:ReadOutcome?=nil,span:ReadSpan?=nil,unchanged:Bool?=nil,compact:Bool=false,axResult:InputIncidentAXResult?=nil,applications:DiagnosticApplicationReferences?=nil){
         var context=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:sequence,lane:lane.rawValue,kind:Kind.read.rawValue,category:phase,count:1,episode:0)
         context.operationID=id;context.beganMilliseconds=Int(max(0,(began-origin)*1000));context.observedMilliseconds=Int(max(0,(observed-origin)*1000))
         let duration=max(0,observed-began);context.durationMicros=Int(min(duration,60)*1_000_000);context.durationClipped=duration>60;context.outcome=outcome?.rawValue
         context.readToken=span?.token.uuidString;context.readPurpose=span?.purpose.rawValue;context.activityUnchanged=unchanged;context.detailPolicy=phase==2 ? (compact ? 2:1):nil;context.axResult=axResult
+        context.applicationReferences=applications
+        // Standalone compact facts must remain interpretable after detailed
+        // captures expire or are not selected. At most two bounded app records.
+        context.applicationInfo=applicationRegistry.snapshot(DiagnosticApplicationReferences.ids(applications?.packed ?? 0))
         OperationalDiagnostics.shared.record(.policy(.slowRead,phase),context:context,observation:true)
     }
     func start(){
@@ -2414,7 +2516,7 @@ final class InputIncidentTrace {
         }
     }
     private func shapeEvidence(_ value:ShapeEvidence,phase:Int)->ShapeEvidence {
-        ShapeEvidence(phase:phase,comparisonKnown:value.comparisonKnown,contentChanged:value.contentChanged,selectionChanged:value.selectionChanged,editingChanged:value.editingChanged,gap:value.gap,editing:value.editing,firstMilliseconds:value.firstMilliseconds,lastMilliseconds:value.lastMilliseconds,observations:value.observations,coalesced:value.coalesced,baselineSequence:value.baselineSequence,ax:value.ax,caretPrecedingClass:value.caretPrecedingClass,selectionMotion:value.selectionMotion)
+        ShapeEvidence(phase:phase,comparisonKnown:value.comparisonKnown,contentChanged:value.contentChanged,selectionChanged:value.selectionChanged,editingChanged:value.editingChanged,gap:value.gap,editing:value.editing,firstMilliseconds:value.firstMilliseconds,lastMilliseconds:value.lastMilliseconds,observations:value.observations,coalesced:value.coalesced,baselineSequence:value.baselineSequence,ax:value.ax,caretPrecedingClass:value.caretPrecedingClass,selectionMotion:value.selectionMotion,applications:value.applications)
     }
     private func appendShape(_ lane:Lane,_ point:ShapePoint,phase:Int,time:Double,timing:DecisionTiming?=nil){
         append(lane,.shape,observedAt:time,observationTiming:timing,count:point.count,selected:point.selected,field:point.field)
@@ -2422,11 +2524,13 @@ final class InputIncidentTrace {
         ring[(position-1+capacity)%capacity]?.shapeEvidence=shapeEvidence(point.evidence,phase:phase)
         updatePreservedLastFrame()
     }
-    func shape(_ lane:Lane,identity:UInt,count:Int,selected:Bool,editing:Bool,change:ShapeChange?=nil){
+    func shape(_ lane:Lane,identity:UInt,count:Int,selected:Bool,editing:Bool,change:ShapeChange?=nil,applications:DiagnosticApplicationPIDs?=nil){
         guard enabled else{return};let time=clock()
+        let applicationPIDs=secureInput() ? nil:applications
         // Only fixed scalars are retained by submit. The probe's String stays
         // on the engine's snapshot path; input callbacks never take our lock.
         _ = submit(.shape,lane,observedAt:time){[self] timing in
+            let applicationRefs=secureInput() ? nil:applicationRegistry.references(applicationPIDs)
             if fields.count>=256{fields.removeAll();invalidateShapes()}
             if fields[identity]==nil{nextField+=1;fields[identity]=nextField}
             let previous=shapes[lane]
@@ -2436,14 +2540,14 @@ final class InputIncidentTrace {
                 return value.known && previous==nil
             } ?? false
             let known=sameField && change?.known==true && !gap
-            let changed = !sameField || previous?.count != count || previous?.selected != selected || previous?.editing != editing || change?.content==true || change?.selection==true || gap || previous?.point.evidence.ax != change?.ax
+            let changed = !sameField || previous?.count != count || previous?.selected != selected || previous?.editing != editing || change?.content==true || change?.selection==true || gap || previous?.point.evidence.ax != change?.ax || previous?.point.evidence.applications != applicationRefs
             let ms=Int(max(0,time-origin)*1000)
             if changed {
                 // Close suppressed intervals before starting the new baseline.
                 if let previous,previous.active,previous.point.evidence.observations>previous.reportedObservations {
                     appendShape(lane,previous.point,phase:3,time:origin+Double(previous.point.evidence.lastMilliseconds)/1000)
                 }
-                let evidence=ShapeEvidence(phase:1,comparisonKnown:known,contentChanged:known && change?.content==true,selectionChanged:known && change?.selection==true,editingChanged:sameField && previous?.editing != editing,gap:gap,editing:editing,firstMilliseconds:ms,lastMilliseconds:ms,observations:1,coalesced:0,baselineSequence:sequence+1,ax:change?.ax,caretPrecedingClass:change?.caretPrecedingClass,selectionMotion:change?.selectionMotion.map{known ? $0:0})
+                let evidence=ShapeEvidence(phase:1,comparisonKnown:known,contentChanged:known && change?.content==true,selectionChanged:known && change?.selection==true,editingChanged:sameField && previous?.editing != editing,gap:gap,editing:editing,firstMilliseconds:ms,lastMilliseconds:ms,observations:1,coalesced:0,baselineSequence:sequence+1,ax:change?.ax,caretPrecedingClass:change?.caretPrecedingClass,selectionMotion:change?.selectionMotion.map{known ? $0:0},applications:applicationRefs)
                 let point=ShapePoint(field:fields[identity]!,count:count,selected:selected,evidence:evidence)
                 appendShape(lane,point,phase:1,time:time,timing:timing)
                 shapes[lane]=Shape(field:identity,count:count,selected:selected,editing:editing,active:true,sample:change?.sample,point:point,previous:previous.map{value in var point=value.point;point.evidence=shapeEvidence(point.evidence,phase:3);return point},checkpointAt:time,reportedObservations:1)

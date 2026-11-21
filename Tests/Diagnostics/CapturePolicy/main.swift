@@ -50,6 +50,31 @@ let decomposed=unicode.observe(identity:5,text:"\u{1100}\u{1161}\u{11A8}",select
 check(decomposed.content && decomposed.transitionID != nil,"canonical Unicode equivalence is not literal equality")
 check(shared.retainedUTF16ForTest<=8192,"comparison keeps only bounded text")
 
+// Reproduce the live two-path case: the onset reader does not read AXWindow,
+// while the mismatch reader already has it. Unknown must not erase known.
+for windows in [[0,6],[6,0],[0,0],[6,6]] {
+    let correlation=InputIncidentShapeCorrelation()
+    var left=InputIncidentShapeProbe(),right=InputIncidentShapeProbe()
+    func sample(_ probe:inout InputIncidentShapeProbe,_ value:String,_ window:Int,field:UInt=5,identityEpoch:Int=1,activity:Int64=0)->InputIncidentTrace.ShapeChange {
+        var ax=InputIncidentAXEvidence();ax.window=window;ax.identityEpoch=identityEpoch
+        return probe.observe(identity:field,text:value,selection:NSRange(location:0,length:0),generation:1,ax:ax,correlation:correlation,activity:activity)
+    }
+    for _ in 0..<4{_ = sample(&left,"abcdefghijklmnop",windows[0]);_ = sample(&right,"abcdefghijklmnop",windows[1])}
+    let l=sample(&left,"\n",windows[0]),r=sample(&right,"\n",windows[1])
+    check(l.transitionID != nil && l.transitionID==r.transitionID,"same literal transition across measured/unmeasured windows \(windows)")
+    let later=sample(&left,"other",windows[0])
+    check(later.transitionID != l.transitionID,"later different transition stays independent \(windows)")
+    check(sample(&right,"changed",7).transitionID==nil,"different known window cannot attach to old transition \(windows)")
+}
+let windowGuard=InputIncidentShapeCorrelation()
+_ = windowGuard.observe("before",field:1,generation:1,window:6,identityEpoch:1,activity:0)
+_ = windowGuard.observe("before",field:1,generation:1,window:0,identityEpoch:1,activity:0)
+check(windowGuard.observe("after",field:1,generation:1,window:7,identityEpoch:1,activity:0)?.previous==nil,"unknown window does not bridge two different known windows")
+_ = windowGuard.observe("before",field:1,generation:1,window:0,identityEpoch:1,activity:0)
+check(windowGuard.observe("after",field:1,generation:1,window:0,identityEpoch:2,activity:0)?.previous==nil,"identity registry reset breaks unknown-window continuity")
+_ = windowGuard.observe("before",field:1,generation:1,window:0,identityEpoch:2,activity:0)
+check(windowGuard.observe("after",field:1,generation:1,window:0,identityEpoch:2,activity:1)?.previous==nil,"input activity breaks unknown-window continuity")
+
 let dir=directory("policy"),journal=DiagnosticCriticalJournal(directory:dir)
 OperationalDiagnostics.shared.installJournal(journal)
 var now=100.0
@@ -73,10 +98,17 @@ let late=trace.beginRead(.mismatchAX,purpose:.background,activityAtRequest:trace
 trace.endRead(.mismatchAX,late,outcome:.success);trace.flush();readCount+=1;expectedFull+=1
 // The same proved transition keeps both occurrences and earliest pre/latest post.
 now+=1
-for lane in [InputIncidentTrace.Lane.onsetAX,.mismatchAX]{trace.shape(lane,identity:99,count:8,selected:false,editing:false,change:.init(sample:1,known:false,content:false,selection:false));trace.flush()}
-trace.shape(.onsetAX,identity:99,count:1,selected:false,editing:false,change:.init(sample:2,known:true,content:true,selection:false,transitionID:77));trace.flush()
+var onsetProbe=InputIncidentShapeProbe(),mismatchProbe=InputIncidentShapeProbe()
+func recordShape(_ probe:inout InputIncidentShapeProbe,_ lane:InputIncidentTrace.Lane,_ text:String,_ window:Int){
+    var ax=InputIncidentAXEvidence();ax.window=window;ax.identityEpoch=1
+    let change=probe.observe(identity:99,text:text,selection:NSRange(location:0,length:0),generation:trace.collectionGeneration,ax:ax,correlation:trace.shapeCorrelation,activity:trace.activityEpoch)
+    trace.shape(lane,identity:99,count:text.utf16.count,selected:false,editing:false,change:change);trace.flush()
+}
+recordShape(&onsetProbe,.onsetAX,"abcdefgh",0)
+recordShape(&mismatchProbe,.mismatchAX,"abcdefgh",6)
+recordShape(&onsetProbe,.onsetAX,"x",0)
 now+=0.2
-trace.shape(.mismatchAX,identity:99,count:1,selected:false,editing:false,change:.init(sample:2,known:true,content:true,selection:false,transitionID:77));trace.flush()
+recordShape(&mismatchProbe,.mismatchAX,"x",6)
 trace.sourceBoundary(.initialTransportCompleted,queued:0,awaitingOnset:0);trace.flush()
 trace.sourceBoundary(.editorDivergedInputResumed,queued:0,awaitingOnset:0);trace.flush()
 trace.sourceBoundary(.nativeSelectAllDivergedInputResumed,queued:0,awaitingOnset:0);trace.flush()

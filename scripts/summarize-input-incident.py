@@ -44,6 +44,7 @@ import json
 import pathlib
 import re
 import uuid
+import unicodedata
 
 
 STORAGE_FIELDS=set(['maximumAutomaticFiles', 'maximumAutomaticBytes', 'automaticFiles', 'automaticBytes', 'attempts', 'saved', 'limited', 'retired', 'unavailable', 'encodingFailures', 'evictedGroups', 'evictedFiles', 'evictedBytes', 'lastIncident', 'lastPhase', 'lastAutomatic', 'lastResult', 'lastFailureStage', 'lastErrno', 'lastWriteMicros', 'maxWriteMicros', 'writeTimingClipped', 'statusWriteFailures'])
@@ -251,10 +252,30 @@ def work_timelines(rows,shapes):
         result.append(r)
     return result
 
+def application_references(value):
+    if not isinstance(value,dict) or set(value)!={'target','owner'} or any(type(n) is not int or not 0<=n<=2**31-1 for n in value.values()):raise ValueError('invalid application references')
+    return value
+
+def application_info(value):
+    if not isinstance(value,dict) or set(value)!={'schema','records','unavailableReferences'} or type(value['schema']) is not int or value['schema']!=1:raise ValueError('invalid application info')
+    records=value['records'];missing=value['unavailableReferences']
+    if not isinstance(records,list) or len(records)>128 or not isinstance(missing,list) or len(missing)>131104:raise ValueError('invalid application limits')
+    if any(type(n) is not int or not 0<n<=2**31-1 for n in missing) or len(set(missing))!=len(missing):raise ValueError('invalid unavailable application references')
+    seen=set()
+    for row in records:
+        if not isinstance(row,dict) or set(row)-{'name','bundleID','version','build','launchMilliseconds'}!={'id','pid','shortened'}:raise ValueError('invalid application fields')
+        if any(type(row[k]) is not int or not 0<row[k]<=2**31-1 for k in ['id','pid']) or type(row['shortened']) is not bool or row['id'] in seen or row['id'] in missing:raise ValueError('invalid application identity')
+        seen.add(row['id'])
+        for key,limit in [('name',1024),('bundleID',1024),('version',256),('build',256)]:
+            if key in row and (not isinstance(row[key],str) or len(row[key].encode('utf-8'))>limit or any(unicodedata.category(c) in ('Cc','Cf') for c in row[key])):raise ValueError('invalid application text')
+        if 'launchMilliseconds' in row and (type(row['launchMilliseconds']) is not int or not 0<=row['launchMilliseconds']<=9_000_000_000_000_000):raise ValueError('invalid application launch time')
+    return value
+
 def shape_evidence(value):
     flags={'comparisonKnown','contentChanged','selectionChanged','editingChanged','gap','editing'}
     numbers={'phase','firstMilliseconds','lastMilliseconds','observations','coalesced','baselineSequence'}
-    if not isinstance(value,dict) or set(value)-{'ax','caretPrecedingClass','selectionMotion'}!=flags|numbers:raise ValueError('invalid shape evidence fields')
+    if not isinstance(value,dict) or set(value)-{'ax','caretPrecedingClass','selectionMotion','applications'}!=flags|numbers:raise ValueError('invalid shape evidence fields')
+    if 'applications' in value:application_references(value['applications'])
     if 'selectionMotion' in value and (type(value['selectionMotion']) is not int or value['selectionMotion'] not in SELECTION_MOTIONS or (not value.get('comparisonKnown') and value['selectionMotion']!=0)):raise ValueError('invalid selection motion')
     if 'caretPrecedingClass' in value and (type(value['caretPrecedingClass']) is not int or not 0<=value['caretPrecedingClass']<=5):raise ValueError('invalid caret class')
     if any(type(value[k]) is not bool for k in flags) or any(type(value[k]) is not int for k in numbers):raise ValueError('invalid shape evidence types')
@@ -470,6 +491,16 @@ def summarize(data):
     if data.get('schema') != 1 or not isinstance(data.get('frames'), list):
         raise ValueError('unsupported incident schema')
     run_id=data.get('runID')
+    apps=application_info(data['applicationInfo']) if 'applicationInfo' in data else None
+    app_ids=set(row['id'] for row in apps['records'])|set(apps['unavailableReferences']) if apps else set()
+    app_rows=[]
+    def check_app_refs(value):
+        refs=application_references(value)
+        if set(refs.values())-{0}-app_ids:raise ValueError('application reference missing from metadata')
+        return refs
+    for baseline in (shape_baselines(data['shapeBaselines']) if 'shapeBaselines' in data else []):
+        for point in [baseline.get('current'),baseline.get('previous')]:
+            if isinstance(point,dict) and 'applications' in point.get('evidence',{}):check_app_refs(point['evidence']['applications'])
     clock_origin=data.get('clockOriginMicros')
     if 'clockOriginMicros' in data and (type(clock_origin) is not int or not 0<=clock_origin<=9_000_000_000_000_000):raise ValueError('invalid clock origin')
     if 'runID' in data and (not isinstance(run_id,str) or not re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}',run_id)):
@@ -620,6 +651,11 @@ def summarize(data):
     boundary_rows=[]
     for frame in data['frames']:
         lane=lanes.get(frame['lane'],'unknown')
+        if 'applications' in frame:
+            if frame['kind']!=2 or frame['category']!=2 or frame['lane'] not in (6,7):raise ValueError('application identity outside a completed snapshot')
+            app_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,kind='read',**check_app_refs(frame['applications'])))
+        if isinstance(frame.get('shapeEvidence'),dict) and 'applications' in frame['shapeEvidence']:
+            app_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,kind='shape',**check_app_refs(frame['shapeEvidence']['applications'])))
         if frame['kind']==15 or 'onsetObservation' in frame:
             required={'sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','consumed','durationMicros','count','selected','field','observationTiming','onsetObservation'}
             if set(frame)!=required or any(type(frame.get(k)) is not int for k in ['sequence','milliseconds','lane','kind','event','edge','category','inputOrigin','durationMicros','count','field']) or frame['sequence']<=0 or frame['milliseconds']<0 or frame['kind']!=15 or frame['lane']!=3 or any(frame[k]!=0 for k in ['event','edge','category','inputOrigin','durationMicros','count','field']) or frame['consumed'] is not False or frame['selected'] is not False or not valid_timing(frame['observationTiming']):raise ValueError('invalid onset observation frame')
@@ -740,6 +776,7 @@ def summarize(data):
             if lane!='hid' and milliseconds>=stages['hid']:
                 transport_max[lane]=max(transport_max[lane],milliseconds-stages['hid'])
     return {'keyboard_origin':keyboard_origin(data),'build':data.get('build'),'diagnostic_run_id':run_id,'clock_origin_micros':clock_origin,'incident':data.get('incident'),'phase':data.get('phase'),
+            'application_info':apps,'application_observations':app_rows,
             'trigger':triggers.get(data['trigger'],'unknown'),'frames':len(data['frames']),
             'recovery_detections':None if preservation is None else [dict(r,lane_name=lanes[r['lane']],reason={1:'roman_mismatch',2:'mixed_insertion',3:'decomposed_jamo',4:'interrupted_composition',5:'fragmented_composition',6:'verified_replacement',7:'first_consonant',8:'late_sequence',9:'committed_late_sequence',10:'unspecified_mismatch'}[r['detail']],interpretation='detector_branch_only_not_root_cause') for r in preservation['requests'] if r['trigger']==6],
             'discarded_old_frames':data.get('discardedOldFrames'),'best_effort':True,

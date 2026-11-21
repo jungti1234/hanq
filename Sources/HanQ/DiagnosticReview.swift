@@ -93,6 +93,9 @@ struct DiagnosticReviewEnvironment: Codable {
 }
 
 struct DiagnosticReviewFile {
+    // ZIP membership is independent from the presentation of its dependencies.
+    var sharedDependency = false
+    var archiveOnly = false
     let path: String
     let title: String
     private let inlineData: Data?
@@ -118,8 +121,9 @@ struct DiagnosticReviewFile {
     init(_ path: String, _ title: String, original: Data, preview: DiagnosticReviewDocument) {
         self.path = path; self.title = title; inlineData = original;source=nil;previewDocument = preview
     }
-    fileprivate init(_ path:String,_ title:String,source:DiagnosticReviewSource,preview:DiagnosticReviewDocument) {
+    fileprivate init(_ path:String,_ title:String,source:DiagnosticReviewSource,preview:DiagnosticReviewDocument,sharedDependency:Bool=false) {
         self.path=path;self.title=title;self.source=source;inlineData=nil;previewDocument=preview
+        self.sharedDependency=sharedDependency
     }
     func copy(to url:URL,request:DiagnosticSnapshotRequest)throws {
         if let source{try source.copy(to:url,request:request)}
@@ -130,11 +134,106 @@ struct DiagnosticReviewFile {
     }
 }
 
+/// Screen-only grouping; every underlying original still belongs to the ZIP.
+enum DiagnosticReviewPreviewRow {
+    case file(DiagnosticReviewFile)
+    case shared([DiagnosticReviewFile])
+    var title:String {
+        switch self {
+        case .file(let file):return file.title
+        case .shared(let files):return "함께 첨부되는 자료 \(files.count)개"
+        }
+    }
+    var filenames:[String] {
+        if case .shared(let files)=self{return files.map(\.path)}
+        return []
+    }
+    func document(showFilenames:Bool=false)->DiagnosticReviewDocument {
+        switch self {
+        case .file(let file):return file.previewDocument ?? DiagnosticReviewDocument(file.title,[.init(title:"",fields:[.init(label:"",value:file.readableText)])])
+        case .shared(let files):
+            var sections=[DiagnosticReviewSection(title:"첨부 이유",fields:[.init(label:"내용",value:"선택한 기록을 복원하는 데 필요한 공통 자료입니다. 다른 사건과 공유하는 관측과 공통 정보가 포함되며 ZIP에 함께 저장됩니다.")])]
+            if showFilenames{sections.append(.init(title:"파일 목록",fields:[.init(label:"파일",value:files.map(\.path).joined(separator:"\n"))]))}
+            return DiagnosticReviewDocument(title,sections)
+        }
+    }
+    static func make(_ files:[DiagnosticReviewFile])->[Self] {
+        let shared=files.filter(\.sharedDependency)
+        var result:[Self]=[],inserted=false
+        for file in files where !file.archiveOnly {
+            if file.sharedDependency {
+                if !inserted{result.append(.shared(shared));inserted=true}
+            } else {result.append(.file(file))}
+        }
+        return result
+    }
+}
+
 fileprivate final class DiagnosticReviewDirectory {
     let url:URL
     var owned=false
     init(_ url:URL){self.url=url}
     deinit{if owned{try? FileManager.default.removeItem(at:url)}}
+}
+
+// Inventory exactly the original files included in this ZIP, including app
+// metadata in shared dependencies and standalone compact journal records.
+final class DiagnosticReviewApplications {
+    struct Entry:Codable {let run:String,application:DiagnosticApplicationRecord}
+    private var entries:[String:Entry]=[:]
+    private(set) var incomplete=false
+    func markIncomplete(){incomplete=true}
+    var sorted:[Entry]{entries.keys.sorted().compactMap{entries[$0]}}
+    var isEmpty:Bool{entries.isEmpty && !incomplete}
+    func include(_ run:String,_ snapshot:DiagnosticApplicationSnapshot) {
+        guard snapshot.valid else{incomplete=true;return}
+        for record in snapshot.records {
+            let key=run+":"+String(record.id)
+            if let prior=entries[key],prior.application != record{incomplete=true;continue}
+            guard entries[key] != nil || entries.count<4096 else{incomplete=true;continue}
+            entries[key]=Entry(run:run,application:record)
+        }
+    }
+    func merge(_ other:DiagnosticReviewApplications){
+        for entry in other.sorted{include(entry.run,.init(records:[entry.application],unavailableReferences:[]))}
+        incomplete = incomplete || other.incomplete
+    }
+    func root(_ run:String,_ value:Any?) {
+        guard let value else{return}
+        guard let snapshot=DiagnosticApplicationSnapshot.parse(value) else{incomplete=true;return}
+        include(run,snapshot)
+    }
+    func payload(_ header:DiagnosticArchiveReader.Header,_ payload:DiagnosticArchiveReader.Payload) {
+        for change in payload.changes {
+            guard change.path.isEmpty || change.path.first=="applicationInfo" else{continue}
+            guard let value=change.value else{continue}
+            let object=try? JSONSerialization.jsonObject(with:JSONEncoder().encode(value),options:[.fragmentsAllowed])
+            if change.path.isEmpty{root(header.runID,(object as? [String:Any])?["applicationInfo"])}
+            else if change.path==["applicationInfo"]{root(header.runID,object)}
+            else if change.path==["applicationInfo","records"] {
+                guard let data=try? JSONEncoder().encode(value),let records=try? JSONDecoder().decode([DiagnosticApplicationRecord].self,from:data) else{incomplete=true;continue}
+                include(header.runID,.init(records:records,unavailableReferences:[]))
+            }
+        }
+    }
+    var document:DiagnosticReviewDocument {
+        var sections=[DiagnosticReviewSection(title:"포함 범위",fields:[.init(label:"내용",value:"선택한 기록, 함께 첨부되는 공유 자료와 사건 기록에 아래 앱 정보가 포함됩니다. 입력 원문·창 제목·문서 경로·URL은 수집하지 않습니다.")])]
+        if incomplete{sections.append(.init(title:"확인하지 못한 정보",fields:[.init(label:"안내",value:"일부 원본의 앱 정보를 모두 해석하지 못했습니다. 해당 원본도 ZIP에 포함됩니다.")]))}
+        for entry in sorted {
+            let app=entry.application
+            let launched=app.launchMilliseconds.map{DateFormatter.localizedString(from:Date(timeIntervalSince1970:Double($0)/1000),dateStyle:.short,timeStyle:.medium)} ?? "미확인"
+            sections.append(.init(title:app.name ?? "앱 이름 미확인",fields:[
+                .init(label:"앱 ID",value:app.bundleID ?? "미확인"),.init(label:"버전",value:app.version ?? "미확인"),
+                .init(label:"빌드",value:app.build ?? "미확인"),.init(label:"PID",value:String(app.pid)),
+                .init(label:"앱 실행 시각",value:launched),
+                .init(label:"진단 실행 · 앱 참조",value:entry.run+" · "+String(app.id))]+(app.shortened ? [.init(label:"표시 제한",value:"일부 앱 정보가 길거나 제어 문자를 포함해 짧게 기록됐습니다.")]:[])))
+        }
+        return DiagnosticReviewDocument("포함되는 앱 정보",sections)
+    }
+    func file()throws->DiagnosticReviewFile {
+        let data=try JSONEncoder().encode(sorted)
+        return DiagnosticReviewFile("applications.json","포함되는 앱 정보",original:data,preview:document)
+    }
 }
 fileprivate struct DiagnosticReviewSource {
     // Keep the owned snapshot alive through preview and export.
@@ -164,10 +263,10 @@ struct DiagnosticReviewOriginal {
     func load() throws -> (Data, DiagnosticReviewDocument) {
         let result=try review();return (try source.read(),result.document)
     }
-    func review(request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest())throws->(document:DiagnosticReviewDocument,dependencies:[String:DiagnosticArchiveReader.FileEvidence]) {
+    func review(request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),applications:DiagnosticReviewApplications?=nil)throws->(document:DiagnosticReviewDocument,dependencies:[String:DiagnosticArchiveReader.FileEvidence]) {
         try source.verify(request)
         if shared {
-            let selection=try DiagnosticArchiveReader.selection(filename,in:owner.url)
+            let selection=try DiagnosticArchiveReader.selection(filename,in:owner.url,observePayload:{applications?.payload($0,$1)})
             guard selection.header.runID==header.runID,selection.header.incident==header.incident,selection.header.phase==header.phase,selection.header.trigger==header.trigger else{throw DiagnosticReviewError.invalidCapture}
             let value=try DiagnosticReviewSnapshot.object(JSONEncoder().encode(selection.metadata))
             var dependencies:[String:DiagnosticArchiveReader.FileEvidence]=[:]
@@ -175,7 +274,7 @@ struct DiagnosticReviewOriginal {
                 _ = try selection.visit(check:request.check,observe:{name,evidence in
                     guard dependencies[name].map({$0==evidence}) ?? true else{throw DiagnosticReviewError.invalidCapture}
                     dependencies[name]=evidence
-                }){frame in
+                },observePayload:{applications?.payload($0,$1)}){frame in
                     // Retain typed-field validation for one frame at a time.
                     _ = try JSONDecoder().decode(InputIncidentTrace.Frame.self,from:JSONSerialization.data(withJSONObject:frame))
                     try visit(frame)
@@ -188,6 +287,7 @@ struct DiagnosticReviewOriginal {
         let data=try source.read()
         guard DiagnosticReviewCaptureHeader.read(data)==header else{throw DiagnosticReviewError.invalidCapture}
         let object=try DiagnosticReviewSnapshot.object(data)
+        applications?.root(header.runID ?? "legacy",object["applicationInfo"])
         guard object["frames"] is [[String:Any]] else{throw DiagnosticReviewError.invalidCapture}
         var document=try DiagnosticReviewSnapshot.capture(object,phase:header.phase)
         document.exportWarnings=DiagnosticReviewSnapshot.coverageWarnings(object,phase:header.phase)
@@ -229,6 +329,8 @@ final class DiagnosticReviewSnapshot {
     private let storageData: Data
     private let sharedStatus:DiagnosticReviewFile?
     private let criticalFiles:[DiagnosticReviewFile]
+    private let journalApplications:DiagnosticReviewApplications
+    private let storageIssueSnapshot:DiagnosticStorageIssueSnapshot?
     let pendingExport:DiagnosticPendingExport?
     var pendingIncidentIDs:Set<String>{pendingExport?.incidentIDs ?? []}
     private var exportWarnings:[String]=[]
@@ -315,9 +417,8 @@ final class DiagnosticReviewSnapshot {
         guard Self.integer(status["schema"]) == 1, let values = status["status"] as? [String: Any] else { throw DiagnosticReviewError.invalidCapture }
         storage = Self.storageDocument(values)
         var criticalFiles:[DiagnosticReviewFile]=[],sections:[DiagnosticReviewSection]=[],notices:[String]=[]
+        let journalApplications=DiagnosticReviewApplications()
         if let pendingExport {
-            if !pendingExport.captures.isEmpty{notices.append("원래 저장소에 저장되지 않은 상세 구간 \(pendingExport.captures.count)개를 메모리에서 복사했습니다. 목록에서 선택한 사건의 사본만 ZIP에 포함합니다. 원래 저장소의 재시도 상태는 바뀌지 않습니다.")}
-            if !pendingExport.journalFiles.isEmpty{notices.append("메모리에 남아 있던 사건 기록 \(pendingExport.journalFiles.values.reduce(0,+))개를 포함합니다. 저장 파일과 중복된 사건은 실행 ID와 사건 순번으로 구분할 수 있습니다.")}
             if !pendingExport.unavailableSources.isEmpty{notices.append("원래 저장소의 일부 파일을 안전하게 읽을 수 없어 포함하지 못했습니다. 메모리 사본과 읽을 수 있는 자료만 포함하며, 기존 원본은 변경하지 않았습니다.")}
         }
         let issuesURL=directory.appendingPathComponent("storage-issues.json")
@@ -333,12 +434,9 @@ final class DiagnosticReviewSnapshot {
             criticalFiles.append(DiagnosticReviewFile("storage-issues.json","저장 재시도 상태",original:data,preview:DiagnosticReviewDocument("저장 재시도 상태",[section])))
             sections.append(section)
         }
+        storageIssueSnapshot=storageIssues
         func retryAdvice(_ components:Set<DiagnosticStorageIssue.Component>)->String {
             storageIssues?.exportAdvice(for:components) ?? "이 자료만으로 자동 재시도 상태를 확인할 수 없습니다."
-        }
-        if let pendingExport,!pendingExport.captures.isEmpty || !pendingExport.journalFiles.isEmpty {
-            let state=storageIssues?.issues.map{$0.component.title+": "+$0.retry.message}.joined(separator:"\n")
-            if let state,!state.isEmpty{notices.append("원래 저장소의 상태:\n"+state)}
         }
         let criticalStatusURL=directory.appendingPathComponent("critical-storage-status.json")
         if FileManager.default.fileExists(atPath:criticalStatusURL.path) {
@@ -381,6 +479,7 @@ final class DiagnosticReviewSnapshot {
             var first:DiagnosticCriticalJournal.Event?,last:DiagnosticCriticalJournal.Event?
             var recent:[DiagnosticCriticalJournal.Event]=[]
             let scanned=DiagnosticCriticalLane.scan(data){event in
+                if let info=event.context?.applicationInfo{journalApplications.include(event.context?.trace ?? event.run,info)}
                 count+=1;if first==nil{first=event};last=event
                 if event.failure.stage == .captureDisposition && ![1,8].contains(event.failure.code){omitted+=1}
                 if event.context?.detailPolicy==2{compact+=1}
@@ -389,6 +488,7 @@ final class DiagnosticReviewSnapshot {
                 if recent.count==20{recent.removeFirst()};recent.append(event)
             }
             guard let decoded=scanned else{
+                journalApplications.markIncomplete()
                 notices.append("해석할 수 없는 사건 기록이 있습니다. 해당 원본은 그대로 포함합니다.")
                 let document=DiagnosticReviewDocument("불완전한 최소 사건 기록",[.init(title:"부분 저장",fields:[.init(label:"상태",value:"파일 머리말을 읽을 수 없습니다. 원본 바이트를 보존합니다.")])])
                 criticalFiles.append(DiagnosticReviewFile(name,"불완전한 최소 사건 기록",source:source,preview:document));sections+=document.sections;return
@@ -398,7 +498,7 @@ final class DiagnosticReviewSnapshot {
                 .init(label:"요약으로 보관한 관측 · 기존 상세에 연결한 관측",value:"\(compact) · \(linked)"),
                 .init(label:"해석하지 못한 부분 기록",value:"\(decoded.incomplete)"),
                 .init(label:"보관 구간 번호",value:"\(decoded.generation)")]
-            if decoded.incomplete>0{notices.append("일부 사건 기록이 불완전합니다. 해석하지 못한 부분도 원본에 그대로 포함합니다.")}
+            if decoded.incomplete>0{journalApplications.markIncomplete();notices.append("일부 사건 기록이 불완전합니다. 해석하지 못한 부분도 원본에 그대로 포함합니다.")}
             if let first,let last {
                 fields.append(.init(label:"최초 · 최종 기록 시각 (UTC 밀리초)",value:"\(first.milliseconds) · \(last.milliseconds)"))
             }
@@ -420,6 +520,7 @@ final class DiagnosticReviewSnapshot {
             }
         }
         self.criticalFiles=criticalFiles
+        self.journalApplications=journalApplications
         critical=sections.isEmpty ? nil:DiagnosticReviewDocument("최소 사건 기록",sections)
         self.exportWarnings=notices
         owner.owned=true
@@ -458,9 +559,25 @@ final class DiagnosticReviewSnapshot {
         [1: "방금 발생한 문제 기록", 2: "입력 처리 지연 관측", 3: "접근성 조회 지연 관측",
          4: "본문 길이 감소 관측", 5: "전환 처리 상태 변화", 6: "자동 보정 시작", 7: "공백 처리 관측", 8: "첫 입력 상세 관측"][trigger] ?? "알 수 없는 기록"
     }
+    private static func applicationFields(_ info:DiagnosticApplicationSnapshot,targets:Set<Int>,owners:Set<Int>)->[DiagnosticReviewField] {
+        func describe(_ ids:Set<Int>)->String {
+            ids.sorted().map{id in
+                guard id>0,let app=info.records.first(where:{$0.id==id}) else{return "미확인"}
+                return "\(app.name ?? app.bundleID ?? "앱 이름 미확인") · PID \(app.pid) · 참조 \(app.id)"
+            }.joined(separator:"\n")
+        }
+        var fields:[DiagnosticReviewField]=[]
+        if !targets.isEmpty{fields.append(.init(label:"조회 대상 앱",value:describe(targets)))}
+        if !owners.isEmpty{fields.append(.init(label:"관측한 요소의 소유 앱",value:describe(owners)))}
+        if !info.unavailableReferences.isEmpty{fields.append(.init(label:"식별 정보 부족",value:"일부 앱 정보가 메모리 보관 범위를 벗어나 확인되지 않습니다. 원래 관측은 유지했습니다."))}
+        return fields
+    }
     private static func observationFields(_ event:DiagnosticCriticalJournal.Event)->[DiagnosticReviewField] {
         guard let c=event.context else{return []}
         var result:[DiagnosticReviewField]=[]
+        if let refs=c.applicationReferences,let info=c.applicationInfo,refs.valid,info.valid {
+            result += applicationFields(info,targets:[refs.target],owners:[refs.owner])
+        }
         if event.failure.stage == .captureDisposition,event.failure.code==8{result.append(.init(label:"상세 연결",value:"같은 조회 또는 본문 변화의 상세 \(c.incident)에 연결했습니다. 각 발생 기록은 유지합니다."))}
         if c.detailPolicy==2{result.append(.init(label:"보관 방식",value:"관측 요약 보관 · 상세 저장 실패가 아닙니다. 정상 입력으로 판정했다는 뜻은 아닙니다."))}
         if event.failure.stage == .boundaryCompletion{result.append(.init(label:"전환 상태",value:"초기 입력 전달 완료"))}
@@ -477,6 +594,23 @@ final class DiagnosticReviewSnapshot {
         let enumerate = enumerate ?? {visit in
             guard let frames=object["frames"] as? [[String:Any]],frames.count<=65536 else{throw DiagnosticReviewError.invalidCapture}
             for frame in frames{try visit(frame)}
+        }
+        let applicationInfo:DiagnosticApplicationSnapshot?
+        if let value=object["applicationInfo"] {
+            guard let decoded=DiagnosticApplicationSnapshot.parse(value) else{throw DiagnosticReviewError.invalidCapture};applicationInfo=decoded
+        }else{applicationInfo=nil}
+        var applicationTargets=Set<Int>(),applicationOwners=Set<Int>()
+        func references(_ raw:Any?)throws {
+            guard let raw else{return}
+            guard let fields=raw as? [String:Any],Set(fields.keys)==["target","owner"],
+                  let target=integer(fields["target"]),let owner=integer(fields["owner"]),
+                  DiagnosticApplicationReferences(target:target,owner:owner).valid else{throw DiagnosticReviewError.invalidCapture}
+            applicationTargets.insert(target);applicationOwners.insert(owner)
+        }
+        for baseline in object["shapeBaselines"] as? [[String:Any]] ?? [] {
+            for key in ["current","previous"] {
+                try references(((baseline[key] as? [String:Any])?["evidence"] as? [String:Any])?["applications"])
+            }
         }
         var counts: [String: Int] = [:]
         var maxCallback: Int?, maxRead: Int?
@@ -530,6 +664,8 @@ final class DiagnosticReviewSnapshot {
         }
         var frameCount=0
         try enumerate { frame in
+            try references(frame["applications"])
+            try references((frame["shapeEvidence"] as? [String:Any])?["applications"])
             frameCount+=1;guard frameCount<=65536 else{throw DiagnosticReviewError.invalidCapture}
             let kind = integer(frame["kind"]) ?? 0, code = integer(frame["category"]) ?? 0
             let duration = integer(frame["durationMicros"])
@@ -704,6 +840,10 @@ final class DiagnosticReviewSnapshot {
             }
             if !fields.isEmpty { sections.append(.init(title: title, fields: fields)) }
         }
+        if let applicationInfo {
+            let fields=applicationFields(applicationInfo,targets:applicationTargets,owners:applicationOwners)
+            if !fields.isEmpty{sections.insert(.init(title:"전후 구간에서 관측한 앱",fields:fields),at:1)}
+        }
         return DiagnosticReviewDocument(phase == 0 ? "발생 전 상태" : "발생 후 상태", sections)
     }
     private static func storageDocument(_ status: [String: Any]) -> DiagnosticReviewDocument {
@@ -751,12 +891,13 @@ final class DiagnosticReviewSnapshot {
                 .init(label: "전후 기록", value: phases)])
         })
         var files = [DiagnosticReviewFile(summary: preview), try DiagnosticReviewFile(environment: environment)]
+        let applications=DiagnosticReviewApplications();applications.merge(journalApplications)
         var dependencies:[String:DiagnosticArchiveReader.FileEvidence]=[:]
         for (index, incident) in chosen.enumerated() {
             for phase in [0, 1] {
                 if let original = incident.originals[phase] {
                     try request.check()
-                    let reviewed=try original.review(request:request)
+                    let reviewed=try original.review(request:request,applications:applications)
                     warnings+=reviewed.document.exportWarnings
                     for (name,evidence) in reviewed.dependencies {
                         guard dependencies[name].map({$0==evidence}) ?? true else{throw DiagnosticReviewError.invalidCapture}
@@ -774,7 +915,7 @@ final class DiagnosticReviewSnapshot {
             let verified=dependencies[name]!
             let source=DiagnosticReviewSource(owner:owner,url:url,bytes:verified.bytes,digest:verified.digest)
             try source.verify(request)
-            files.append(DiagnosticReviewFile(name,"공유 전후 관측",source:source,preview:DiagnosticReviewDocument("공유 전후 관측",[.init(title:"함께 저장하는 자료",fields:[.init(label:"내용",value:"선택한 사건을 복원하는 공유 관측과 메타데이터입니다. 공유 구간과 공통 정보에 필요한 다른 사건의 일부 정보가 포함될 수 있습니다.")])])))
+            files.append(DiagnosticReviewFile(name,"공유 전후 관측",source:source,preview:DiagnosticReviewDocument("공유 전후 관측",[.init(title:"함께 저장하는 자료",fields:[.init(label:"내용",value:"선택한 사건을 복원하는 공유 관측과 메타데이터입니다. 공유 구간과 공통 정보에 필요한 다른 사건의 일부 정보가 포함될 수 있습니다.")])]),sharedDependency:true))
         }
         let selectedOriginals=chosen.flatMap{Array($0.originals.values)}.map(\.filename).sorted()
         let sharedDependencies=files.map(\.path).filter{DiagnosticSharedStore.validName($0) && !selectedOriginals.contains($0)}.sorted()
@@ -787,12 +928,33 @@ final class DiagnosticReviewSnapshot {
             let selectedNames=Set(selectedOriginals)
             pending.captures=pending.captures.filter{selectedNames.contains($0.file)}
             let data=try JSONEncoder().encode(pending)
-            files.append(DiagnosticReviewFile("pending-export.json","메모리에서 복사한 기록",original:data,preview:DiagnosticReviewDocument("메모리에서 복사한 기록",[.init(title:"원래 저장소와 별도로 보존",fields:[
-                .init(label:"선택한 상세 구간",value:"\(pending.captures.count)개"),
-                .init(label:"메모리의 사건 기록",value:"\(pending.journalFiles.values.reduce(0,+))개"),
-                .init(label:"원래 저장 상태",value:"내보내기는 별도 사본입니다. 원래 저장소의 저장 완료를 뜻하지 않습니다.")])])))
+            let hasCopies = !pending.captures.isEmpty || !pending.journalFiles.isEmpty
+            let title=hasCopies ? "아직 앱에 저장되지 않은 기록":"포함하지 못한 자료"
+            var fields:[DiagnosticReviewField]=[]
+            if hasCopies {
+                fields.append(.init(label:"포함한 기록",value:"아직 앱에 저장되지 않은 기록을 이번 ZIP에 포함했습니다."))
+                if !pending.captures.isEmpty{fields.append(.init(label:"상세 구간",value:"\(pending.captures.count)개"))}
+                if !pending.journalFiles.isEmpty{fields.append(.init(label:"사건 기록",value:"\(pending.journalFiles.values.reduce(0,+))개"))}
+                var components:Set<DiagnosticStorageIssue.Component> = pending.captures.isEmpty ? []:[.detail]
+                for name in pending.journalFiles.keys {
+                    if name.hasPrefix("critical-memory-v3-errors-"){components.insert(.criticalErrors)}
+                    else if name.hasPrefix("critical-memory-v3-observations-"){components.insert(.observations)}
+                    else if name.hasPrefix("critical-memory-v3-terminal-"){components.insert(.termination)}
+                    else{components.formUnion([.criticalErrors,.observations,.termination])}
+                }
+                let states=storageIssueSnapshot?.issues.filter{components.contains($0.component)} ?? []
+                let retry=states.isEmpty ? "이 자료만으로 자동 재시도 상태를 확인할 수 없습니다.":states.map{$0.component.title+": "+$0.retry.message}.joined(separator:"\n")
+                fields.append(.init(label:"앱의 저장 상태",value:retry))
+                warnings.append("아직 앱에 저장되지 않은 상세 구간 \(pending.captures.count)개와 사건 기록 \(pending.journalFiles.values.reduce(0,+))개를 이번 ZIP에 포함했습니다.\n"+retry)
+            }
+            if !pending.unavailableSources.isEmpty{fields.append(.init(label:"빠진 자료",value:"원래 저장소에서 읽지 못한 파일이 있습니다. 읽을 수 있는 자료와 메모리에 남은 사본만 포함했습니다."))}
+            var file=DiagnosticReviewFile("pending-export.json",title,original:data,preview:DiagnosticReviewDocument(title,[.init(title:"내보내기에 포함한 범위",fields:fields)]))
+            file.archiveOnly = !hasCopies && pending.unavailableSources.isEmpty
+            files.append(file)
         }
         files.append(contentsOf:criticalFiles)
+        if !applications.isEmpty{files.insert(try applications.file(),at:2)}
+        if applications.incomplete{warnings.append("포함된 원본의 일부 앱 정보를 모두 해석하지 못했습니다. ‘포함되는 앱 정보’를 확인해 주세요.")}
         files.append(DiagnosticReviewFile("storage-status.json", "저장 상태", original: storageData, preview: storage))
         var seen=Set<String>();warnings=warnings.filter{seen.insert($0).inserted}
         let notes=warnings.isEmpty ? []:[DiagnosticReviewSection(title:"포함 범위 안내",fields:warnings.map{.init(label:"확인된 제한",value:$0)})]

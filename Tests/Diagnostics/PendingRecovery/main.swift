@@ -48,6 +48,20 @@ check(denied.stats.pendingBytes>0 && denied.stats.saved==1 && denied.stats.lastF
 check(chmod(denied.directory.path,0o700)==0,"owned test directory permission restored")
 deniedClock+=61
 check(denied.drain() && denied.stats.saved==2 && denied.stats.pendingBytes==0,"same process saves both phases after chmod recovery")
+let healthy=try exported(denied,"healthy-copy")
+let healthyFiles=try healthy.files(selected:Set(healthy.incidents.map(\.id)),environment:environment)
+let healthyRows=DiagnosticReviewPreviewRow.make(healthyFiles)
+check(healthyFiles.contains{$0.path=="pending-export.json" && $0.archiveOnly},"empty pending metadata remains in ZIP without a visible warning row")
+check(!healthyRows.contains{if case .file(let file)=$0{return file.path=="pending-export.json"};return false},"healthy export hides empty memory-copy notice")
+let dependencies=healthyFiles.filter(\.sharedDependency)
+check(!dependencies.isEmpty,"shared original dependencies exist")
+let groups=healthyRows.filter{!$0.filenames.isEmpty}
+check(groups.count==1 && Set(groups[0].filenames)==Set(dependencies.map(\.path)),"all shared originals appear in exactly one preview group")
+check(!groups[0].document().readableText.contains(".hqdiag") && groups[0].document(showFilenames:true).readableText.contains(dependencies[0].path),"dependency filenames are collapsed until requested")
+let rescuedFiles=try deniedSnapshot.files(selected:Set(deniedSnapshot.incidents.map(\.id)),environment:environment)
+let rescuedNotice=rescuedFiles.first{$0.path=="pending-export.json"}!
+check(!rescuedNotice.archiveOnly && rescuedNotice.readableText.contains("이번 ZIP에 포함했습니다") && rescuedNotice.readableText.contains("확인할 수 없습니다"),"real memory rescue explains inclusion without inventing retry state")
+check(rescuedFiles[0].readableText.contains("읽을 수 없어") && rescuedNotice.readableText.contains("빠진 자료"),"unavailable source warning survives grouping and conditional notices")
 // A filesystem problem must never erase the ownership/tampering guard.
 for replaceDirectory in [false,true] {
  var fail=false,clock=100.0
@@ -86,7 +100,48 @@ check(unzip.terminationStatus==0,"all-pending ZIP restores")
 for file in files{check(try Data(contentsOf:root.appendingPathComponent("pending-restored/HanQ-Diagnostics/"+file.path))==file.data,"all-pending ZIP byte match \(file.path)")}
 for incident in many.incidents {check(try DiagnosticSharedStore.expand(incident.originals[0]!.filename,in:root.appendingPathComponent("pending-restored/HanQ-Diagnostics")).frames.map(\.sequence)==Array(1...100),"ZIP decodes every pending capture")}
 check(flood.stats.saved==0 && flood.stats.pendingBytes>0,"ZIP export leaves automatic retry queue intact")
+for retry in [DiagnosticStorageIssue.Retry.automatic,.stopped,.notScheduled,.unknown] {
+ let retryDirectory=root.appendingPathComponent("retry-copy-\(retry.rawValue)")
+ try fm.copyItem(at:many.directory,to:retryDirectory)
+ let issue=DiagnosticStorageIssue(component:.detail,failure:.posix(.storageWrite,ENOSPC),retry:retry)
+ try JSONEncoder().encode(DiagnosticStorageIssueSnapshot(issues:[issue])).write(to:retryDirectory.appendingPathComponent("storage-issues.json"))
+ try fm.setAttributes([.posixPermissions:0o600],ofItemAtPath:retryDirectory.appendingPathComponent("storage-issues.json").path)
+ let reviewed=try DiagnosticReviewSnapshot(directory:retryDirectory)
+ let selectedFiles=try reviewed.files(selected:ids,environment:environment,allPending:true)
+ let notice=selectedFiles.first{$0.path=="pending-export.json"}!
+ check(!notice.archiveOnly && notice.readableText.contains(retry.message),"pending-copy notice uses actual retry state \(retry)")
+ if retry != .automatic {check(!notice.readableText.contains(DiagnosticStorageIssue.Retry.automatic.message),"stopped or unknown retry never promises automatic saving")}
+}
 for code in [Int(EACCES),Int(EPERM),Int(EROFS)]{check(!DiagnosticWriteBudget.transient(.policy(.storageOwnership,code)),"policy numbers cannot become retryable errno \(code)")}
+// Another record waiting in memory must not label a saved selection as rescued.
+var selectionFails=false
+let selectionStore=DiagnosticSharedStore(directory:directory("selection-pending"),preserve:true,writer:{fd,p,n in if selectionFails{errno=ENOSPC;return -1};return Darwin.write(fd,p,n)})
+check(selectionStore.submit(input(1)),"selection fixture stores first record")
+selectionFails=true;check(!selectionStore.submit(input(2)),"selection fixture queues different record")
+let selectionSnapshot=try exported(selectionStore,"selection-copy")
+let savedID=selectionSnapshot.incidents.first{$0.number==1}!.id
+let savedSelection=try selectionSnapshot.files(selected:[savedID],environment:environment)
+check(savedSelection.first{$0.path=="pending-export.json"}!.archiveOnly,"unselected memory capture does not create a rescue notice")
+check(!savedSelection[0].readableText.contains("이번 ZIP에 포함했습니다"),"saved selection never claims an unrelated memory copy")
+// A journal-only rescue reports that journal's retry state, not a different
+// detail writer which happens to be stopped at the same time.
+let journal=DiagnosticCriticalJournal(directory:directory("journal-pending"),writer:{_,_,_ in errno=ENOSPC;return -1})
+journal.record(.posix(.probeLaunch,EIO));_ = journal.flush(timeout:2)
+let journalCopy=directory("journal-copy")
+var journalPending=DiagnosticPendingExport()
+for (name,data,count) in try journal.pendingExport(){try DiagnosticSharedStore.writeExport(data,to:journalCopy.appendingPathComponent(name));journalPending.journalFiles[name]=count}
+check(journalPending.journalFiles.values.reduce(0,+)==1,"one important error enters memory rescue")
+try DiagnosticSharedStore.writeExport(try JSONEncoder().encode(journalPending),to:journalCopy.appendingPathComponent("pending-export.json"))
+try DiagnosticSharedStore.writeExport(Data("{}".utf8),to:journalCopy.appendingPathComponent("review-dates.json"))
+try DiagnosticSharedStore.writeExport(Data("{\"schema\":1,\"status\":{}}".utf8),to:journalCopy.appendingPathComponent("storage-status.json"))
+let journalIssues=DiagnosticStorageIssueSnapshot(issues:[.init(component:.criticalErrors,failure:.posix(.storageWrite,ENOSPC),retry:.automatic),.init(component:.detail,failure:.policy(.storageOwnership,1),retry:.stopped)])
+try DiagnosticSharedStore.writeExport(try JSONEncoder().encode(journalIssues),to:journalCopy.appendingPathComponent("storage-issues.json"))
+let journalSnapshot=try DiagnosticReviewSnapshot(directory:journalCopy)
+let journalFiles=try journalSnapshot.files(selected:[],environment:environment)
+let journalNotice=journalFiles.first{$0.path=="pending-export.json"}!
+check(journalNotice.readableText.contains(DiagnosticStorageIssue.Retry.automatic.message) && !journalNotice.readableText.contains(DiagnosticStorageIssue.Retry.stopped.message),"journal-only rescue shows only its actual retry state")
+let rescuedJournal=journalFiles.first{journalPending.journalFiles[$0.path] != nil}!
+check(try DiagnosticCriticalJournal.decode(rescuedJournal.data)?.events.count==1,"important error original remains included with the notice")
 func wait(_ predicate:()->Bool){let deadline=Date().addingTimeInterval(5);while !predicate() && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.01))};check(predicate(),"asynchronous completion")}
 let emptyQuit=DiagnosticQuitState(detailPhases:0,errors:0,observations:0),pendingQuit=DiagnosticQuitState(detailPhases:2,errors:1,observations:1)
 for choice in [DiagnosticQuitCoordinator.Choice.cancel,.export,.discard] {

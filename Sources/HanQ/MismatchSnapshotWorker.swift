@@ -37,7 +37,7 @@ final class MismatchSnapshotWorker {
             focusAccess.observeFocus=nil
             let allowed=incidentRead != nil && !["secure_input","secure_text_field"].contains(incidentReason)
             let focus=focusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:3)
-            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentRead == nil ? nil:.snapshot(incidentReason),focus:focus,axResult:allowed ? axResult:nil)
+            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentRead == nil ? nil:.snapshot(incidentReason),focus:focus,axResult:allowed ? axResult:nil,applications:allowed ? focusRead?.applications:nil)
         }
         let application=AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application,0.05)

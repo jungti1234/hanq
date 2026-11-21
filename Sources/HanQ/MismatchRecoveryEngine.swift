@@ -402,7 +402,7 @@ final class MismatchRecoveryEngine:NSObject {
             focusAccess.observeResult=oldResultObserver
             let allowed=incidentMeasured && !["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason)
             let focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:2)
-            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason,includesContent:includeContent):nil,focus:focus,axResult:allowed ? axResult:nil)
+            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason,includesContent:includeContent):nil,focus:focus,axResult:allowed ? axResult:nil,applications:allowed ? focusRead?.applications:nil)
         }
         let queryStart=ProcessInfo.processInfo.systemUptime,previousID=activeSnapshotID
         traceSequence+=1;let id=traceSequence;activeSnapshotID=id
@@ -746,7 +746,7 @@ final class MismatchRecoveryEngine:NSObject {
             var evidence=snap.incidentGeneration==incidentTrace.collectionGeneration ? (snap.incidentAX ?? InputIncidentAXEvidence()):InputIncidentAXEvidence()
             evidence.owner=owner;evidence.window=window;evidence.identityEpoch=epoch
             let change=incidentShapeProbe.observe(identity:identity,text:snap.text,selection:snap.selection,generation:incidentTrace.collectionGeneration,ax:evidence,correlation:incidentTrace.shapeCorrelation,activity:incidentTrace.activityEpoch)
-            incidentTrace.shape(.mismatchAX,identity:identity,count:snap.text.utf16.count,selected:snap.selection.length>0,editing:recovering,change:change)
+            incidentTrace.shape(.mismatchAX,identity:identity,count:snap.text.utf16.count,selected:snap.selection.length>0,editing:recovering,change:change,applications:target.map{.init(target:$0.processIdentifier,owner:$0.processIdentifier)})
         } else {incidentShapeProbe.reset()}
         if let known=verifiedDeliveryHistory?(snap,allowPrior),known.plan.sourceID==currentSource(),
            known.plan.codes.count>(plan?.codes.count ?? 0),

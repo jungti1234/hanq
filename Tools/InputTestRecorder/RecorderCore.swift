@@ -126,13 +126,14 @@ struct RecorderAXEvidence:Codable {
     static let keys=Set(["valueClass","placeholder","label","characterCount","representation","route","owner","window","fieldRelation","windowRelation","identityEpoch"])
     var valid:Bool {(0...5).contains(valueClass) && (0...4).contains(placeholder) && (0...4).contains(label) && (0...3).contains(characterCount) && (0...2).contains(representation) && (0...3).contains(route) && owner>0 && window>=0 && (0...2).contains(fieldRelation) && (0...2).contains(windowRelation) && identityEpoch>0 && (window>0 || windowRelation==0)}
     static func fields(_ value:[String:Any])->Bool {
-        Set(value.keys).subtracting(["ax","caretPrecedingClass","selectionMotion"])==RecorderShapeEvidence.keys && (!value.keys.contains("selectionMotion") || value["selectionMotion"] is NSNumber) && (!value.keys.contains("caretPrecedingClass") || value["caretPrecedingClass"] is NSNumber) && (!value.keys.contains("ax") || (value["ax"] as? [String:Any]).map{Set($0.keys)==keys}==true)
+        Set(value.keys).subtracting(["ax","caretPrecedingClass","selectionMotion","applications"])==RecorderShapeEvidence.keys && (value["applications"].map{DiagnosticApplicationReferences.parse($0) != nil} ?? true) && (!value.keys.contains("selectionMotion") || value["selectionMotion"] is NSNumber) && (!value.keys.contains("caretPrecedingClass") || value["caretPrecedingClass"] is NSNumber) && (!value.keys.contains("ax") || (value["ax"] as? [String:Any]).map{Set($0.keys)==keys}==true)
     }
 }
 struct RecorderShapeEvidence:Codable {
     let phase:Int;let comparisonKnown:Bool;let contentChanged:Bool;let selectionChanged:Bool
     let editingChanged:Bool;let gap:Bool;let editing:Bool
     let firstMilliseconds:Int;let lastMilliseconds:Int;let observations:Int;let coalesced:Int;let baselineSequence:Int
+    var applications:DiagnosticApplicationReferences?=nil
     var ax:RecorderAXEvidence?=nil
     var caretPrecedingClass:Int?=nil
     var selectionMotion:Int?=nil
@@ -292,6 +293,7 @@ enum RecorderBoundaryEvidence {
     }
 }
 struct RecorderFrame: Codable {
+    var applications:DiagnosticApplicationReferences?=nil
     let sequence, milliseconds, lane, kind, event, edge, category, inputOrigin: Int
     let consumed: Bool
     let durationMicros, count: Int
@@ -456,6 +458,7 @@ struct RecorderMonitorStatus:Codable {
     }
 }
 struct RecorderTrace: Codable {
+    var applicationInfo:DiagnosticApplicationSnapshot?=nil
     var coverage:[String:Int]?=nil
     let schema: Int
     let runID:String?
@@ -477,6 +480,7 @@ struct RecorderTrace: Codable {
 
     private static func validFrame(_ row:RecorderFrame,legacyBoundary:Bool)->Bool {
                   guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...15).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
+                  if let refs=row.applications {guard refs.valid,row.kind==2,row.category==2,[6,7].contains(row.lane) else{return false}}
                   if row.kind==15 {
                       return row.onsetObservation?.valid==true && row.lane==3 && row.event==0 && row.edge==0 && row.category==0 && row.inputOrigin==0 && !row.consumed && row.durationMicros==0 && row.count==0 && !row.selected && row.field==0 && row.observationTiming?.valid==true && row.decisionTiming==nil && row.sourceEvidence==nil && row.shapeEvidence==nil && row.controlEvidence==nil && row.eventEvidence==nil && row.workEvidence==nil && row.readOutcome==nil && row.focusEvidence==nil && row.onsetEvidence==nil && row.boundaryEvidence==nil
                   }
@@ -538,8 +542,9 @@ struct RecorderTrace: Codable {
     static func decode(_ data: Data) throws -> RecorderTrace {
         guard data.count <= 16 * 1024 * 1024,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog","keyboardOrigin","coverage"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
+              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog","keyboardOrigin","coverage","applicationInfo"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
               let rows = object["frames"] as? [[String: Any]], rows.count <= 16384 else { throw RecorderError.invalidTrace }
+        if let raw=object["applicationInfo"],DiagnosticApplicationSnapshot.parse(raw)==nil {throw RecorderError.invalidTrace}
         if let raw = object["keyboardOrigin"] {
             func integer(_ raw: Any?, in range: ClosedRange<Int>) -> Int? {
                 guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
@@ -605,7 +610,8 @@ struct RecorderTrace: Codable {
         }
         let keys = Set(["sequence", "milliseconds", "lane", "kind", "event", "edge", "category", "inputOrigin", "consumed", "durationMicros", "count", "selected", "field"])
         guard rows.allSatisfy({ row in
-            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence","boundaryEvidence","onsetObservation"])==keys else{return false}
+            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence","boundaryEvidence","onsetObservation","applications"])==keys else{return false}
+            if let raw=row["applications"],DiagnosticApplicationReferences.parse(raw)==nil{return false}
             if row.keys.contains("onsetObservation") {
                 guard let value=row["onsetObservation"] as? [String:Any],RecorderOnsetObservation.parse(value) != nil else{return false}
             }
@@ -681,6 +687,9 @@ struct RecorderTrace: Codable {
                   dict.count <= 8 && dict.allSatisfy { Int($0.key).map { (1...8).contains($0) } == true && $0.value >= 0 }
               }),
               value.frames.allSatisfy({Self.validFrame($0,legacyBoundary:value.build=="366")}) else { throw RecorderError.invalidTrace }
+        let appIDs=Set(value.applicationInfo?.records.map(\.id) ?? []).union(value.applicationInfo?.unavailableReferences ?? [])
+        let references=value.frames.flatMap{[$0.applications,$0.shapeEvidence?.applications].compactMap{$0}}+(value.shapeBaselines ?? []).flatMap{[$0.current.evidence.applications,$0.previous?.evidence.applications].compactMap{$0}}
+        guard references.allSatisfy({$0.valid && Set([$0.target,$0.owner]).subtracting([0]).isSubset(of:appIDs)}) else{throw RecorderError.invalidTrace}
         if let baselines=value.shapeBaselines {
             guard baselines.count<=8,Set(baselines.map{$0.lane}).count==baselines.count,baselines.allSatisfy({$0.valid}) else{throw RecorderError.invalidTrace}
         }

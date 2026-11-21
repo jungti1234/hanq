@@ -5,7 +5,11 @@ import Compression
 
 struct DiagnosticPackedFrame:Codable {
     let sequence:Int,milliseconds:Int,data:Data
-    init(_ frame:InputIncidentTrace.Frame)throws{sequence=frame.sequence;milliseconds=frame.milliseconds;data=try DiagnosticPackedCodec.shared.encode(frame)}
+    // RAM-only index avoids decoding every retained frame to collect the small
+    // app metadata table. The existing packet's on-disk fields stay unchanged.
+    var applicationReferences:UInt64=0
+    private enum CodingKeys:String,CodingKey{case sequence,milliseconds,data}
+    init(_ frame:InputIncidentTrace.Frame)throws{sequence=frame.sequence;milliseconds=frame.milliseconds;data=try DiagnosticPackedCodec.shared.encode(frame);applicationReferences=(frame.applications ?? frame.shapeEvidence?.applications)?.packed ?? 0}
     func unpack()throws->InputIncidentTrace.Frame{try DiagnosticPackedCodec.shared.decode(InputIncidentTrace.Frame.self,from:data)}
     var accountedBytes:Int{data.count+MemoryLayout<Self?>.stride+32}
 }

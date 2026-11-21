@@ -37,6 +37,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     var hasRecords: Bool { snapshot?.hasRecords == true }
     private var selected = Set<String>()
     private var archive: DiagnosticReviewArchive?
+    private var previewRows:[DiagnosticReviewPreviewRow]=[]
     private var generation = 0
     private var loadRequest: DiagnosticSnapshotRequest?
     private var selectionRequest: DiagnosticSnapshotRequest?
@@ -53,6 +54,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     private let selectionLabel = NSTextField(labelWithString: "선택한 기록 0/5건")
     private let statusLabel = NSTextField(labelWithString: "저장 중인 후속 기록을 기다리고 있습니다.")
     private let previewTitle = NSTextField(labelWithString: "미리보기")
+    private let filenamesButton = NSButton(title:"파일 목록 보기",target:nil,action:nil)
     private let exportWarningLabel = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "내보내기…", target: nil, action: nil)
     private let finderButton = NSButton(title: "Finder에서 보기", target: nil, action: nil)
@@ -239,6 +241,10 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         let right = NSStackView(); right.orientation = .vertical; right.alignment = .leading; right.spacing = 8
         previewTitle.identifier = NSUserInterfaceItemIdentifier("diagnosticPreviewTitle")
         previewTitle.font = .systemFont(ofSize: 13, weight: .medium); right.addArrangedSubview(previewTitle)
+        filenamesButton.bezelStyle = .recessed;filenamesButton.setButtonType(.pushOnPushOff)
+        filenamesButton.target=self;filenamesButton.action = #selector(toggleFilenames)
+        filenamesButton.setAccessibilityIdentifier("diagnosticSharedFilenames")
+        filenamesButton.isHidden=true;right.addArrangedSubview(filenamesButton)
         textView.isEditable = false; textView.isSelectable = true; textView.isRichText = false
         textView.font = .systemFont(ofSize: 13)
         textView.textContainerInset = NSSize(width: 14, height: 12)
@@ -286,12 +292,14 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         return allPending ? snapshot.incidents.filter{snapshot.pendingIncidentIDs.contains($0.id)}:snapshot.incidents
     }
     func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === recordTable ? visibleIncidents.count : archive?.files.count ?? 0
+        tableView === recordTable ? visibleIncidents.count : previewRows.count
     }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         if tableView === fileTable {
-            guard let files = archive?.files, files.indices.contains(row) else { return nil }
-            let field = label(files[row].title); field.toolTip = files[row].path; return cell(field)
+            guard previewRows.indices.contains(row) else { return nil }
+            let field = label(previewRows[row].title)
+            if case .file(let file)=previewRows[row]{field.toolTip=file.path}
+            return cell(field)
         }
         let incidents=visibleIncidents
         guard incidents.indices.contains(row) else { return nil }
@@ -335,7 +343,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         let request = generation
         selectionLabel.stringValue = allPending ? "대기 기록 전체 \(selected.count)건":"선택한 기록 \(selected.count)/\(DiagnosticReviewSnapshot.selectionLimit)건"
         recordTable.reloadData()
-        archive = nil; savedURL = nil
+        archive = nil; savedURL = nil;previewRows=[]
+        filenamesButton.isHidden=true;filenamesButton.state = .off
         finderButton.isHidden = true
         saveButton.isEnabled = false; fileTable.reloadData(); textView.string = ""
         previewTitle.stringValue = "미리보기"
@@ -353,6 +362,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
                 switch result {
                 case .success(let archive):
                     self.archive = archive
+                    self.previewRows=DiagnosticReviewPreviewRow.make(archive.files)
                     self.exportWarningLabel.stringValue=archive.warningMessage==nil ? "":"내보내기 포함 범위에 확인할 사항이 있습니다. 아래 요약의 ‘포함 범위 안내’를 확인해 주세요."
                     self.exportWarningLabel.toolTip=archive.warningMessage
                     self.exportWarningLabel.isHidden=archive.warningMessage==nil
@@ -368,17 +378,23 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         }
     }
     private func showFile() {
-        guard let files = archive?.files, files.indices.contains(fileTable.selectedRow) else { return }
-        let file = files[fileTable.selectedRow]
-        previewTitle.stringValue = file.title
-        let value = NSMutableAttributedString(string: file.readableText, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor])
+        filenamesButton.state = .off
+        renderFile()
+    }
+    @objc private func toggleFilenames(){renderFile()}
+    private func renderFile() {
+        guard previewRows.indices.contains(fileTable.selectedRow) else { return }
+        let row=previewRows[fileTable.selectedRow]
+        filenamesButton.isHidden=row.filenames.isEmpty
+        filenamesButton.title=filenamesButton.state == .on ? "파일 목록 숨기기":"파일 목록 보기"
+        let document=row.document(showFilenames:filenamesButton.state == .on)
+        previewTitle.stringValue = row.title
+        let value = NSMutableAttributedString(string: document.readableText, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor])
         let paragraphs = NSMutableParagraphStyle(); paragraphs.lineSpacing = 5; paragraphs.paragraphSpacing = 4
         value.addAttribute(.paragraphStyle, value: paragraphs, range: NSRange(location: 0, length: value.length))
-        if let document = file.previewDocument {
-            for title in [document.title] + document.sections.map(\.title) {
+        for title in [document.title] + document.sections.map(\.title) where !title.isEmpty {
                 let range = (value.string as NSString).range(of: title)
                 if range.location != NSNotFound { value.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 14), range: range) }
-            }
         }
         textView.textStorage?.setAttributedString(value)
         textView.scrollToBeginningOfDocument(nil)

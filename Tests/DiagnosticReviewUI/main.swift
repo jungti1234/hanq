@@ -243,6 +243,31 @@ while hiddenFiles.numberOfRows == 0 && Date() < hiddenDeadline { RunLoop.current
 let hiddenPreview=descendants(hidden.window!.contentView!).compactMap{$0 as? NSTextView}.first!
 check(hiddenFiles.numberOfRows>=5 && hidden.hasRecords && hiddenPreview.string.contains("발생 전·후 모두 있음"),"hidden review loads both phases and all format-dependent shared files while OFF")
 print("INFO hidden review loaded",hiddenFiles.numberOfRows,"files, with both phases and shared dependencies")
+func fileTitle(_ row:Int)->String {
+    let cell=hiddenFiles.view(atColumn:0,row:row,makeIfNecessary:true)!
+    return descendants(cell).compactMap{$0 as? NSTextField}.first!.stringValue
+}
+let sharedRows=(0..<hiddenFiles.numberOfRows).filter{fileTitle($0).hasPrefix("함께 첨부되는 자료 ")}
+check(sharedRows.count==1,"shared dependencies have one visible group")
+check(!(0..<hiddenFiles.numberOfRows).contains{fileTitle($0).contains("메모리에서 복사한") || fileTitle($0).contains("아직 앱에 저장되지")},"healthy review does not display an empty memory rescue notice")
+hiddenFiles.selectRowIndexes(IndexSet(integer:sharedRows[0]),byExtendingSelection:false)
+RunLoop.current.run(until:Date().addingTimeInterval(0.02))
+let disclosure=descendants(hidden.window!.contentView!).compactMap{$0 as? NSButton}.first{$0.accessibilityIdentifier()=="diagnosticSharedFilenames"}!
+check(!disclosure.isHidden && !hiddenPreview.string.contains(".hqdiag"),"shared explanation starts collapsed")
+func renderShared(_ name:String)throws {
+    hidden.window!.contentView!.layoutSubtreeIfNeeded()
+    let content=hidden.window!.contentView!,bitmap=content.bitmapImageRepForCachingDisplay(in:content.bounds)!
+    content.cacheDisplay(in:content.bounds,to:bitmap)
+    if CommandLine.arguments.count>1{try bitmap.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:CommandLine.arguments[1]).deletingLastPathComponent().appendingPathComponent(name))}
+}
+try renderShared("review-shared-collapsed.png")
+disclosure.performClick(nil)
+check(hiddenPreview.string.contains(".hqdiag") && disclosure.title=="파일 목록 숨기기","disclosure reveals original dependency filenames")
+try renderShared("review-shared-expanded.png")
+hiddenFiles.selectRowIndexes(IndexSet(integer:0),byExtendingSelection:false)
+check(disclosure.isHidden,"ordinary document hides file-list control")
+hiddenFiles.selectRowIndexes(IndexSet(integer:sharedRows[0]),byExtendingSelection:false)
+check(disclosure.state == .off && !hiddenPreview.string.contains(".hqdiag"),"returning to group starts collapsed without stale filenames")
 hidden.close()
 let cancelled = DiagnosticReviewController(environment: environment)
 let cancelledTable = descendants(cancelled.window!.contentView!).compactMap { $0 as? NSTableView }.first { $0.numberOfColumns == 1 }!

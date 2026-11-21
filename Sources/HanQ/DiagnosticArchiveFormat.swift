@@ -1,4 +1,42 @@
 import Foundation
+
+struct DiagnosticApplicationReferences:Codable,Equatable {
+    let target:Int,owner:Int
+    var packed:UInt64{UInt64(target)<<32 | UInt64(owner)}
+    static func ids(_ packed:UInt64)->Set<Int>{Set([Int(packed>>32),Int(packed&0xffffffff)]).subtracting([0])}
+    var valid:Bool{target>=0 && owner>=0 && target<=Int(Int32.max) && owner<=Int(Int32.max)}
+    static func parse(_ value:Any)->Self? {
+        guard let object=value as? [String:Any],Set(object.keys)==Set(["target","owner"]),
+              let data=try? JSONSerialization.data(withJSONObject:object),
+              let decoded=try? JSONDecoder().decode(Self.self,from:data),decoded.valid else{return nil}
+        return decoded
+    }
+}
+struct DiagnosticApplicationRecord:Codable,Equatable {
+    let id:Int,pid:Int32
+    var name:String?,bundleID:String?,version:String?,build:String?,launchMilliseconds:Int64?
+    var shortened=false
+    var valid:Bool {
+        id>0 && id<=Int(Int32.max) && pid>0 &&
+        [name,bundleID].allSatisfy{$0.map{$0.utf8.count<=1024 && $0.unicodeScalars.allSatisfy{!CharacterSet.controlCharacters.contains($0)}} ?? true} &&
+        [version,build].allSatisfy{$0.map{$0.utf8.count<=256 && $0.unicodeScalars.allSatisfy{!CharacterSet.controlCharacters.contains($0)}} ?? true} &&
+        (launchMilliseconds.map{$0>=0 && $0<=9_000_000_000_000_000} ?? true)
+    }
+    var memoryCharge:Int{256+[name,bundleID,version,build].compactMap{$0}.reduce(0){$0+$1.utf8.count*2}}
+}
+struct DiagnosticApplicationSnapshot:Codable {
+    var schema=1
+    let records:[DiagnosticApplicationRecord],unavailableReferences:[Int]
+    var valid:Bool{schema==1 && records.count<=128 && records.allSatisfy(\.valid) && Set(records.map(\.id)).count==records.count && unavailableReferences.count<=131104 && Set(unavailableReferences).count==unavailableReferences.count && unavailableReferences.allSatisfy{$0>0 && $0<=Int(Int32.max)} && Set(records.map(\.id)).isDisjoint(with:unavailableReferences)}
+    static func parse(_ value:Any)->Self? {
+        guard let object=value as? [String:Any],Set(object.keys)==Set(["schema","records","unavailableReferences"]),
+              let rows=object["records"] as? [[String:Any]],rows.count<=128,
+              rows.allSatisfy({Set($0.keys).subtracting(["name","bundleID","version","build","launchMilliseconds"])==Set(["id","pid","shortened"]) && $0.values.allSatisfy{!($0 is NSNull)}}),
+              let data=try? JSONSerialization.data(withJSONObject:object),
+              let decoded=try? JSONDecoder().decode(Self.self,from:data),decoded.valid else{return nil}
+        return decoded
+    }
+}
 import Darwin
 import CryptoKit
 import Compression
@@ -305,7 +343,7 @@ enum DiagnosticArchiveReader {
         let metadataEvidence:[String:FileEvidence]
         /// Retain packed sources only; expanded objects live for one visit.
         /// Dependencies come from the same validated pass as the preview.
-        func visit(check:()throws->Void = {},observe:(String,FileEvidence)throws->Void = {_,_ in},
+        func visit(check:()throws->Void = {},observe:(String,FileEvidence)throws->Void = {_,_ in},observePayload:(Header,Payload)->Void = {_,_ in},
                    _ body:([String:Any])throws->Void)throws->Set<String> {
             var dependencies=metadataDependencies,previousName="",previous:Payload?
             for (name,evidence) in metadataEvidence{try observe(name,evidence)}
@@ -317,6 +355,7 @@ enum DiagnosticArchiveReader {
                 else {
                     var evidence:FileEvidence?
                     let pair=try read(directory.appendingPathComponent(range.file),observe:{evidence=$0})
+                    observePayload(pair.0,pair.1)
                     guard pair.0.owner==header.owner,pair.0.runID==header.runID else{throw DiagnosticPackedError.invalid}
                     try observe(range.file,evidence!)
                     source=pair.1;previousName=range.file;previous=source
@@ -336,12 +375,13 @@ enum DiagnosticArchiveReader {
             return dependencies
         }
     }
-    static func selection(_ name:String,in directory:URL)throws->Selection {
+    static func selection(_ name:String,in directory:URL,observePayload:(Header,Payload)->Void = {_,_ in})throws->Selection {
         guard validName(name) else{throw DiagnosticPackedError.invalid}
         var visited=Set<String>(),dependencies=Set<String>(),evidence:[String:FileEvidence]=[:]
         func meta(_ name:String)throws->(Header,Payload,DiagnosticJSON) {
             guard visited.count<64,visited.insert(name).inserted else{throw DiagnosticPackedError.invalid}
             let (header,payload)=try read(directory.appendingPathComponent(name),observe:{evidence[name]=$0});dependencies.insert(name)
+            observePayload(header,payload)
             var value:DiagnosticJSON = .object([:])
             if let base=header.metadataBase {let prior=try meta(base);guard prior.0.owner==header.owner else{throw DiagnosticPackedError.invalid};value=prior.2}
             try value.apply(payload.changes);return (header,payload,value)

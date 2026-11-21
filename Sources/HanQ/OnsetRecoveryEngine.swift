@@ -812,7 +812,7 @@ final class OnsetRecoveryEngine:NSObject {
                 if unavailableReason=="focus_changed_during_snapshot"{diagnosticRead.field=nil;diagnosticRead.range=nil}
             }
             else if testSnapshot == nil {diagnosticRead=OnsetDiagnosticHistory.Read()}
-            InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus,axResult:allowed ? axResult:nil)
+            InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus,axResult:allowed ? axResult:nil,applications:allowed ? focusRead?.applications:nil)
         }
         if let testSnapshot{return testSnapshot()}
         unavailableReason="";incidentMeasured=incidentRead != nil
@@ -857,7 +857,7 @@ final class OnsetRecoveryEngine:NSObject {
             let (identity,owner,window,epoch)=trace.fieldRegistry.identify(element,owner:target.processIdentifier,window:nil,generation:trace.collectionGeneration)
             var evidence=InputIncidentAXEvidence();evidence.owner=owner;evidence.window=window;evidence.identityEpoch=epoch;evidence.route=focusAccess.lastRoute
             let change=incidentShapeProbe.observe(identity:identity,text:text,selection:NSRange(location:range.location,length:range.length),generation:trace.collectionGeneration,ax:evidence,correlation:trace.shapeCorrelation,activity:trace.activityEpoch)
-            trace.shape(.onsetAX,identity:identity,count:text.utf16.count,selected:range.length>0,editing:recovering,change:change)
+            trace.shape(.onsetAX,identity:identity,count:text.utf16.count,selected:range.length>0,editing:recovering,change:change,applications:.init(target:target.processIdentifier,owner:target.processIdentifier))
         } else {incidentShapeProbe.reset()}
         return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length),compositionEnded:markedRangeState == .empty)
     }
