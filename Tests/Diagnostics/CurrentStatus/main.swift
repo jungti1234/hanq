@@ -56,11 +56,20 @@ let files=try snapshot.files(selected:Set(snapshot.incidents.map(\.id)),environm
 let partial=try DiagnosticReviewArchive(files:files)
 check(partial.warningMessage?.contains("저장 대기")==true && partial.warningMessage?.contains("발생 전 또는 후")==true,"export warns about actual pending and missing post")
 check(files[0].readableText.contains("포함 범위 안내"),"same limitations are in exported summary")
+let pendingState=try JSONDecoder().decode(DiagnosticStorageIssueSnapshot.self,from:Data(contentsOf:exported.appendingPathComponent("storage-issues.json")))
+check(pendingState.isValid && pendingState.issues.contains{$0.component == .detail && $0.retry == .automatic},"export records the writer's actual scheduled retry")
+check(partial.warningMessage?.contains("자동으로 다시 시도")==true && files[0].readableText.contains("저장이 완료된 뒤"),"pending UI and ZIP summary wait for successful storage, not just reopening")
+let legacyURL=root.appendingPathComponent("legacy-pending-export")
+try fm.copyItem(at:exported,to:legacyURL);try fm.removeItem(at:legacyURL.appendingPathComponent("storage-issues.json"))
+let legacy=try DiagnosticReviewSnapshot(directory:legacyURL)
+let legacyWarning=try DiagnosticReviewArchive(files:legacy.files(selected:Set(legacy.incidents.map(\.id)),environment:environment)).warningMessage
+check(legacyWarning?.contains("상태를 확인할 수 없습니다")==true && legacyWarning?.contains("자동으로 다시 시도하고")==false,"older snapshots never invent an automatic retry from pending bytes")
 writer.fail(false)
 wait{outcomes.last == .saved && observed.last == false}
 let recovered=health(trace)
 check(recovered.menuMessage==nil && recovered.missingWrites>0,"timer recovery hides active warning but retains failure count")
 check(trace.sharedStatsForTest()?.pendingBytes==0,"both manual phases really finish before success")
+check(try Data(contentsOf:exported.appendingPathComponent("storage-issues.json"))==files.first{$0.path=="storage-issues.json"}!.data,"an older export remains an immutable snapshot when live storage recovers")
 check(journal.flush(timeout:5),"recovery facts flush")
 check(try errors.map{try Data(contentsOf:$0)}==originalErrors,"recovery never erases or rewrites important error history")
 let written=writer.calls
@@ -200,10 +209,21 @@ check(!blockedResults.contains(.saved),"a later permanent failure never reports 
 check(health(blockedTrace).menuMessage != nil && (blockedTrace.sharedStatsForTest()?.pendingBytes ?? 0)>0,"blocked evidence remains queued with an active storage warning")
 check(!health(blockedTrace).manualCaptureAvailable,"permanently unsafe store cannot accept a new manual capture")
 check(health(blockedTrace).activeIssues.first?.retry == .stopped,"permanent writer failure reports stopped, not automatic")
-check(health(blockedTrace).notice?.needsDetails==true && health(blockedTrace).detailMessage.contains("손쉬운 사용 권한과는 별개"),"access failure has an actionable detail route without wrong permission advice")
+check(health(blockedTrace).notice?.needsDetails==true && health(blockedTrace).problemSummary?.action.contains("피드백")==true && !health(blockedTrace).detailMessage.contains("전후 상세 기록"),"access failure offers feedback, with no redundant single-path heading")
 let blockedCalls=blockedWriter.calls
 RunLoop.current.run(until:Date().addingTimeInterval(2.1))
 check(blockedWriter.calls==blockedCalls,"reported stopped writer does not secretly keep retrying")
+let blockedExport=root.appendingPathComponent("blocked-export")
+exportResult=nil;blockedTrace.prepareExport(to:blockedExport,reviewMetadata:true){exportResult=$0};wait{exportResult != nil};try exportResult!.get()
+let blockedSnapshot=try DiagnosticReviewSnapshot(directory:blockedExport)
+let blockedFiles=try blockedSnapshot.files(selected:Set(blockedSnapshot.incidents.map(\.id)),environment:environment)
+let blockedArchive=try DiagnosticReviewArchive(files:blockedFiles)
+check(blockedArchive.warningMessage?.contains("자동 재시도가 중단")==true && blockedArchive.warningMessage?.contains("잠시 후 창")==false,"actual stopped writer's export cannot promise a later retry")
+check(blockedFiles[0].readableText.contains("기다리거나 창을 다시 열어도 추가 저장되지 않습니다"),"ZIP summary preserves the stopped-state advice")
+let blockedZip=root.appendingPathComponent("blocked.zip");try blockedArchive.save(to:blockedZip)
+let blockedUnzip=Process();blockedUnzip.executableURL=URL(fileURLWithPath:"/usr/bin/ditto");blockedUnzip.arguments=["-x","-k",blockedZip.path,root.appendingPathComponent("blocked-restored").path];try blockedUnzip.run();blockedUnzip.waitUntilExit()
+check(blockedUnzip.terminationStatus==0,"stopped-state ZIP restores")
+for file in blockedFiles{check(try Data(contentsOf:root.appendingPathComponent("blocked-restored/HanQ-Diagnostics/"+file.path))==file.data,"stopped export keeps originals, retry status and summary byte-for-byte")}
 blockedTrace.stopAndFlush()
 
 // Cause classification must not manufacture scheduling from an error code.
@@ -241,6 +261,14 @@ let mixedHealth=health(mixedTrace)
 check(mixedHealth.activeIssues.contains{$0.component == .criticalErrors && $0.retry == .automatic},"error lane keeps automatic retry")
 check(mixedHealth.activeIssues.contains{$0.component == .observations && $0.retry == .stopped},"observation lane exposes its independent permanent stop")
 check(mixedHealth.notice?.detail.contains("일부")==true && mixedHealth.notice?.needsDetails==true,"mixed failures never promise every lane retries")
+check(mixedHealth.problemSummary?.retry.contains("중요 오류 기록: 자동으로")==true && mixedHealth.problemSummary?.retry.contains("사건 관측 기록: 자동 재시도가 중단")==true,"compact summary names each lane when retry states differ")
+let mixedExport=root.appendingPathComponent("mixed-export")
+exportResult=nil;mixedTrace.prepareExport(to:mixedExport,reviewMetadata:true){exportResult=$0};wait{exportResult != nil};try exportResult!.get()
+let mixedSnapshot=try DiagnosticReviewSnapshot(directory:mixedExport)
+let mixedFiles=try mixedSnapshot.files(selected:Set(mixedSnapshot.incidents.map(\.id)),environment:environment)
+let mixedWarnings=try DiagnosticReviewArchive(files:mixedFiles).warningMessage ?? ""
+check(mixedWarnings.contains("중요 오류 기록이 아직 저장 대기 중입니다. 이 내보내기에 해당 오류의 전체 내용이 포함되지 않을 수 있습니다.\n자동으로 다시 시도"),"export preserves independent error lane retries")
+check(mixedWarnings.contains("일반 사건 기록이 아직 저장 대기 중입니다. 이 내보내기에 전체 내용이 포함되지 않을 수 있습니다.\n자동 재시도가 중단"),"export preserves independently stopped observation lane")
 var changedCause=false
 mixedTrace.observeStorage{mixedTrace.storageHealth{value in DispatchQueue.main.async{changedCause=value.activeIssues.contains{$0.component == .criticalErrors && $0.cause == .io}}}}
 laneWriter.setErrors(EIO)
@@ -289,5 +317,20 @@ check(health(ownershipTrace).activeIssues.contains{$0.component == .readiness &&
 check(health(ownershipTrace).notice?.detail.contains("일부") != true,"all stopped stores never imply a partial automatic retry")
 try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:ownershipDenied.path)
 ownershipTrace.stopAndFlush()
+
+// Unknown and unscheduled states stay distinct, and invalid status metadata is
+// rejected before the reviewer can display a misleading retry promise.
+for retry in [DiagnosticStorageIssue.Retry.notScheduled,.unknown] {
+    let issue=DiagnosticStorageIssue(component:.detail,failure:.posix(.storageWrite,EIO),retry:retry)
+    let value=DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0,issues:[issue])
+    check(value.problemSummary?.action.contains("잠시 기다려")==false,"non-automatic issue never tells the user to just wait")
+    let state=DiagnosticStorageIssueSnapshot(issues:[issue])
+    check(state.exportAdvice(for:[.detail]).contains(retry == .unknown ? "확인할 수 없습니다":"예약되어 있지 않습니다"),"export keeps unknown and unscheduled states distinct")
+}
+let duplicate=DiagnosticStorageIssueSnapshot(issues:[cocoaSpace,cocoaSpace])
+check(!duplicate.isValid,"duplicate components cannot claim conflicting retry states")
+try JSONEncoder().encode(duplicate).write(to:legacyURL.appendingPathComponent("storage-issues.json"))
+try fm.setAttributes([.posixPermissions:0o600],ofItemAtPath:legacyURL.appendingPathComponent("storage-issues.json").path)
+do{_ = try DiagnosticReviewSnapshot(directory:legacyURL);check(false,"invalid retry status must be rejected")}catch{check(true,"invalid retry status is rejected")}
 
 print("PASS \(checks) current warning, manual completion/retry/cancel, export omissions and exact error/ZIP preservation; synthetic I/O failures, no input hooks")

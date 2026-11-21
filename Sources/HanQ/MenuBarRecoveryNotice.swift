@@ -43,7 +43,7 @@ final class MenuBarRecoveryNotice: NSObject {
                 "Mac의 노치나 메뉴바 공간 부족, 메뉴바 관리 앱의 숨김 설정으로 아이콘이 가려져 있을 수 있어요.")
             message.font = .systemFont(ofSize: 13)
             let hint = NSTextField(wrappingLabelWithString:
-                "이런 경우가 아닌데도 아이콘이 보이지 않으면\n피드백을 남겨주세요.")
+                "이런 경우가 아닌데도 아이콘이 보이지 않으면\n피드백을 남겨 주세요.")
             hint.font = .systemFont(ofSize: 13)
             hint.textColor = .secondaryLabelColor
             let content = NSStackView(views: [intro, message, hint])
@@ -52,7 +52,8 @@ final class MenuBarRecoveryNotice: NSObject {
             content.spacing = 20
             let separator = NSBox()
             separator.boxType = .separator
-            let feedback = NSButton(title: "피드백 남기기…", target: self, action: #selector(openFeedback))
+            let feedback = NSButton(title: UserFacingText.feedbackAction, target: self, action: #selector(openFeedback))
+            feedback.keyEquivalent = "\r"
             let close = NSButton(title: "닫기", target: self, action: #selector(closeNotice))
             close.keyEquivalent = "\u{1b}"
             for button in [feedback, close] { button.bezelStyle = .rounded }

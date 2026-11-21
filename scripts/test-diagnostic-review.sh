@@ -11,7 +11,7 @@ swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache So
 cp scripts/summarize-input-incident.py "$stage/summarize-input-incident.py"
 hanq_test_run "$stage/integration-tests"
 if [[ "${1:-}" == --ui ]]; then
-    swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/DiagnosticReview.swift Sources/HanQ/DiagnosticReviewController.swift Tests/DiagnosticReviewUI/main.swift -o "$stage/ui-tests"
+    swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/DiagnosticReview.swift Sources/HanQ/DiagnosticReviewController.swift Sources/HanQ/UserFacingText.swift Tests/DiagnosticReviewUI/main.swift -o "$stage/ui-tests"
     cp Resources/HanQ-Logo.png "$stage/HanQ-Logo.png"
     hanq_test_run "$stage/ui-tests" "$stage/review.png"
     mkdir -p .build/hanq/diagnostic-review

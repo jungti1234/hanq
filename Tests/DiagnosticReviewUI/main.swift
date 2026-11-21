@@ -35,8 +35,22 @@ let controller = DiagnosticReviewController(environment: environment)
 let window = controller.window!
 window.appearance = NSAppearance(named: .aqua)
 window.setFrameOrigin(NSPoint(x: -5000, y: -5000))
-controller.install(snapshot)
 func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+var feedbackCalls=0
+controller.onFeedback={feedbackCalls+=1}
+func feedbackButton(_ controller:DiagnosticReviewController)->NSButton {
+    descendants(controller.window!.contentView!).compactMap{$0 as? NSButton}.first{$0.title==UserFacingText.feedbackAction}!
+}
+func leaveFeedback(_ controller:DiagnosticReviewController) {
+    let button=feedbackButton(controller)
+    check(!button.isHiddenOrHasHiddenAncestor && button.isEnabled,"feedback available independently of ZIP state")
+    button.performClick(nil)
+}
+leaveFeedback(controller)
+check(feedbackCalls==1,"feedback callback before any record is loaded or ZIP is prepared")
+controller.install(snapshot)
+leaveFeedback(controller)
+check(feedbackCalls==2,"feedback callback while selected ZIP is being prepared")
 let views = descendants(window.contentView!)
 let tables = views.compactMap { $0 as? NSTableView }
 check(tables.count == 2, "record list and included-file list")
@@ -171,13 +185,28 @@ check(selectionLabel?.stringValue == "선택한 기록 0/5건" && fileTable.numb
 check(previewTitle.stringValue == "미리보기" && preview.string.isEmpty, "empty selection clears the previous file title and preview")
 let saveButton = views.compactMap { $0 as? NSButton }.first { $0.title == "내보내기…" }!
 check(!saveButton.isEnabled, "empty selection disables saving")
+leaveFeedback(controller)
+check(feedbackCalls==3,"empty selection does not block feedback or require saving")
 checkbox(0).performClick(nil)
 awaitFiles(5)
 check(fileTable.numberOfRows == 5 && saveButton.isEnabled && selectionLabel?.stringValue == "선택한 기록 1/5건", "new selection replaces stale async results and enables saving without capacity gate")
 let normalWarning=views.compactMap{$0 as? NSTextField}.first{$0.identifier?.rawValue=="diagnosticExportWarning"}!
 check(normalWarning.isHidden,"complete export has no omission warning")
 controller.close()
+feedbackButton(controller).performClick(nil)
+check(feedbackCalls==3,"closed review ignores stale feedback actions")
 check(fm.fileExists(atPath: root.appendingPathComponent("store").path), "close preserves original store")
+
+let failed=DiagnosticReviewController(environment:environment)
+failed.onFeedback={feedbackCalls+=1}
+failed.installLoadResult(.failure(DiagnosticLogExport.Failure.unavailable))
+leaveFeedback(failed)
+check(feedbackCalls==4 && !failed.hasRecords,"read failure does not block feedback")
+failed.installLoadResult(.failure(DiagnosticLogExport.Failure.noLogs))
+leaveFeedback(failed)
+check(feedbackCalls==5 && !failed.hasRecords,"empty-store feedback remains independent")
+check(descendants(failed.window!.contentView!).compactMap{$0 as? NSTextField}.contains{$0.stringValue=="보관 중인 기록이 없습니다."},"empty store is not presented as a read failure")
+failed.close()
 
 let partialURL=root.appendingPathComponent("partial-snapshot")
 let partialStore=DiagnosticLogStore(directory:root.appendingPathComponent("partial-store"),policy:.incidentDefault)

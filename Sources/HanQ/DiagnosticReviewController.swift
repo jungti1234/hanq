@@ -55,7 +55,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     private let exportWarningLabel = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "내보내기…", target: nil, action: nil)
     private let finderButton = NSButton(title: "Finder에서 보기", target: nil, action: nil)
-    private let feedbackButton = NSButton(title: "피드백 열기", target: nil, action: nil)
+    private let feedbackButton = NSButton(title: UserFacingText.feedbackAction, target: nil, action: nil)
     private let cancelButton = NSButton(title: "취소", target: nil, action: nil)
 
     init(environment: DiagnosticReviewEnvironment) {
@@ -96,8 +96,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         }
     }
 
-    /// Share the writer's immutable snapshot with the interruption report route.
-    /// Pending post-captures finish before this decides whether logs exist.
+    /// Share the writer's immutable snapshot with the interruption export route.
+    /// Pending post-captures finish before the review is populated.
     static func loadSnapshot(from trace: InputIncidentTrace,
                              directory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("HanQ-Review-" + UUID().uuidString),
                              request: DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),
@@ -116,6 +116,11 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         switch result {
         case .success(let snapshot): install(snapshot)
         case .failure(let error):
+            if (error as? DiagnosticLogExport.Failure) == .noLogs {
+                countLabel.stringValue = "보관 중인 기록이 없습니다."
+                statusLabel.stringValue = "진단 기록 없이도 피드백을 남길 수 있습니다."
+                return
+            }
             countLabel.stringValue = "기록을 불러오지 못했습니다."
             statusLabel.stringValue = (error as? DiagnosticLogExport.Failure)?.localizedDescription ?? "기록을 안전하게 읽을 수 없습니다. 원본은 유지됩니다. 창을 닫고 다시 시도해 주세요."
         }
@@ -255,7 +260,9 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         saveButton.action = #selector(saveZIP); saveButton.keyEquivalent = "\r"; saveButton.isEnabled = false
         cancelButton.action = #selector(cancel); cancelButton.keyEquivalent = "\u{1b}"
         finderButton.action = #selector(reveal); feedbackButton.action = #selector(feedback)
-        finderButton.isHidden = true; feedbackButton.isHidden = true
+        finderButton.isHidden = true
+        feedbackButton.setAccessibilityIdentifier("diagnosticReviewFeedback")
+        feedbackButton.toolTip = "진단 기록 첨부는 선택 사항입니다. 피드백 폼을 브라우저에서 엽니다."
         statusLabel.font = .systemFont(ofSize: 12); statusLabel.lineBreakMode = .byTruncatingMiddle
         let footer = horizontal([cancelButton, finderButton, feedbackButton, spacer(), statusLabel, saveButton])
         footer.spacing = 10
@@ -320,7 +327,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         selectionLabel.stringValue = "선택한 기록 \(selected.count)/\(DiagnosticReviewSnapshot.selectionLimit)건"
         recordTable.reloadData()
         archive = nil; savedURL = nil
-        finderButton.isHidden = true; feedbackButton.isHidden = true
+        finderButton.isHidden = true
         saveButton.isEnabled = false; fileTable.reloadData(); textView.string = ""
         previewTitle.stringValue = "미리보기"
         exportWarningLabel.stringValue="";exportWarningLabel.isHidden=true
@@ -385,8 +392,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
                     switch result {
                     case .success:
                         self.savedURL = destination
-                        self.statusLabel.stringValue = "ZIP을 저장했습니다. 피드백 폼에 직접 첨부해 주세요."
-                        self.finderButton.isHidden = false; self.feedbackButton.isHidden = false
+                        self.statusLabel.stringValue = "ZIP을 저장했습니다. 피드백을 남길 때 첨부할 수 있습니다."
+                        self.finderButton.isHidden = false
                     case .failure:
                         self.statusLabel.stringValue = "ZIP을 저장하지 못했습니다. 다른 위치에 다시 저장해 주세요."
                     }
@@ -396,7 +403,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     }
     @objc private func cancel() { if !saving { close() } }
     @objc private func reveal() { if let savedURL { NSWorkspace.shared.activateFileViewerSelecting([savedURL]) } }
-    @objc private func feedback() { onFeedback?() }
+    @objc private func feedback() { if !closed { onFeedback?() } }
     func windowShouldClose(_ sender: NSWindow) -> Bool { !saving }
     func windowWillClose(_ notification: Notification) {
         closed = true

@@ -192,10 +192,18 @@ func buttons(in view: NSView) -> [NSButton] {
     (view as? NSButton).map { [$0] } ?? view.subviews.flatMap { buttons(in: $0) }
 }
 let noticeButtons = buttons(in: firstPanel.contentView!)
-let feedbackButton = noticeButtons.first { $0.title == "피드백 남기기…" }!
-feedbackButton.performClick(nil)
+let feedbackButton = noticeButtons.first { $0.title == UserFacingText.feedbackAction }!
+func pressNoticeKey(_ character:String,_ keyCode:UInt16) {
+    guard let event=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,
+        windowNumber:firstPanel.windowNumber,context:nil,characters:character,charactersIgnoringModifiers:character,isARepeat:false,keyCode:keyCode),
+        firstPanel.performKeyEquivalent(with:event) else { fputs("FAIL: notice key equivalent was not handled\n",stderr);exit(1) }
+}
+pressNoticeKey("\r",36)
 precondition(feedbackCalls == 1 && !firstPanel.isVisible)
-print("PASS: nonmodal notice reuses one panel and its feedback button invokes the existing feedback action")
+notice.show()
+pressNoticeKey("\u{1b}",53)
+precondition(feedbackCalls == 1 && !firstPanel.isVisible,"Escape closes without invoking feedback")
+print("PASS: nonmodal notice reuses one panel; Return invokes feedback once and Escape only closes")
 
 let fallback = StatusItemController(loadImage: { nil })
 fallback.trace = { _ in }

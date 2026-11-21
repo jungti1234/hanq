@@ -1,9 +1,41 @@
 import AppKit
 import ApplicationServices
 
+// Route local key equivalents through this test window only; no global input.
+func pressNoticeKey(_ window:NSWindow,_ character:String,_ keyCode:UInt16) {
+    guard let event=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,
+        windowNumber:window.windowNumber,context:nil,characters:character,charactersIgnoringModifiers:character,isARepeat:false,keyCode:keyCode),
+        window.performKeyEquivalent(with:event) else { fputs("FAIL: notice key equivalent was not handled\n",stderr);exit(1) }
+}
+
 // Exercises the production teardown with a Mach port/run-loop source, without
 // installing a global event tap or changing Accessibility permissions.
 let owner = AppDelegate()
+// Reflow presentation text without losing the underlying error or its recovery
+// metadata. Unknown/localized text outside these stock sentences is unchanged.
+do {
+    let stock="작업을 완료할 수 없습니다.(OSStatus 오류 -50.)"
+    let formatted=UserFacingText.errorBody(stock)
+    precondition(formatted == "작업을 완료할 수 없습니다.\n(OSStatus 오류 -50.)")
+    precondition(UserFacingText.errorBody(formatted)==formatted,"formatting is idempotent")
+    precondition(UserFacingText.errorBody("권한이 없기 때문에 해당 파일을 저장할 수 없습니다.") == "권한이 없기 때문에\n해당 파일을 저장할 수 없습니다.")
+    precondition(UserFacingText.errorBody("Different localized error (13)")=="Different localized error (13)")
+    let cause=NSError(domain:NSPOSIXErrorDomain,code:13)
+    let original=NSError(domain:NSOSStatusErrorDomain,code:-50,userInfo:[
+        NSLocalizedDescriptionKey:stock,NSLocalizedRecoverySuggestionErrorKey:"다시 시도해 주세요.",
+        NSUnderlyingErrorKey:cause,"context":"preserved"])
+    let shown=UserFacingText.updaterError(original)
+    precondition(shown.domain==original.domain && shown.code==original.code)
+    precondition(shown.userInfo[NSUnderlyingErrorKey] as? NSError === cause && shown.userInfo["context"] as? String == "preserved")
+    precondition(shown.localizedRecoverySuggestion==formatted+"\n\n다시 시도해 주세요.")
+    precondition(original.localizedDescription==stock && original.localizedRecoverySuggestion=="다시 시도해 주세요.","original error remains untouched")
+    let noUpdate=NSError(domain:"SUSparkleErrorDomain",code:1001,userInfo:[
+        NSLocalizedDescriptionKey:"현재 최신 버전을 사용 중입니다!",NSLocalizedRecoverySuggestionErrorKey:"현재 버전을 계속 사용하세요.","appcast":"preserved"])
+    let noUpdateShown=UserFacingText.updateNotFound(noUpdate)
+    precondition(noUpdateShown.localizedDescription=="현재 최신 버전을 사용 중입니다")
+    precondition(noUpdateShown.domain==noUpdate.domain && noUpdateShown.code==noUpdate.code && noUpdateShown.localizedRecoverySuggestion==noUpdate.localizedRecoverySuggestion && noUpdateShown.userInfo["appcast"] as? String == "preserved")
+    print("PASS: UI error reflow preserves original domains, codes, causes and recovery metadata")
+}
 // Out-of-order readiness callbacks must not restore a warning from the previous
 // collection state. Check the real menu item without reopening a menu or taps.
 do {
@@ -65,6 +97,20 @@ do {
     app.diagnosticManualMarker={reply in reply(.waiting);reply(.saved);reply(.incomplete);reply(.unavailable)}
     app.markInputIncident()
     precondition(statuses == [.waiting,.saved,.incomplete,.unavailable],"manual action routes only its real request results")
+    app.diagnosticStorageProblemPresenter=nil
+    replies.removeAll()
+    app.showDiagnosticStorageProblem()
+    let denied=DiagnosticStorageIssue(component:.detail,failure:.posix(.storageWrite,EACCES),retry:.stopped)
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:1,issues:[denied]))
+    settle()
+    let problem=app.diagnosticStorageProblem!
+    precondition(problem.window.title==UserFacingText.storageProblemWindowTitle && !problem.detailsExpanded,"storage help uses a titled HanQ window with collapsed technical details")
+    precondition(problem.feedbackButton.title=="피드백 남기기…","feedback is the primary action")
+    precondition(!problem.message.contains("전후 상세 기록") && !(problem.summary?.action ?? "").contains("손쉬운 사용"),"single failure omits the internal heading and unrelated permission explanation")
+    var feedbackOpened=0
+    app.feedbackPageOpener={_ in feedbackOpened+=1;return true}
+    pressNoticeKey(problem.window,"\r",36)
+    precondition(feedbackOpened==1 && !problem.isVisible,"primary action actually opens the existing feedback route once")
     print("PASS: production gray notice/order/divider, admission/recovery/stale replies and manual result presentation routing")
 }
 owner.enabled = true
@@ -219,23 +265,24 @@ interrupted.noteInputInterruption(.timeout)
 precondition(interrupted.inputInterruption == .timeout)
 precondition(interrupted.menuStatus.title.contains("응답 시간 초과"))
 precondition(interrupted.menuStatus.toolTip?.contains("다시 켜세요") == true)
-let notice = interrupted.inputMonitoringNotice.alert!
-precondition(notice.messageText == "한영·한자키 기능이 중단됐어요")
-precondition(notice.window.title == "한Q 기능 안내")
-precondition(!notice.informativeText.contains("입력 감시") && !interrupted.menuStatus.title.contains("입력 감시"))
-precondition(notice.window.isVisible && notice.informativeText.contains("응답 시간 초과"))
+let notice = interrupted.inputMonitoringNotice.panel!
+func noticeText(_ panel:NSPanel)->String { panel.contentView!.subviews.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator:"\n") }
+precondition(noticeText(notice).contains("한영·한자키 기능이 중단됐어요"))
+precondition(notice.title == "한Q - 한영·한자키 기능 중단")
+precondition(!noticeText(notice).contains("입력 감시") && !interrupted.menuStatus.title.contains("입력 감시"))
+precondition(notice.isVisible && noticeText(notice).contains("응답 시간 초과"))
 if let path = ProcessInfo.processInfo.environment["HANQ_NOTICE_PREVIEW"],
-   let view = notice.window.contentView,
+   let view = notice.contentView,
    let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
 }
-interrupted.inputMonitoringNotice.closeNotice()
-precondition(!notice.window.isVisible && interrupted.inputInterruption == .timeout)
+interrupted.inputMonitoringNotice.closeButton!.performClick(nil)
+precondition(!notice.isVisible && interrupted.inputInterruption == .timeout)
 interrupted.noteInputInterruption(.timeout)
-precondition(!notice.window.isVisible, "repeat notification must not reopen a dismissed notice")
+precondition(!notice.isVisible, "repeat notification must not reopen a dismissed notice")
 interrupted.noteInputInterruption(.systemInput)
-precondition(notice.window.isVisible && interrupted.menuStatus.title.contains("시스템에서 중단"))
+precondition(notice.isVisible && interrupted.menuStatus.title.contains("시스템에서 중단"))
 interrupted.inputMonitoringNotice.closeNotice()
 interrupted.setUpdateRestricted(true)
 interrupted.startMapping()
@@ -250,8 +297,8 @@ precondition(InputMonitoringInterruption(eventType: .tapDisabledByUserInput) == 
 precondition(InputMonitoringInterruption(eventType: .keyDown) == nil)
 print("PASS: interruption reason, nonmodal notice, dismissed/repeated notice, failed restart and permission/policy precedence")
 
-// The report button uses a fresh immutable snapshot rather than the menu's
-// cached availability. All files are synthetic; the browser is intercepted.
+// Feedback never waits for diagnostics. Optional export uses a fresh immutable
+// snapshot; all files are synthetic and browser opening is intercepted.
 do {
  let fm=FileManager.default
  let root=fm.temporaryDirectory.appendingPathComponent("hanq-interruption-feedback-"+UUID().uuidString)
@@ -270,19 +317,29 @@ do {
  app.feedbackPageOpener={_ in opened+=1;return true}
  app.interruptionSnapshotLoader={loads+=1;complete=$0}
  func show(){app.noteInputInterruption(.timeout);app.inputMonitoringNotice.show(.timeout)}
- func click(){app.inputMonitoringNotice.alert!.buttons[1].performClick(nil)}
+ func clickExport(){app.inputMonitoringNotice.exportButton!.performClick(nil)}
+ func clickFeedback(){pressNoticeKey(app.inputMonitoringNotice.panel!,"\r",36)}
  show()
- let notice=app.inputMonitoringNotice.alert!
- precondition(notice.informativeText.contains("진단 기록과 함께"))
- precondition(notice.buttons.count==2 && notice.buttons[0].title=="닫기" && notice.buttons[0].keyEquivalent=="\r")
- precondition(notice.buttons[1].title=="문제 알리기…")
+ let notice=app.inputMonitoringNotice
+ precondition(noticeText(notice.panel!).contains("진단 기록을 첨부해"))
+ precondition(notice.closeButton?.title=="닫기" && notice.closeButton?.keyEquivalent=="\u{1b}")
+ precondition(notice.feedbackButton!.title==UserFacingText.feedbackAction)
+ precondition(notice.exportButton!.frame.maxX < notice.feedbackButton!.frame.minX)
+ pressNoticeKey(notice.panel!,"\u{1b}",53)
+ precondition(!notice.isVisible && opened==0 && loads==0,"Escape closes without opening feedback or reading logs")
+ show()
+ clickFeedback()
+ precondition(opened==1 && loads==0 && app.diagnosticReview==nil && !notice.isVisible,
+              "feedback opens directly without reading records or creating an archive")
+ precondition(app.inputInterruption == .timeout && !app.enabled && app.tap==nil)
+ show()
  // A menu can still be disabled before its asynchronous refresh sees a log.
  precondition(!app.inputDiagnosticExportItem.isEnabled)
- click();app.reportInputInterruption()
- precondition(loads==1 && !notice.buttons[1].isEnabled)
+ clickExport();app.exportInputInterruption()
+ precondition(loads==1 && !notice.exportButton!.isEnabled && notice.feedbackButton!.isEnabled)
  complete?(.success(snapshot))
- precondition(opened==0 && app.diagnosticReview?.hasRecords==true && app.diagnosticReview?.window?.isVisible==true)
- precondition(!notice.window.isVisible && !app.enabled && app.tap==nil)
+ precondition(opened==1 && app.diagnosticReview?.hasRecords==true && app.diagnosticReview?.window?.isVisible==true)
+ precondition(!notice.isVisible && !app.enabled && app.tap==nil)
  func waitForWindow(_ ready:()->Bool) {
   let deadline=Date().addingTimeInterval(5)
   while !ready() && Date()<deadline {RunLoop.current.run(until:Date().addingTimeInterval(0.01))}
@@ -290,30 +347,39 @@ do {
  }
  app.diagnosticReview?.window?.miniaturize(nil)
  waitForWindow {app.diagnosticReview?.window?.isMiniaturized==true}
- show();click();complete?(.success(snapshot))
+ show();clickExport();complete?(.success(snapshot))
  waitForWindow {app.diagnosticReview?.window?.isMiniaturized==false}
- precondition(opened==0)
+ precondition(opened==1)
  app.diagnosticReview?.close()
  precondition(app.diagnosticReview==nil)
- show();click();complete?(.failure(DiagnosticLogExport.Failure.noLogs))
- precondition(opened==1 && app.diagnosticReview==nil && !notice.window.isVisible)
- show();click();complete?(.failure(DiagnosticLogExport.Failure.unavailable))
+ show();clickExport();complete?(.failure(DiagnosticLogExport.Failure.noLogs))
+ precondition(opened==1 && app.diagnosticReview?.window?.isVisible==true && !notice.isVisible,
+              "empty export remains a review result and never redirects to a browser")
+ show();clickExport();complete?(.failure(DiagnosticLogExport.Failure.unavailable))
  precondition(opened==1 && app.diagnosticReview?.window?.isVisible==true)
  precondition(app.diagnosticReview?.hasRecords==false)
  // A previously failed review can be reused when fresh records become available.
- show();click();complete?(.success(snapshot))
+ show();clickExport();complete?(.success(snapshot))
  precondition(app.diagnosticReview?.hasRecords==true)
  app.diagnosticReview?.close()
- show();click();let stale=complete
- app.inputMonitoringNotice.closeNotice()
- show();click()
+ show();clickExport();let abandonedForFeedback=complete
+ let beforeFeedbackLoads=loads
+ clickFeedback()
+ precondition(opened==2 && loads==beforeFeedbackLoads && app.diagnosticReview==nil && !notice.isVisible,
+              "feedback stays available during a pending export and cancels its presentation")
+ abandonedForFeedback?(.success(snapshot))
+ precondition(opened==2 && app.diagnosticReview==nil && !notice.isVisible)
+ show();clickExport();let stale=complete
+ notice.panel!.performClose(nil)
+ precondition(!notice.isVisible && notice.exportButton!.isEnabled,"titlebar close cancels pending lookup and resets the button")
+ show();clickExport()
  stale?(.failure(DiagnosticLogExport.Failure.noLogs))
- precondition(opened==1 && notice.window.isVisible && !notice.buttons[1].isEnabled)
+ precondition(opened==2 && notice.isVisible && !notice.exportButton!.isEnabled)
  app.setUpdateRestricted(true)
  complete?(.success(snapshot))
- precondition(opened==1 && app.diagnosticReview==nil && !notice.window.isVisible)
+ precondition(opened==2 && app.diagnosticReview==nil && !notice.isVisible)
  precondition(app.inputInterruption == .timeout && app.tap==nil)
- print("PASS: interruption report button, fresh records/review reuse, empty-store feedback, read failure and cancelled stale results")
+ print("PASS: Return opens direct feedback and Escape closes; optional export/review reuse, empty/error states and feedback/close/policy cancellation of stale results")
 }
 
 precondition(owner.updater.responds(to: NSSelectorFromString("updater:didFinishLoadingAppcast:")))

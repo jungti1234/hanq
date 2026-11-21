@@ -1,8 +1,97 @@
 import AppKit
 import Sparkle
 
+// Keep Sparkle's standard alert lifecycle, acknowledgement and recovery links.
+// Only the error's presentation copy changes; updater errors retain their data.
+final class HanQUpdateUserDriver: SPUStandardUserDriver {
+    private let permissionHost: Bundle
+    private var permissionPrompt: HanQUpdatePermissionPrompt?
+
+    override init(hostBundle: Bundle, delegate: SPUStandardUserDriverDelegate?) {
+        permissionHost = hostBundle
+        super.init(hostBundle: hostBundle, delegate: delegate)
+    }
+
+    override func show(_ request: SPUUpdatePermissionRequest, reply: @escaping (SUUpdatePermissionResponse) -> Void) {
+        // HanQ asks only about automatic checks. If future configuration asks
+        // for downloads or profiling, retain Sparkle's complete consent UI.
+        guard permissionHost.object(forInfoDictionaryKey: "SUAllowsAutomaticUpdates") as? Bool == false,
+              permissionHost.object(forInfoDictionaryKey: "SUEnableSystemProfiling") as? Bool == false else {
+            super.show(request, reply: reply)
+            return
+        }
+        let prompt = HanQUpdatePermissionPrompt { [weak self] response in
+            self?.permissionPrompt = nil
+            reply(response)
+        }
+        permissionPrompt = prompt
+        prompt.show()
+    }
+
+    override func showUpdateInFocus() {
+        if let permissionPrompt { permissionPrompt.show() }
+        else { super.showUpdateInFocus() }
+    }
+
+    override func showUpdaterError(_ error: Error, acknowledgement: @escaping () -> Void) {
+        super.showUpdaterError(UserFacingText.updaterError(error), acknowledgement: acknowledgement)
+    }
+    override func showUpdateNotFoundWithError(_ error: Error, acknowledgement: @escaping () -> Void) {
+        super.showUpdateNotFoundWithError(UserFacingText.updateNotFound(error), acknowledgement: acknowledgement)
+    }
+}
+
+/// Modeless opt-in for HanQ's checks-only Sparkle configuration. No preference
+/// is written here: Sparkle persists the response and schedules update checks.
+final class HanQUpdatePermissionPrompt: NSObject {
+    let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 166),
+                         styleMask: [.titled], backing: .buffered, defer: false)
+    private var reply: ((SUUpdatePermissionResponse) -> Void)?
+
+    init(reply: @escaping (SUUpdatePermissionResponse) -> Void) {
+        self.reply = reply
+        super.init()
+        window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
+        let root = NSView(); window.contentView = root
+        let icon = NSImageView(frame: NSRect(x: 28, y: 84, width: 56, height: 56))
+        icon.image = NSApp.applicationIconImage
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        let title = NSTextField(labelWithString: "업데이트를 자동으로 확인할까요?")
+        title.font = .boldSystemFont(ofSize: 14)
+        title.frame = NSRect(x: 106, y: 120, width: 346, height: 22)
+        let body = NSTextField(wrappingLabelWithString: UserFacingText.automaticUpdateExplanation)
+        body.font = .systemFont(ofSize: 13)
+        body.frame = NSRect(x: 106, y: 60, width: 346, height: 56)
+        let cancel = NSButton(title: "취소", target: self, action: #selector(decline))
+        let accept = NSButton(title: "자동으로 확인", target: self, action: #selector(allow))
+        cancel.bezelStyle = .rounded; accept.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}"; accept.keyEquivalent = "\r"
+        cancel.frame = NSRect(x: 184, y: 16, width: 100, height: 32)
+        accept.frame = NSRect(x: 298, y: 16, width: 154, height: 32)
+        for view in [icon, title, body, cancel, accept] { root.addSubview(view) }
+        window.center()
+    }
+
+    func show() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func decline() { finish(automaticChecks: false) }
+    @objc private func allow() { finish(automaticChecks: true) }
+    private func finish(automaticChecks: Bool) {
+        guard let callback = reply else { return }
+        reply = nil
+        window.orderOut(nil)
+        callback(SUUpdatePermissionResponse(automaticUpdateChecks: automaticChecks,
+                                           automaticUpdateDownloading: nil, sendSystemProfile: false))
+    }
+}
+
 final class AppUpdater: NSObject, SPUUpdaterDelegate {
-    private var controller: SPUStandardUpdaterController?
+    private var updater: SPUUpdater?
+    private var userDriver: HanQUpdateUserDriver?
     private var policy: UpdatePolicyClient?
     private var observations: [NSKeyValueObservation] = []
     private var panel: NSPanel?
@@ -22,7 +111,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
     }
 
     func start(bundle: Bundle = .main, policyFetch: UpdatePolicyClient.Fetch? = nil) {
-        guard controller == nil,
+        guard updater == nil,
               let feed = bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
               URL(string: feed)?.scheme == "https",
               let keyString = bundle.object(forInfoDictionaryKey: "HanQPolicyPublicKey") as? String,
@@ -31,13 +120,17 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
               let url = URL(string: policyURL), url.scheme == "https",
               let buildString = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
               let build = Int(buildString) else { return }
-        let controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil)
-        do { try controller.updater.start() }
+        // As with the former standard controller, the actual host/application
+        // stays Bundle.main. The bundle argument supplies policy configuration.
+        let driver = HanQUpdateUserDriver(hostBundle: .main, delegate: nil)
+        let updater = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: driver, delegate: self)
+        do { try updater.start() }
         catch { NSLog("업데이트 초기화 실패: %@", error.localizedDescription); return }
-        self.controller = controller
+        self.updater = updater
+        userDriver = driver
         observations = [
-            controller.updater.observe(\.canCheckForUpdates, options: [.initial, .new]) { [weak self] _, _ in self?.refreshMenus() },
-            controller.updater.observe(\.automaticallyChecksForUpdates, options: [.initial, .new]) { [weak self] _, _ in self?.refreshMenus() }
+            updater.observe(\.canCheckForUpdates, options: [.initial, .new]) { [weak self] _, _ in self?.refreshMenus() },
+            updater.observe(\.automaticallyChecksForUpdates, options: [.initial, .new]) { [weak self] _, _ in self?.refreshMenus() }
         ]
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let release = bundle.object(forInfoDictionaryKey: "HanQReleaseVersion") as? String ?? ""
@@ -62,25 +155,25 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate {
     }
 
     @objc private func checkForUpdates() {
-        guard let controller, controller.updater.canCheckForUpdates, policy?.isChecking != true else { return }
+        guard let updater, updater.canCheckForUpdates, policy?.isChecking != true else { return }
         policy?.check { [weak self] in
-            guard let self, self.controller?.updater.canCheckForUpdates == true else { return }
-            self.controller?.checkForUpdates(nil)
+            guard let self, self.updater?.canCheckForUpdates == true else { return }
+            self.updater?.checkForUpdates()
         }
     }
 
     @objc private func toggleAutomaticChecks() {
-        guard let updater = controller?.updater else { return }
+        guard let updater else { return }
         updater.automaticallyChecksForUpdates.toggle()
         refreshMenus()
     }
 
     private func refreshMenus() {
-        let available = controller?.updater.canCheckForUpdates == true
+        let available = updater?.canCheckForUpdates == true
         checkItem.isEnabled = available && policy?.isChecking != true
-        checkItem.toolTip = controller == nil ? "업데이트 배포 설정을 준비 중입니다." : nil
-        automaticItem.isEnabled = controller != nil
-        automaticItem.state = controller?.updater.automaticallyChecksForUpdates == true ? .on : .off
+        checkItem.toolTip = updater == nil ? "업데이트 배포 설정을 준비 중입니다." : nil
+        automaticItem.isEnabled = updater != nil
+        automaticItem.state = updater?.automaticallyChecksForUpdates == true ? .on : .off
         policyUpdateButton?.isEnabled = checkItem.isEnabled
         recheckButton?.isEnabled = policy?.isChecking != true
     }

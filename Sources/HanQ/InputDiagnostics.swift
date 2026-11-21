@@ -1577,14 +1577,9 @@ final class InputIncidentTrace {
             let postCount=posts.count,postBytes=posts.reduce(0){$0+$1.post.reduce(0){$0+$1.accountedBytes}+32768}
             lock.unlock()
             queue.async{[self] in
-            let journalIssues=destinationDirectory.map{OperationalDiagnostics.shared.storageIssues(for:$0)} ?? []
             let sharedPending=(sharedStore?.stats.pendingBytes ?? 0)>0
-            var issues=journalIssues
-            if let issue=sharedStore?.storageIssue(retryScheduled:enabled || sharedPending){issues.insert(issue,at:0)}
+            let issues=currentStorageIssues()
             let baseReady=sharedStore?.hasVerifiedWrite == true ? .ready:(storage?.readiness ?? DiagnosticStorageReadiness.unavailable)
-            if !baseReady.ready,baseReady.reason != "not_checked" {
-                if let issue=storage?.readinessIssue(retryScheduled:storageRetryTimer != nil && enabled){issues.append(issue)}
-            }
             let currentFailure=issues.first?.failure
             let readiness=issues.isEmpty ? baseReady:.unavailable
             let missing=(storage.map{$0.status.unavailable+$0.status.encodingFailures+$0.status.limited+$0.status.statusWriteFailures} ?? 0)+(sharedStore.map{$0.stats.failures+$0.stats.rejected+$0.stats.incompleteFiles} ?? 0)
@@ -1597,9 +1592,19 @@ final class InputIncidentTrace {
             manualCapacityLimited=enabled && (!windowSpace || !memorySpace || (!writerSpace && sharedStore?.canRetry==true))
             completion(DiagnosticStorageHealth(readiness:readiness,missingWrites:missing,
                 suppressedWrites:(budget?["suppressedAutomatic"] ?? 0)+(budget?["suppressedManual"] ?? 0),
-                collectionEnabled:enabled,pendingWrites:sharedPending || !journalIssues.isEmpty,
+                collectionEnabled:enabled,pendingWrites:sharedPending || issues.contains{$0.component != .detail && $0.component != .readiness},
                 currentFailure:currentFailure,manualCaptureAvailable:available,issues:issues))
         }}
+    }
+    // Called on the writer queue by both the live UI and the export snapshot.
+    // Keep real scheduling/permanent-stop state; an errno cannot imply a retry.
+    private func currentStorageIssues()->[DiagnosticStorageIssue]{
+        var issues=destinationDirectory.map{OperationalDiagnostics.shared.storageIssues(for:$0)} ?? []
+        let pending=(sharedStore?.stats.pendingBytes ?? 0)>0
+        if let issue=sharedStore?.storageIssue(retryScheduled:enabled || pending){issues.insert(issue,at:0)}
+        let ready=sharedStore?.hasVerifiedWrite == true ? .ready:(storage?.readiness ?? DiagnosticStorageReadiness.unavailable)
+        if !ready.ready,ready.reason != "not_checked",let issue=storage?.readinessIssue(retryScheduled:storageRetryTimer != nil && enabled){issues.append(issue)}
+        return issues
     }
     func observeStorage(_ callback:@escaping()->Void){queue.async{[self] in storageObserver=callback}}
     func waitForStorageReadiness(timeout:Double=5)->DiagnosticStorageReadiness {
@@ -2480,6 +2485,10 @@ final class InputIncidentTrace {
                     try JSONEncoder().encode(journal).write(to:path,options:.withoutOverwriting)
                     try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
                 }
+                let issues=DiagnosticStorageIssueSnapshot(issues:currentStorageIssues())
+                let path=directory.appendingPathComponent("storage-issues.json")
+                try JSONEncoder().encode(issues).write(to:path,options:.withoutOverwriting)
+                try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
                 completion(.success(()))
             }catch{completion(.failure(error))}
         }
@@ -3906,8 +3915,8 @@ final class PrivateProbeDirectory {
     }
 }
 
-struct DiagnosticStorageIssue:Equatable {
-    enum Component:String {case detail,readiness,criticalErrors,observations,termination
+struct DiagnosticStorageIssue:Equatable,Codable {
+    enum Component:String,Codable {case detail,readiness,criticalErrors,observations,termination
         var title:String {switch self {
         case .detail:return "전후 상세 기록"
         case .readiness:return "진단 저장 준비"
@@ -3916,7 +3925,7 @@ struct DiagnosticStorageIssue:Equatable {
         case .termination:return "종료 사유 기록"
         }}
     }
-    enum Retry:String {case automatic,stopped,notScheduled,unknown
+    enum Retry:String,Codable {case automatic,stopped,notScheduled,unknown
         var message:String {switch self {
         case .automatic:return "자동으로 다시 시도하고 있습니다."
         case .stopped:return "자동 재시도가 중단되었습니다."
@@ -3939,7 +3948,7 @@ struct DiagnosticStorageIssue:Equatable {
         }}
         var guidance:String {switch self {
         case .space:return "저장 공간을 확보해 주세요."
-        case .permission:return "진단 파일의 접근 권한 문제입니다. 손쉬운 사용 권한과는 별개입니다."
+        case .permission:return "진단 파일을 저장하는 폴더의 접근이 거부되었습니다."
         case .readOnly:return "현재 저장 위치에 파일을 쓸 수 없습니다."
         case .missing:return "기존 저장 위치가 그대로 있는지 확인이 필요합니다."
         case .busy:return "다른 저장 작업과의 충돌이나 일시적인 지연일 수 있습니다."
@@ -3948,6 +3957,12 @@ struct DiagnosticStorageIssue:Equatable {
         case .validation:return "기존 기록을 안전하게 다룰 수 있는지 확인하지 못했습니다. 기존 기록을 삭제하지 말고 문의해 주세요."
         case .encoding:return "기록을 파일로 만드는 과정에서 오류가 발생했습니다. 계속되면 문의해 주세요."
         case .unknown:return "현재 정보로 원인을 분류하지 못했습니다. 계속되면 아래 오류 정보와 함께 문의해 주세요."
+        }}
+        var action:String {switch self {
+        case .space:return "Mac의 저장 공간을 확보해 주세요."
+        case .busy,.io,.resources:return "잠시 기다려 주세요. 문제가 계속되면 저장된 진단 기록을 첨부해 문의해 주세요."
+        case .permission:return "가능하면 진단 기록을 첨부해\n피드백을 남겨 주세요."
+        default:return "가능하면 진단 기록을 첨부해\n피드백을 남겨 주세요."
         }}
     }
     var component:Component
@@ -3981,6 +3996,34 @@ struct DiagnosticStorageIssue:Equatable {
         if failure.domain == .policy{return .validation}
         return .unknown
     }
+}
+// Export-only metadata. Older snapshots deliberately remain 'unknown' instead
+// of deriving a promise to retry from a pending byte count or an errno.
+struct DiagnosticStorageIssueSnapshot:Codable {
+    let schema:Int
+    let issues:[DiagnosticStorageIssue]
+    init(issues:[DiagnosticStorageIssue]){schema=1;self.issues=issues}
+    var isValid:Bool {
+        schema==1 && issues.count<=5 && Set(issues.map(\.component)).count==issues.count &&
+        issues.allSatisfy{($0.pendingCount ?? 0)>=0 && ($0.milliseconds ?? 0)>=0}
+    }
+    func exportAdvice(for components:Set<DiagnosticStorageIssue.Component>)->String {
+        let relevant=issues.filter{components.contains($0.component)}
+        guard !relevant.isEmpty else{return DiagnosticStorageIssue.Retry.unknown.message}
+        return relevant.map{issue in
+            let advice:String
+            switch issue.retry {
+            case .automatic:advice="자동으로 다시 시도하고 있습니다. 저장이 완료된 뒤 내보내기 창을 다시 열어 주세요."
+            case .stopped:advice="자동 재시도가 중단되었습니다. 기다리거나 창을 다시 열어도 추가 저장되지 않습니다. ‘저장 문제 확인…’에서 안내를 확인해 주세요."
+            case .notScheduled:advice="현재 자동 재시도가 예약되어 있지 않습니다. ‘저장 문제 확인…’에서 안내를 확인해 주세요."
+            case .unknown:advice="이 자료만으로 자동 재시도 상태를 확인할 수 없습니다."
+            }
+            return relevant.count>1 ? issue.component.title+": "+advice:advice
+        }.joined(separator:"\n")
+    }
+}
+struct DiagnosticStorageProblemSummary {
+    let cause:String,action:String,retry:String
 }
 struct DiagnosticStorageNotice:Equatable {
     let title:String,detail:String
@@ -4016,14 +4059,29 @@ struct DiagnosticStorageHealth {
         return DiagnosticStorageNotice(title:title,detail:detail,needsDetails:automatic != all.count || !sameCause || first.cause != .space)
     }
     var menuMessage:String?{notice?.message}
+    var problemSummary:DiagnosticStorageProblemSummary? {
+        let all=activeIssues;guard let first=all.first else{return nil}
+        let sameCause=all.allSatisfy{$0.cause==first.cause}
+        let automatic=all.allSatisfy{$0.retry == .automatic}
+        let cause=sameCause ? first.cause.title:all.map{$0.component.title+": "+$0.cause.title}.joined(separator:"\n")
+        let action:String
+        if sameCause && first.cause == .space {action=first.cause.action}
+        else if sameCause && first.cause == .permission {action=first.cause.action}
+        else if sameCause && automatic {action=first.cause.action}
+        else {action="가능하면 진단 기록을 첨부해\n피드백을 남겨 주세요."}
+        let sameRetry=all.allSatisfy{$0.retry==first.retry}
+        let retry=sameRetry ? first.retry.message:all.map{$0.component.title+": "+$0.retry.message}.joined(separator:"\n")
+        return DiagnosticStorageProblemSummary(cause:cause,action:action,retry:retry)
+    }
     var detailMessage:String {
         let formatter=DateFormatter();formatter.dateStyle = .short;formatter.timeStyle = .medium
-        return activeIssues.map {issue in
-            var lines=[issue.component.title,issue.cause.title+".",issue.retry.message,issue.cause.guidance]
+        let all=activeIssues
+        return all.map {issue in
+            var lines=all.count>1 ? [issue.component.title]:[String]()
             if let pending=issue.pendingCount,pending>0{lines.append("저장 대기: \(pending)개 기록 단계")}
             if let time=issue.milliseconds{lines.append("최근 실패: "+formatter.string(from:Date(timeIntervalSince1970:Double(time)/1000)))}
             if let error=issue.failure{lines.append("문의용 오류 정보: \(error.stage.rawValue)/\(error.domain.rawValue)/\(error.code)/\(error.underlyingPOSIX)")}
-            return lines.joined(separator:"\n")
+            return lines.isEmpty ? "추가 오류 정보가 없습니다.":lines.joined(separator:"\n")
         }.joined(separator:"\n\n")
     }
 }
@@ -4036,9 +4094,9 @@ final class DiagnosticManualCapture {
         var message:String {
             switch self {
             case .saved:return "문제 기록을 저장했습니다."
-            case .waiting:return "문제 기록을 아직 저장하지 못했습니다.\n저장 상태가 회복되면 자동으로 다시 시도합니다."
-            case .incomplete:return "문제 기록의 일부 또는 전부를 저장하지 못했습니다.\n이미 저장된 기록은 유지됩니다.\n‘진단 기록 내보내기’에서 보관된 내용을 확인할 수 있습니다."
-            case .unavailable:return "문제 기록을 저장하지 못했습니다.\n진단 기록이 비활성화되어 있거나 저장소를 사용할 수 없습니다."
+            case .waiting:return "저장 상태가 회복되면\n자동으로 다시 시도합니다."
+            case .incomplete:return "문제 기록의 일부 또는\n전부를 저장하지 못했습니다.\n이미 저장된 기록은 유지됩니다.\n‘진단 기록 내보내기’에서 보관된 내용을 확인할 수 있습니다."
+            case .unavailable:return "진단 기록이 비활성화되어 있거나\n저장소를 사용할 수 없습니다."
             }
         }
     }

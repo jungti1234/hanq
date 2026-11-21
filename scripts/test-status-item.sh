@@ -6,7 +6,7 @@ stage=$(hanq_test_stage status-item)
 trap 'rm -rf "$stage"' EXIT
 swiftc -target arm64-apple-macosx13.0 -module-cache-path .build/hanq/module-cache \
   Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/StatusItemController.swift \
-  Sources/HanQ/MenuBarRecoveryNotice.swift \
+  Sources/HanQ/MenuBarRecoveryNotice.swift Sources/HanQ/UserFacingText.swift \
   Tests/StatusItem/main.swift -o "$stage/status-item-tests"
 cp Resources/HanQ-MenuBar-Template.pdf "$stage/icon.pdf"
 # Some sandboxed AppKit launches exit before main produces any test output.

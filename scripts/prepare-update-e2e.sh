@@ -17,7 +17,7 @@ swiftc -parse-as-library -module-cache-path .build/hanq/module-cache Sources/Han
 "$root/make-key" "$root/test-signing.key" "$root/required.json" > "$root/public-key"
 swiftc -module-cache-path .build/hanq/module-cache -F "$sparkle" -framework Sparkle \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks Sources/HanQ/AppUpdater.swift Sources/HanQ/UpdatePolicy.swift \
-  Sources/HanQ/UpdatePolicyClient.swift Tests/UpdateEndToEnd/main.swift -o "$root/HanQUpdateE2E"
+  Sources/HanQ/UpdatePolicyClient.swift Sources/HanQ/UserFacingText.swift Tests/UpdateEndToEnd/main.swift -o "$root/HanQUpdateE2E"
 python3 - "$root" "$sparkle" "$mode" <<'PY'
 import json, os, plistlib, shutil, subprocess, sys
 from pathlib import Path

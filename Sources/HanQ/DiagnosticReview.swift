@@ -300,12 +300,28 @@ final class DiagnosticReviewSnapshot {
         guard Self.integer(status["schema"]) == 1, let values = status["status"] as? [String: Any] else { throw DiagnosticReviewError.invalidCapture }
         storage = Self.storageDocument(values)
         var criticalFiles:[DiagnosticReviewFile]=[],sections:[DiagnosticReviewSection]=[],notices:[String]=[]
+        let issuesURL=directory.appendingPathComponent("storage-issues.json")
+        var storageIssues:DiagnosticStorageIssueSnapshot?
+        if FileManager.default.fileExists(atPath:issuesURL.path) {
+            let data=try Self.read(issuesURL),snapshot=try JSONDecoder().decode(DiagnosticStorageIssueSnapshot.self,from:data)
+            guard snapshot.isValid else{throw DiagnosticReviewError.invalidCapture}
+            storageIssues=snapshot
+            let fields=snapshot.issues.isEmpty ? [DiagnosticReviewField(label:"상태",value:"확인된 저장 문제 없음")]:snapshot.issues.map{
+                DiagnosticReviewField(label:$0.component.title,value:$0.cause.title+"\n"+$0.retry.message)
+            }
+            let section=DiagnosticReviewSection(title:"저장 재시도 상태 · 내보내기 준비 시점",fields:fields)
+            criticalFiles.append(DiagnosticReviewFile("storage-issues.json","저장 재시도 상태",original:data,preview:DiagnosticReviewDocument("저장 재시도 상태",[section])))
+            sections.append(section)
+        }
+        func retryAdvice(_ components:Set<DiagnosticStorageIssue.Component>)->String {
+            storageIssues?.exportAdvice(for:components) ?? "이 자료만으로 자동 재시도 상태를 확인할 수 없습니다."
+        }
         let criticalStatusURL=directory.appendingPathComponent("critical-storage-status.json")
         if FileManager.default.fileExists(atPath:criticalStatusURL.path) {
             let data=try Self.read(criticalStatusURL),status=try JSONDecoder().decode(DiagnosticCriticalJournal.Status.self,from:data)
             guard [status.pendingErrors,status.pendingObservations,status.droppedErrors,status.droppedObservations,status.writeFailures,status.lastErrno,status.lastPolicy,status.writtenBytes,status.rotations].allSatisfy({$0>=0}) else{throw DiagnosticReviewError.invalidCapture}
-            if status.pendingErrors>0{notices.append("중요 오류 기록이 아직 저장 대기 중입니다. 이 내보내기에 해당 오류의 전체 내용이 포함되지 않을 수 있습니다.")}
-            if status.pendingObservations>0{notices.append("일반 사건 기록이 아직 저장 대기 중입니다. 이 내보내기에 전체 내용이 포함되지 않을 수 있습니다.")}
+            if status.pendingErrors>0{notices.append("중요 오류 기록이 아직 저장 대기 중입니다. 이 내보내기에 해당 오류의 전체 내용이 포함되지 않을 수 있습니다.\n"+retryAdvice([.criticalErrors,.termination]))}
+            if status.pendingObservations>0{notices.append("일반 사건 기록이 아직 저장 대기 중입니다. 이 내보내기에 전체 내용이 포함되지 않을 수 있습니다.\n"+retryAdvice([.observations]))}
             if status.droppedErrors>0{notices.append("오류 기록 대기 용량을 초과해 파일에 남지 못한 오류가 있습니다.")}
             if status.droppedObservations>0{notices.append("일반 관측 기록 대기 용량을 초과해 파일에 남지 못한 관측이 있습니다.")}
             let section=DiagnosticReviewSection(title:"사건 기록 저장 상태",fields:[
@@ -319,7 +335,7 @@ final class DiagnosticReviewSnapshot {
         let sharedURL=directory.appendingPathComponent("shared-storage-status.json")
         if FileManager.default.fileExists(atPath:sharedURL.path) {
             let data=try Self.read(sharedURL),stats=try JSONDecoder().decode(DiagnosticSharedStore.Stats.self,from:data)
-            if stats.pendingBytes>0{notices.append("아직 저장 대기 중인 상세 기록은 이 내보내기에 포함되지 않습니다. 잠시 후 창을 다시 열어 확인해 주세요.")}
+            if stats.pendingBytes>0{notices.append("아직 저장 대기 중인 상세 기록은 이 내보내기에 포함되지 않습니다.\n"+retryAdvice([.detail]))}
             if stats.rejected>0{notices.append("저장 대기 용량을 초과해 상세 기록을 받지 못한 이력이 있습니다. 모든 사건의 상세가 보관되어 있다고 보장할 수 없습니다.")}
             if stats.incompleteFiles>0{notices.append("완료되지 않은 저장 파일이 있습니다. 해당 파일은 완성된 상세 기록에 포함되지 않습니다.")}
             let document=DiagnosticReviewDocument("공유 상세 저장 상태",[.init(title:"저장과 중복 제거",fields:[

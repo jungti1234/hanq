@@ -23,6 +23,6 @@ plist.update(SUFeedURL=config['feedURL'], SUPublicEDKey=config['sparklePublicKey
              SUEnableInstallerLauncherService=True, SUAllowsAutomaticUpdates=False,
              SUEnableSystemProfiling=False, SUScheduledCheckInterval=86400,
              SUVerifyUpdateBeforeExtraction=True)
-# Sparkle owns the opt-in prompt and persists the user's automatic-check choice.
+# HanQ presents the checks-only opt-in; Sparkle persists the user's choice.
 with plist_path.open('wb') as target:
     plistlib.dump(plist, target, sort_keys=False)

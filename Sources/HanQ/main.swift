@@ -33,37 +33,106 @@ final class DiagnosticStorageNoticeView:NSView {
         detailLabel.frame=NSRect(x:18,y:7,width:width-36,height:17)
     }
 }
-final class DiagnosticStorageProblemController:NSObject {
-    let alert=NSAlert()
-    private let textView=NSTextView(frame:NSRect(x:0,y:0,width:480,height:300))
+final class DiagnosticStorageProblemController:NSObject,NSWindowDelegate {
+    let window=NSPanel(contentRect:NSRect(x:0,y:0,width:480,height:300),styleMask:[.titled,.closable],backing:.buffered,defer:false)
+    private let logo=NSImageView()
+    private let titleLabel=NSTextField(labelWithString:UserFacingText.storageProblemTitle)
+    private let causeLabel=NSTextField(wrappingLabelWithString:"")
+    private let actionLabel=NSTextField(wrappingLabelWithString:"")
+    private let retryLabel=NSTextField(wrappingLabelWithString:"")
+    let detailsButton=NSButton(title:"기술 정보",target:nil,action:nil)
+    let feedbackButton=NSButton(title:UserFacingText.feedbackAction,target:nil,action:nil)
+    private let exportButton=NSButton(title:"진단 기록 내보내기…",target:nil,action:nil)
+    private let closeButton=NSButton(title:"닫기",target:nil,action:nil)
+    private let separator=NSBox()
+    private let scroll=NSScrollView()
+    private let textView=NSTextView()
     var onReview:(()->Void)?
+    var onFeedback:(()->Void)?
     private(set) var message=""
+    private(set) var summary:DiagnosticStorageProblemSummary?
+    private(set) var detailsExpanded=false
     override init(){
         super.init()
-        alert.messageText="진단 저장 문제"
-        alert.informativeText="현재 저장 문제와 자동 재시도 상태입니다."
-        let close=alert.addButton(withTitle:"닫기");close.target=self;close.action=#selector(dismiss)
-        let review=alert.addButton(withTitle:"진단 기록 보기…");review.target=self;review.action=#selector(showReview)
-        let scroll=NSScrollView(frame:NSRect(x:0,y:0,width:480,height:300))
-        scroll.hasVerticalScroller=true;scroll.borderType = .bezelBorder
-        textView.isEditable=false;textView.isSelectable=false;textView.drawsBackground=false
-        textView.font=NSFont.systemFont(ofSize:13);textView.textColor = .labelColor
-        textView.textContainerInset=NSSize(width:10,height:10)
+        window.title=UserFacingText.storageProblemWindowTitle;window.isReleasedWhenClosed=false;window.hidesOnDeactivate=false;window.delegate=self
+        let root=NSView();window.contentView=root
+        logo.imageScaling = .scaleProportionallyUpOrDown
+        if let url=Bundle.main.url(forResource:"HanQ-Logo",withExtension:"png"){logo.image=NSImage(contentsOf:url)}
+        logo.setAccessibilityLabel("한Q 로고")
+        titleLabel.font = .systemFont(ofSize:19,weight:.semibold)
+        causeLabel.font = .systemFont(ofSize:12);causeLabel.textColor = .secondaryLabelColor
+        actionLabel.font = .systemFont(ofSize:13)
+        retryLabel.font = .systemFont(ofSize:13,weight:.medium)
+        for label in [causeLabel,actionLabel,retryLabel]{label.lineBreakMode = .byWordWrapping}
+        causeLabel.setAccessibilityIdentifier("diagnosticProblemCause")
+        actionLabel.setAccessibilityIdentifier("diagnosticProblemAction")
+        retryLabel.setAccessibilityIdentifier("diagnosticProblemRetry")
+        detailsButton.isBordered=false;detailsButton.font = .systemFont(ofSize:12)
+        detailsButton.imagePosition = .imageLeading;detailsButton.target=self;detailsButton.action=#selector(toggleDetails)
+        detailsButton.setAccessibilityIdentifier("diagnosticProblemDisclosure")
+        for button in [closeButton,exportButton,feedbackButton]{button.bezelStyle = .rounded;button.target=self;button.sizeToFit()}
+        feedbackButton.action=#selector(sendFeedback);feedbackButton.keyEquivalent="\r"
+        closeButton.action=#selector(dismiss);closeButton.keyEquivalent="\u{1b}"
+        exportButton.action=#selector(showReview);exportButton.setAccessibilityIdentifier("diagnosticProblemExport")
+        textView.isEditable=false;textView.isSelectable=true;textView.drawsBackground=false
+        textView.font = .systemFont(ofSize:11);textView.textColor = .secondaryLabelColor
+        textView.textContainerInset=NSSize(width:8,height:8)
         textView.isVerticallyResizable=true;textView.isHorizontallyResizable=false
         textView.autoresizingMask = [.width];textView.textContainer?.widthTracksTextView=true
         textView.setAccessibilityIdentifier("diagnosticStorageProblemDetails")
-        scroll.documentView=textView;alert.accessoryView=scroll
-        alert.window.isReleasedWhenClosed=false
+        scroll.documentView=textView;scroll.hasVerticalScroller=true;scroll.borderType = .bezelBorder
+        separator.boxType = .separator
+        for view in [logo,titleLabel,causeLabel,actionLabel,retryLabel,detailsButton,scroll,separator,closeButton,exportButton,feedbackButton]{root.addSubview(view)}
+        layoutContent()
     }
-    var isVisible:Bool{alert.window.isVisible}
+    var isVisible:Bool{window.isVisible}
+    private func height(_ text:String,font:NSFont,width:CGFloat)->CGFloat {
+        ceil((text as NSString).boundingRect(with:NSSize(width:width-4,height:2000),options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:font]).height)+4
+    }
+    private func layoutContent(){
+        // The same 56x48 logo, 19pt heading, 28pt content inset and separated
+        // footer used by external-keyboard setup and menu-bar recovery help.
+        let width:CGFloat=480,body:CGFloat=424
+        let causeHeight=height(causeLabel.stringValue,font:causeLabel.font!,width:354)
+        let introHeight=max(48,24+8+causeHeight)
+        let actionHeight=height(actionLabel.stringValue,font:actionLabel.font!,width:body)
+        let retryHeight=height(retryLabel.stringValue,font:retryLabel.font!,width:body)
+        let detailsHeight=min(160,max(60,height(message,font:textView.font!,width:body-24)+16))
+        let extra:CGFloat=detailsExpanded ? detailsHeight+10:0
+        let total=28+introHeight+20+actionHeight+20+retryHeight+16+24+extra+22+1+14+32+16
+        let top=window.frame.maxY
+        window.setContentSize(NSSize(width:width,height:total))
+        if isVisible{window.setFrameOrigin(NSPoint(x:window.frame.minX,y:top-window.frame.height))}
+        var y=total-28
+        logo.frame=NSRect(x:28,y:y-(introHeight+48)/2,width:56,height:48)
+        titleLabel.frame=NSRect(x:98,y:y-24,width:354,height:24)
+        causeLabel.frame=NSRect(x:98,y:y-24-8-causeHeight,width:354,height:causeHeight)
+        y-=introHeight+20
+        actionLabel.frame=NSRect(x:28,y:y-actionHeight,width:body,height:actionHeight);y-=actionHeight+20
+        retryLabel.frame=NSRect(x:28,y:y-retryHeight,width:body,height:retryHeight);y-=retryHeight+16
+        detailsButton.frame=NSRect(x:28,y:y-24,width:100,height:24);y-=24
+        detailsButton.image=NSImage(systemSymbolName:detailsExpanded ? "chevron.down":"chevron.right",accessibilityDescription:nil)
+        detailsButton.setAccessibilityLabel(detailsExpanded ? "기술 정보 접기":"기술 정보 펼치기")
+        scroll.isHidden = !detailsExpanded
+        if detailsExpanded{y-=10+detailsHeight;scroll.frame=NSRect(x:28,y:y,width:body,height:detailsHeight);textView.frame.size.width=scroll.contentSize.width}
+        y-=22;separator.frame=NSRect(x:0,y:y,width:width,height:1);y-=1+14+32
+        closeButton.frame=NSRect(x:24,y:y,width:64,height:32)
+        feedbackButton.frame=NSRect(x:width-24-132,y:y,width:132,height:32)
+        exportButton.frame=NSRect(x:width-24-132-10-158,y:y,width:158,height:32)
+    }
     func update(_ health:DiagnosticStorageHealth,show:Bool=false){
-        guard health.notice != nil else{dismiss();return}
-        let value=health.detailMessage
-        if value != message{message=value;textView.string=value}
-        if show{alert.layout();alert.window.center();alert.window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
+        guard let value=health.problemSummary else{dismiss();return}
+        if show && !isVisible{detailsExpanded=false}
+        summary=value;causeLabel.stringValue=value.cause;actionLabel.stringValue=value.action;retryLabel.stringValue=value.retry
+        message=health.detailMessage;textView.string=message
+        layoutContent()
+        if show{if !isVisible{window.center()};window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
     }
-    @objc func dismiss(){alert.window.orderOut(nil)}
+    @objc func toggleDetails(){detailsExpanded.toggle();layoutContent()}
+    @objc func dismiss(){window.orderOut(nil)}
+    func windowShouldClose(_ sender:NSWindow)->Bool{dismiss();return false}
     @objc private func showReview(){dismiss();onReview?()}
+    @objc private func sendFeedback(){dismiss();onFeedback?()}
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -314,15 +383,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var inputInterruption: InputMonitoringInterruption?
     lazy var inputMonitoringNotice: InputMonitoringNotice = {
         let notice = InputMonitoringNotice()
-        notice.onReport = { [weak self] in self?.reportInputInterruption() }
+        notice.onFeedback = { [weak self] in self?.feedbackForInputInterruption() }
+        notice.onReview = { [weak self] in self?.exportInputInterruption() }
         notice.onClose = { [weak self] in
-            self?.interruptionFeedbackRequest = nil
-            self?.interruptionFeedbackLoading = false
+            self?.interruptionExportRequest = nil
+            self?.interruptionExportLoading = false
         }
         return notice
     }()
-    private var interruptionFeedbackRequest: UUID?
-    private var interruptionFeedbackLoading = false
+    private var interruptionExportRequest: UUID?
+    private var interruptionExportLoading = false
     var interruptionSnapshotLoader: (@escaping (Result<DiagnosticReviewSnapshot, Error>) -> Void) -> Void = {
         DiagnosticReviewController.loadSnapshot(from: .shared, completion: $0)
     }
@@ -1063,7 +1133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             let alert = NSAlert()
             alert.messageText = "자동 실행 설정을 변경하지 못했어요"
-            alert.informativeText = error.localizedDescription
+            alert.informativeText = UserFacingText.errorBody(error.localizedDescription)
             alert.runModal()
         }
         refreshLaunchAtLogin()
@@ -1105,7 +1175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.configureKeyboardObservation()
             self?.changingInputDiagnostics=false;self?.refreshStatus()
             self?.refreshDiagnosticLogAvailability()
-            self?.continueInterruptionFeedback()
+            self?.continueInterruptionExport()
         }
         refreshStatus()
     }
@@ -1124,6 +1194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }else if self.showStorageProblemRequested,self.diagnosticStorageProblem==nil {
                     let controller=DiagnosticStorageProblemController()
                     controller.onReview={ [weak self] in self?.exportInputDiagnostics() }
+                    controller.onFeedback={ [weak self] in self?.openFeedback() }
                     self.diagnosticStorageProblem=controller
                 }
                 self.diagnosticStorageProblem?.update(health,show:self.showStorageProblemRequested)
@@ -1164,29 +1235,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         review.onFeedback={ [weak self] in self?.openFeedback() }
         return review
     }
-    func reportInputInterruption() {
-        guard interruptionFeedbackRequest == nil, inputMonitoringNotice.alert?.window.isVisible == true else { return }
-        interruptionFeedbackRequest=UUID()
-        inputMonitoringNotice.setReporting(true)
-        continueInterruptionFeedback()
+    func feedbackForInputInterruption() {
+        guard inputMonitoringNotice.isVisible else { return }
+        inputMonitoringNotice.closeNotice()
+        openFeedback()
     }
-    private func continueInterruptionFeedback() {
-        guard let request=interruptionFeedbackRequest, !changingInputDiagnostics, !interruptionFeedbackLoading else { return }
-        interruptionFeedbackLoading=true
+    func exportInputInterruption() {
+        guard interruptionExportRequest == nil, inputMonitoringNotice.isVisible else { return }
+        interruptionExportRequest=UUID()
+        inputMonitoringNotice.setPreparingExport(true)
+        continueInterruptionExport()
+    }
+    private func continueInterruptionExport() {
+        guard let request=interruptionExportRequest, !changingInputDiagnostics, !interruptionExportLoading else { return }
+        interruptionExportLoading=true
         interruptionSnapshotLoader { [weak self] result in
-            guard let self, self.interruptionFeedbackRequest == request else { return }
+            guard let self, self.interruptionExportRequest == request else { return }
             self.inputMonitoringNotice.closeNotice()
-            switch result {
-            case .success(let snapshot) where snapshot.incidents.isEmpty:
-                self.openFeedback()
-            case .failure(let error) where (error as? DiagnosticLogExport.Failure) == .noLogs:
-                self.openFeedback()
-            default:
-                let review=self.diagnosticReview ?? self.makeDiagnosticReview()
-                if !review.hasRecords { review.installLoadResult(result) }
-                if review.window?.isMiniaturized == true { review.window?.deminiaturize(nil) }
-                review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
-            }
+            let review=self.diagnosticReview ?? self.makeDiagnosticReview()
+            if !review.hasRecords { review.installLoadResult(result) }
+            if review.window?.isMiniaturized == true { review.window?.deminiaturize(nil) }
+            review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
         }
     }
     private func diagnosticReviewEnvironment()->DiagnosticReviewEnvironment {
@@ -1224,7 +1293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             if self.diagnosticManualAlert==nil {
-                let alert=NSAlert();alert.messageText="문제 기록 저장 안내"
+                let alert=NSAlert();alert.messageText=UserFacingText.manualStorageTitle
                 let close=alert.addButton(withTitle:"닫기");close.target=self;close.action=#selector(self.dismissDiagnosticManualNotice)
                 alert.window.isReleasedWhenClosed=false
                 self.diagnosticManualAlert=alert
@@ -1311,7 +1380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             refreshStatus()
             let alert = NSAlert()
             alert.messageText = "Caps Lock 설정을 변경하지 못했어요"
-            alert.informativeText = error.localizedDescription
+            alert.informativeText = UserFacingText.errorBody(error.localizedDescription)
             alert.runModal()
         }
     }
@@ -1322,7 +1391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !enabled { hud.hide() }
     }
     private func makeFeedbackItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "피드백 남기기…", action: #selector(openFeedback), keyEquivalent: "")
+        let item = NSMenuItem(title: UserFacingText.feedbackAction, action: #selector(openFeedback), keyEquivalent: "")
         item.target = self
         item.toolTip = "한Q에 관한 의견을 남길 수 있는 피드백 폼을 브라우저에서 엽니다."
         return item
@@ -1331,7 +1400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openFeedback() {
         guard let url = FeedbackForm.url(), feedbackPageOpener(url) else {
             let alert = NSAlert()
-            alert.messageText = "피드백 페이지를 열 수 없어요."
+            alert.messageText = "피드백 페이지를 열 수 없어요"
             alert.informativeText = "기본 웹 브라우저를 확인한 뒤 다시 시도해 주세요."
             alert.addButton(withTitle: "확인")
             NSApp.activate(ignoringOtherApps: true)

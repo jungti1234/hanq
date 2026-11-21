@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Sparkle
 
 // Runs the production updater/policy/input teardown in an isolated bundle.
 // The test never registers login items or installs a global keyboard hook.
@@ -15,15 +16,57 @@ final class Harness: NSObject, NSApplicationDelegate {
     var interactive = CommandLine.arguments.contains("--interactive")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        owner.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Exercise the public user-driver path, without starting an updater or
+        // changing any persisted consent. Both buttons must deliver one reply.
+        let before = UserDefaults.standard.dictionaryRepresentation().filter { $0.key.hasPrefix("SU") }
+        let driver = HanQUpdateUserDriver(hostBundle: .main, delegate: nil)
+        for accept in [false, true] {
+            var replies: [SUUpdatePermissionResponse] = []
+            driver.show(SPUUpdatePermissionRequest(systemProfile: [])) { replies.append($0) }
+            let window = NSApp.windows.first { window in
+                window.isVisible && window.contentView?.subviews.contains {
+                    ($0 as? NSTextField)?.stringValue == UserFacingText.automaticUpdateExplanation
+                } == true
+            }!
+            window.orderOut(nil)
+            driver.showUpdateInFocus()
+            precondition(window.isVisible, "the pending permission request remains focusable")
+            let button = window.contentView!.subviews.compactMap { $0 as? NSButton }
+                .first { $0.title == (accept ? "자동으로 확인" : "취소") }!
+            button.performClick(nil)
+            button.performClick(nil)
+            precondition(replies.count == 1 && replies[0].automaticUpdateChecks == accept)
+            precondition(replies[0].automaticUpdateDownloading == nil && !replies[0].sendSystemProfile)
+            precondition(!window.isVisible)
+        }
+        let after = UserDefaults.standard.dictionaryRepresentation().filter { $0.key.hasPrefix("SU") }
+        precondition(NSDictionary(dictionary: before).isEqual(to: after), "only Sparkle may persist consent")
+        print("PASS: automatic-check consent accepts/declines exactly once, refocuses and preserves settings")
+        // Releasing an update restriction calls the real updatePermission().
+        // Keep its input gate blocked even if the test inherits AX permission,
+        // and replace its probe launcher so no second GUI instance can start.
+        // This fixture verifies policy teardown/release, not input activation.
+        _ = owner.freshPermissionGate.block()
+        owner.freshPermission = FreshPermissionMonitor(launchProbe: { _, reply in
+            reply(NSError(domain: "HanQUpdateTestProbe", code: 1))
+        }, terminate: { _ in
+            fputs("FAIL: update fixture unexpectedly received a permission denial\n", stderr)
+            exit(1)
+        })
+        owner.statusIcon.start(menu: NSMenu())
         owner.window = NSWindow()
         owner.permissionContent = NSView()
         UserDefaults.standard.set(true, forKey: "koreanKeyEnabled")
         UserDefaults.standard.set(true, forKey: "hanjaKeyEnabled")
         let fixture = Bundle.main.resourceURL!
-        responses = [try! Data(contentsOf: fixture.appendingPathComponent("required.json")), nil,
-                     try! Data(contentsOf: fixture.appendingPathComponent("required.json")),
-                     try! Data(contentsOf: fixture.appendingPathComponent("withdrawn.json"))]
+        do {
+            let required = try Data(contentsOf: fixture.appendingPathComponent("required.json"))
+            let withdrawn = try Data(contentsOf: fixture.appendingPathComponent("withdrawn.json"))
+            responses = [required, nil, required, withdrawn]
+        } catch {
+            fputs("FAIL: update fixture data unavailable: \(error)\n", stderr)
+            exit(1)
+        }
         // Exercise cleanup of a real port/source without intercepting the keyboard.
         var context = CFMachPortContext()
         let port = CFMachPortCreate(kCFAllocatorDefault, { _, _, _, _ in }, &context, nil)!
@@ -99,8 +142,12 @@ final class Harness: NSObject, NSApplicationDelegate {
         }
     }
     func finish() {
+        precondition(!owner.enabled && owner.tap == nil && !owner.freshPermissionGate.allowsInput,
+                     "policy release must not activate input in this isolated fixture")
+        owner.stopMapping()
         timer?.invalidate(); updater.stop()
-        NSStatusBar.system.removeStatusItem(owner.statusItem)
+        owner.statusIcon.stop()
+        print("PASS: update harness stayed input-blocked and completed without an app relaunch (pid \(getpid()))")
         fflush(stdout)
         if interactive {
             // Leave a visible result instead of racing a UI inspector with process exit.
@@ -117,6 +164,10 @@ final class Harness: NSObject, NSApplicationDelegate {
             result.center(); result.makeKeyAndOrderFront(nil)
         } else { NSApp.terminate(nil) }
     }
+}
+guard !CommandLine.arguments.contains("--permission-probe") else {
+    fputs("FAIL: update fixture cannot run as a permission-probe app\n", stderr)
+    exit(1)
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
