@@ -5,6 +5,7 @@ import Carbon
 final class OnsetRecoveryController: NSObject {
     var canRun: () -> Bool = { false }
     var inputAllowed:()->Bool = { true }
+    var diagnosticBackgroundAllowed:()->Bool = { false }
     var canBeginRepair: () -> Bool = { true }
     var unfocusedKeyCheck:(_ timestamp:CGEventTimestamp,_ needsReadyLayout:Bool)->InputIncidentTrace.SwitchKeyCheck = {_,_ in .noSwitch}
     var willBeginRepair: () -> Void = {}
@@ -29,6 +30,7 @@ final class OnsetRecoveryController: NSObject {
         old?.closeSession()
         let next=OnsetRecoveryEngine()
         next.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
+        next.diagnosticBackgroundAllowed = { [weak self] in self?.diagnosticBackgroundAllowed() ?? false }
         if let old { next.inheritClosedInput(from: old) }
         next.canBeginRepair = { [weak self] in self?.canBeginRepair() ?? false }
         next.unfocusedKeyCheck = { [weak self] in self?.unfocusedKeyCheck($0,$1) ?? .noSwitch }

@@ -16,25 +16,28 @@ final class MismatchSnapshotWorker {
     private let incidentFocusProbe=InputIncidentFocusProbe()
     private let readOperation:((pid_t)->MismatchSnapshotResult)?
     init(read:((pid_t)->MismatchSnapshotResult)?=nil){readOperation=read}
-    func request(pid:pid_t,semantics:Bool=false,completion:@escaping (MismatchSnapshotResult)->Void){
+    func request(pid:pid_t,semantics:Bool=false,purpose:InputIncidentTrace.ReadPurpose = .unknown,completion:@escaping (MismatchSnapshotResult)->Void){
+        let activity=InputIncidentTrace.shared.activityEpoch
         queue.async {
-            let result=self.readOperation?(pid) ?? Self.read(pid:pid,semantics:semantics,focusProbe:self.incidentFocusProbe)
+            let result=self.readOperation?(pid) ?? Self.read(pid:pid,semantics:semantics,focusProbe:self.incidentFocusProbe,purpose:purpose,activityAtRequest:activity)
             DispatchQueue.main.async{completion(result)}
         }
     }
-    static func read(pid:pid_t,semantics:Bool=false,focusProbe:InputIncidentFocusProbe=InputIncidentFocusProbe())->MismatchSnapshotResult {
+    static func read(pid:pid_t,semantics:Bool=false,focusProbe:InputIncidentFocusProbe=InputIncidentFocusProbe(),purpose:InputIncidentTrace.ReadPurpose = .unknown,activityAtRequest:Int64?=nil)->MismatchSnapshotResult {
         let began=ProcessInfo.processInfo.systemUptime
-        let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
+        let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX,purpose:purpose,activityAtRequest:activityAtRequest)
+        var axResult=InputIncidentAXResult()
         var incidentReason=""
         let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
         var focusRead:InputIncidentFocusProbe.Read?=incidentRead == nil ? nil:InputIncidentFocusProbe.Read(target:pid)
         let focusAccess=InputFocusAccess()
+        if incidentRead != nil{focusAccess.observeResult={route,code in axResult.focus(route,code)}}
         if incidentRead != nil {focusAccess.observeFocus={element,owner,route in focusRead?.observe(element,owner:owner,route:route)}}
         defer{
             focusAccess.observeFocus=nil
             let allowed=incidentRead != nil && !["secure_input","secure_text_field"].contains(incidentReason)
             let focus=focusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:3)
-            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentRead == nil ? nil:.snapshot(incidentReason),focus:focus)
+            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentRead == nil ? nil:.snapshot(incidentReason),focus:focus,axResult:allowed ? axResult:nil)
         }
         let application=AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application,0.05)
@@ -66,10 +69,18 @@ final class MismatchSnapshotWorker {
             values=nil
             error=AXUIElementCopyMultipleAttributeValues(element,baseNames as CFArray,[],&values)
         }
+        if incidentRead != nil{axResult.attribute(error)}
         attributesMs=(ProcessInfo.processInfo.systemUptime-start)*1000
         guard error == .success,let list=values as? [AnyObject],list.count>=4 else{return result(nil,"attribute_batch_unreadable")}
         if incidentRead != nil {focusRead?.observedRole(list[0] as? String)}
-        guard let role=list[0] as? String,["AXTextArea","AXTextField"].contains(role) else{return result(nil,"not_supported_text_field")}
+        guard let role=list[0] as? String else {
+            // Preserve the engine's original stop/retry reason. Diagnostics must
+            // not mistake an unreadable role for a confirmed non-editor.
+            let unavailable=result(nil,"not_supported_text_field")
+            if incidentRead != nil{incidentReason="role_unreadable"}
+            return unavailable
+        }
+        guard ["AXTextArea","AXTextField"].contains(role) else{return result(nil,"not_supported_text_field")}
         guard list[1] as? String != "AXSecureTextField" else{return result(nil,"secure_text_field")}
         guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{return result(nil,"text_unreadable")}
         let raw=list[3]

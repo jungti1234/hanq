@@ -405,8 +405,16 @@ struct RecorderStorageDocument:Codable {
 struct RecorderCaptureRequest:Codable {
     let trigger:Int;let milliseconds:Int;let afterSequence:Int;let lane:Int;let detail:Int;let event:Int;let inputOrigin:Int
     var requestID:String?=nil
+    var correlationID:String?=nil
+    private var validCorrelation:Bool {
+        guard let token=correlationID else{return true}
+        if trigger==3{return token.count==36 && UUID(uuidString:token) != nil}
+        guard trigger==4,token.range(of:"^shape-[1-9][0-9]{0,18}$",options:.regularExpression) != nil,
+              let revision=Int64(token.dropFirst(6)),revision>0 else{return false}
+        return true
+    }
     var valid:Bool{
-        (requestID.map{UUID(uuidString:$0) != nil} ?? true) && (1...8).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...31).contains(detail) && event>=0 && (0...3).contains(inputOrigin) &&
+        validCorrelation && (requestID.map{UUID(uuidString:$0) != nil} ?? true) && (1...8).contains(trigger) && milliseconds>=0 && afterSequence>=0 && (1...8).contains(lane) && (0...(trigger==5 ? 45:31)).contains(detail) && event>=0 && (0...3).contains(inputOrigin) &&
         (trigger != 6 || (event==0 && inputOrigin==0 && ((lane==4 && ((1...6).contains(detail) || detail==10)) || (lane==3 && (7...9).contains(detail))))) && (trigger != 7 || ((1...5).contains(lane) && (1...4).contains(detail) && event>0 && (1...3).contains(inputOrigin))) && (trigger != 8 || (lane==3 && detail==0 && event==0 && inputOrigin==0))
     }
 }
@@ -563,7 +571,7 @@ struct RecorderTrace: Codable {
             guard let v=coverage as? [String:Any],Set(v.keys).subtracting(["firstAvailableMilliseconds","lastAvailableMilliseconds"])==Set(["requestedFromMilliseconds","requestedThroughMilliseconds","frames","sequenceGaps","historyEvictions","historyByteEvictions","encodingFailures"]),v.values.allSatisfy({($0 as? NSNumber).map{CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue>=0 && $0.doubleValue==Double($0.int64Value)} ?? false}) else{throw RecorderError.invalidTrace}
         }
         if let value=object["capturePreservation"] {
-            guard let v=value as? [String:Any],Set(v.keys).subtracting(["closedMilliseconds"])==Set(["deferred","requests","postCapacity","postOmittedFrames","closed","endedOnShutdown"]),let requests=v["requests"] as? [[String:Any]],requests.allSatisfy({Set($0.keys).subtracting(["requestID"])==Set(["trigger","milliseconds","afterSequence","lane","detail","event","inputOrigin"])}) else{throw RecorderError.invalidTrace}
+            guard let v=value as? [String:Any],Set(v.keys).subtracting(["closedMilliseconds"])==Set(["deferred","requests","postCapacity","postOmittedFrames","closed","endedOnShutdown"]),let requests=v["requests"] as? [[String:Any]],requests.allSatisfy({Set($0.keys).subtracting(["requestID","correlationID"])==Set(["trigger","milliseconds","afterSequence","lane","detail","event","inputOrigin"])}) else{throw RecorderError.invalidTrace}
         }
         if let value=object["captureBacklog"] {
             guard let v=value as? [String:Any],Set(v.keys).subtracting(["rateSuppressed"])==RecorderCaptureBacklog.keys,

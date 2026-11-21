@@ -363,8 +363,17 @@ def capture_preservation(value):
     requests=value['requests']
     if not isinstance(requests,list) or not 1<=len(requests)<=32:raise ValueError('invalid capture requests')
     for row in requests:
-        if not isinstance(row,dict) or set(row)-{'requestID'}!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for k,n in row.items() if k != "requestID") or not 1<=row['trigger']<=8 or not 1<=row['lane']<=8 or not 0<=row['detail']<=31 or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
+        if not isinstance(row,dict) or set(row)-{'requestID','correlationID'}!={'trigger','milliseconds','afterSequence','lane','detail','event','inputOrigin'} or any(type(n) is not int for k,n in row.items() if k not in ('requestID','correlationID')) or not 1<=row['trigger']<=8 or not 1<=row['lane']<=8 or not 0<=row['detail']<=(45 if row['trigger']==5 else 31) or not 0<=row['inputOrigin']<=3 or min(row['milliseconds'],row['afterSequence'],row['event'])<0:raise ValueError('invalid capture request')
         if 'requestID' in row:uuid.UUID(row['requestID'])
+        if 'correlationID' in row:
+            token=row['correlationID']
+            if not isinstance(token,str):raise ValueError('invalid correlation identity')
+            if row['trigger']==3:
+                if len(token)!=36:raise ValueError('invalid read identity')
+                uuid.UUID(token)
+            elif row['trigger']==4:
+                if not re.fullmatch(r'shape-[1-9][0-9]{0,18}',token) or int(token[6:])>2**63-1:raise ValueError('invalid shape identity')
+            else:raise ValueError('unexpected correlation identity')
         if row['trigger']==6 and not (row['event']==0 and row['inputOrigin']==0 and ((row['lane']==4 and row['detail'] in [1,2,3,4,5,6,10]) or (row['lane']==3 and row['detail'] in [7,8,9]))):raise ValueError('invalid recovery detection')
         if row['trigger']==7 and not (1<=row['lane']<=5 and 1<=row['detail']<=4 and row['event']>0 and 1<=row['inputOrigin']<=3):raise ValueError('invalid space observation')
         if row['trigger']==8 and not (row['lane']==3 and row['detail']==0 and row['event']==0 and row['inputOrigin']==0):raise ValueError('invalid onset observation request')
@@ -484,7 +493,7 @@ def summarize(data):
     wait_reasons={13:'snapshot',14:'text',15:'caret',16:'repair',17:'repair_receipt',18:'onset_receipt',19:'replay_receipt',20:'focus',21:'selection_commit',22:'source_commit'}
     boundary_waits=collections.Counter()
     editor_outcomes=collections.Counter()
-    editor_stages={23:"input_resumed_without_switch",24:"insertion_style_matched",25:"terminal_lf_matched",26:"terminal_lf_and_style_matched",27:"delivered_prefix_pending",28:"initial_body_removal_matched"}
+    editor_stages={23:"legacy_input_resumed_reason_unknown",24:"insertion_style_matched",25:"terminal_lf_matched",26:"terminal_lf_and_style_matched",27:"delivered_prefix_pending",28:"initial_body_removal_matched",43:"initial_transport_completed",44:"editor_diverged_input_resumed",45:"native_select_all_diverged_input_resumed"}
     maximum_boundary_queue=0
     maximum_unconfirmed_onsets=0
     decision_sites={1:'event',2:'sample',3:'eligibility',4:'handoff',5:'repair'}

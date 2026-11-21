@@ -99,6 +99,7 @@ bash scripts/test-mismatch-recovery.sh
 bash scripts/test-diagnostics.sh
 bash scripts/test-diagnostic-review.sh
 bash scripts/test-lifecycle.sh
+bash scripts/test-permission-wait.sh
 bash scripts/test-status-item.sh
 bash scripts/test-watchdog.sh
 bash scripts/test-permission-monitor.sh

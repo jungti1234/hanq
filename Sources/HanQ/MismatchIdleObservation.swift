@@ -21,6 +21,9 @@ extension MismatchRecoveryEngine {
             self.consumeIdleSnapshot(result.snapshot)
         }
         if let testIdleRead{testIdleRead(completion)}
-        else{snapshotWorker.request(pid:pid,semantics:true,completion:completion)}
+        else{
+            let idle=diagnosticBackgroundAllowed()
+            snapshotWorker.request(pid:pid,semantics:true,purpose:idle ? .background:.active,completion:completion)
+        }
     }
 }

@@ -10,6 +10,21 @@ let source = root.appendingPathComponent("source"), output = root.appendingPathC
 try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
 let frame: [String: Any] = ["sequence": 1, "milliseconds": 42, "lane": 2, "kind": 4, "event": 0, "edge": 0, "category": 0, "inputOrigin": 0, "consumed": false, "durationMicros": 0, "count": 0, "selected": false, "field": 0]
 let valid: [String: Any] = ["schema": 1, "build": "235", "bestEffort": true, "appReceiptVerified": false, "correlationIsHeuristic": true, "lossCountersMayLag": true, "skippedEvents": [:], "skippedAuxiliary": [:], "trigger": 1, "incident": 1, "phase": 0, "discardedOldFrames": 0, "frames": [frame]]
+let readLink=UUID().uuidString
+for (trigger,detail,correlation) in [(3,1,readLink),(4,0,"shape-77"),(5,43,""),(5,44,""),(5,45,"")] {
+    var request:[String:Any]=["trigger":trigger,"milliseconds":20,"afterSequence":1,"lane":trigger==5 ? 8:6,"detail":detail,"event":0,"inputOrigin":0]
+    if !correlation.isEmpty{request["correlationID"]=correlation}
+    let preservation:[String:Any]=["deferred":false,"requests":[request],"postCapacity":65536,"postOmittedFrames":0,"closed":false,"endedOnShutdown":false]
+    let input=valid.merging(["capturePreservation":preservation]){_,n in n}
+    let decoded=try RecorderTrace.decode(JSONSerialization.data(withJSONObject:input))
+    let restored=try RecorderTrace.decode(JSONEncoder().encode(decoded))
+    check(restored.capturePreservation?.requests.first?.correlationID==(correlation.isEmpty ? nil:correlation),"fixed correlation identity survives recorder roundtrip")
+    for invalid in ["private text","shape-0","shape-99999999999999999999"] {
+        let bad=request.merging(["correlationID":invalid]){_,n in n}
+        let data=valid.merging(["capturePreservation":preservation.merging(["requests":[bad]]){_,n in n}]){_,n in n}
+        check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:data)))==nil,"invalid/private correlation text rejected")
+    }
+}
 func file(_ value: [String: Any], phase: Int = 0) throws -> URL {
     let path = source.appendingPathComponent("incident-1-\(phase)-" + UUID().uuidString + ".json")
     try RecorderSession.writeJSON(value, to: path); return path

@@ -4,6 +4,7 @@ import Carbon
 let onsetKoreanID="com.apple.inputmethod.Korean.2SetKorean"
 struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var compositionEnded=false }
 final class OnsetRecoveryEngine:NSObject {
+    var diagnosticBackgroundAllowed:()->Bool = { false }
     var decisionTrace=InputIncidentTrace.shared
     let diagnosticHistory=OnsetDiagnosticHistory()
     var diagnosticRead=OnsetDiagnosticHistory.Read()
@@ -789,9 +790,12 @@ final class OnsetRecoveryEngine:NSObject {
         serviceFocusAccessibility()
         gate?.beat()
     }
-    func snapshot()->OnsetSnapshot?{
+    func snapshot(purpose:InputIncidentTrace.ReadPurpose = .unknown)->OnsetSnapshot?{
         diagnosticRead=OnsetDiagnosticHistory.Read()
-        let incidentRead=InputIncidentTrace.shared.beginRead(.onsetAX)
+        let incidentRead=InputIncidentTrace.shared.beginRead(.onsetAX,purpose:purpose)
+        var axResult=InputIncidentAXResult()
+        let oldResultObserver=focusAccess.observeResult
+        if incidentRead != nil{focusAccess.observeResult={route,code in axResult.focus(route,code)}}
         var incidentMeasured=false
         let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
         var focusRead:InputIncidentFocusProbe.Read?
@@ -799,6 +803,7 @@ final class OnsetRecoveryEngine:NSObject {
         let oldFocusObserver=focusAccess.observeFocus
         defer{
             focusAccess.observeFocus=oldFocusObserver
+            focusAccess.observeResult=oldResultObserver
             let allowed=incidentMeasured && !["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason)
             var focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:1)
             focus?.markedRangeState = markedRangeState
@@ -807,7 +812,7 @@ final class OnsetRecoveryEngine:NSObject {
                 if unavailableReason=="focus_changed_during_snapshot"{diagnosticRead.field=nil;diagnosticRead.range=nil}
             }
             else if testSnapshot == nil {diagnosticRead=OnsetDiagnosticHistory.Read()}
-            InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus)
+            InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus,axResult:allowed ? axResult:nil)
         }
         if let testSnapshot{return testSnapshot()}
         unavailableReason="";incidentMeasured=incidentRead != nil
@@ -825,6 +830,7 @@ final class OnsetRecoveryEngine:NSObject {
         }
         if incidentMeasured {diagnosticRead.field=element}
         let markedObserver:((String,CFTypeRef?,AXError)->Void)? = incidentMeasured ? { [self] name,value,error in
+            if name==kAXRoleAttribute{axResult.attribute(error)}
             if name=="AXMarkedTextRange"{diagnosticRead.observeMarkedResult(value,error:error)}
         }:nil
         let context=InputFocusAccess.attributes(element,[kAXSubroleAttribute,kAXRoleAttribute]+(recovering && currentPlan?.isSettledPrefix != true ? []:["AXMarkedTextRange"]),observed:markedObserver)
@@ -841,7 +847,7 @@ final class OnsetRecoveryEngine:NSObject {
                 unavailableReason="active_composition";return nil
             }
         }
-        let content=InputFocusAccess.attributes(element,[kAXValueAttribute,kAXSelectedTextRangeAttribute])
+        let content=InputFocusAccess.attributes(element,[kAXValueAttribute,kAXSelectedTextRangeAttribute],observed:incidentMeasured ? {_,_,error in axResult.attribute(error)}:nil)
         guard let text=content[0] as? String else{unavailableReason="text_unreadable";return nil}
         guard let raw=content[1],CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
         var range=CFRange();guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.location>=0,range.length>=0,range.location+range.length<=text.utf16.count else{unavailableReason="selection_invalid";return nil}
@@ -850,7 +856,7 @@ final class OnsetRecoveryEngine:NSObject {
             let trace=InputIncidentTrace.shared
             let (identity,owner,window,epoch)=trace.fieldRegistry.identify(element,owner:target.processIdentifier,window:nil,generation:trace.collectionGeneration)
             var evidence=InputIncidentAXEvidence();evidence.owner=owner;evidence.window=window;evidence.identityEpoch=epoch;evidence.route=focusAccess.lastRoute
-            let change=incidentShapeProbe.observe(identity:identity,text:text,selection:NSRange(location:range.location,length:range.length),generation:trace.collectionGeneration,ax:evidence)
+            let change=incidentShapeProbe.observe(identity:identity,text:text,selection:NSRange(location:range.location,length:range.length),generation:trace.collectionGeneration,ax:evidence,correlation:trace.shapeCorrelation,activity:trace.activityEpoch)
             trace.shape(.onsetAX,identity:identity,count:text.utf16.count,selected:range.length>0,editing:recovering,change:change)
         } else {incidentShapeProbe.reset()}
         return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length),compositionEnded:markedRangeState == .empty)
@@ -945,7 +951,8 @@ final class OnsetRecoveryEngine:NSObject {
             lastEditable=nil;earlyBaseline=nil;lastText=nil;outsideObservation.reset()
             return
         }
-        let observed=snapshot();traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
+        let idle=diagnosticBackgroundAllowed()
+        let observed=snapshot(purpose:idle ? .background:.active);traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
         if decisionTrace.enabled,!IsSecureEventInputEnabled(),!["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason) {
             let passed=gate?.passedObservation()
             var runtime=InputIncidentTrace.OnsetRuntime()

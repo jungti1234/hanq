@@ -377,12 +377,14 @@ final class DiagnosticReviewSnapshot {
             try autoreleasepool {
             let data=try Self.read(url)
             let source=DiagnosticReviewSource(owner:snapshotOwner,url:url,bytes:data.count,digest:SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined())
-            var count=0,omitted=0,dropped=[1:0,2:0]
+            var count=0,omitted=0,compact=0,linked=0,dropped=[1:0,2:0]
             var first:DiagnosticCriticalJournal.Event?,last:DiagnosticCriticalJournal.Event?
             var recent:[DiagnosticCriticalJournal.Event]=[]
             let scanned=DiagnosticCriticalLane.scan(data){event in
                 count+=1;if first==nil{first=event};last=event
-                if event.failure.stage == .captureDisposition && event.failure.code != 1{omitted+=1}
+                if event.failure.stage == .captureDisposition && ![1,8].contains(event.failure.code){omitted+=1}
+                if event.context?.detailPolicy==2{compact+=1}
+                if event.failure.stage == .captureDisposition && event.failure.code==8{linked+=1}
                 if event.failure.stage == .journalOverflow,[1,2].contains(event.failure.code){dropped[event.failure.code,default:0]+=event.context?.count ?? 0}
                 if recent.count==20{recent.removeFirst()};recent.append(event)
             }
@@ -393,6 +395,7 @@ final class DiagnosticReviewSnapshot {
             }
             var fields:[DiagnosticReviewField]=[.init(label:"개별 사건 수",value:"\(count)"),
                 .init(label:"상세 저장 대기·실패 기록",value:"\(omitted)"),
+                .init(label:"요약으로 보관한 관측 · 기존 상세에 연결한 관측",value:"\(compact) · \(linked)"),
                 .init(label:"해석하지 못한 부분 기록",value:"\(decoded.incomplete)"),
                 .init(label:"보관 구간 번호",value:"\(decoded.generation)")]
             if decoded.incomplete>0{notices.append("일부 사건 기록이 불완전합니다. 해석하지 못한 부분도 원본에 그대로 포함합니다.")}
@@ -410,7 +413,7 @@ final class DiagnosticReviewSnapshot {
                 DiagnosticReviewSection(title:"사건 \(event.sequence) · 단계 \(event.failure.stage.rawValue)",fields:[
                     .init(label:"실행 · 시각",value:"\(event.run) · \(event.milliseconds)"),
                     .init(label:"영역 · 코드 · errno",value:"\(event.failure.domain.rawValue) · \(event.failure.code) · \(event.failure.underlyingPOSIX)"),
-                    .init(label:"상세 사건 · 첫 입력 관측 구간",value:"\(event.context?.incident ?? 0) · \(event.context?.episode ?? 0)")])
+                    .init(label:"상세 사건 · 첫 입력 관측 구간",value:"\(event.context?.incident ?? 0) · \(event.context?.episode ?? 0)")]+Self.observationFields(event))
             }
             let preview=DiagnosticReviewDocument("최소 사건 기록 · 최근 20건 미리보기",[summary]+recentSections)
             criticalFiles.append(DiagnosticReviewFile(name,"최소 사건 기록",source:source,preview:preview))
@@ -453,7 +456,21 @@ final class DiagnosticReviewSnapshot {
     }
     static func triggerTitle(_ trigger: Int) -> String {
         [1: "방금 발생한 문제 기록", 2: "입력 처리 지연 관측", 3: "접근성 조회 지연 관측",
-         4: "본문 길이 감소 관측", 5: "전환 대기 중단", 6: "자동 보정 시작", 7: "공백 처리 관측", 8: "첫 입력 상세 관측"][trigger] ?? "알 수 없는 기록"
+         4: "본문 길이 감소 관측", 5: "전환 처리 상태 변화", 6: "자동 보정 시작", 7: "공백 처리 관측", 8: "첫 입력 상세 관측"][trigger] ?? "알 수 없는 기록"
+    }
+    private static func observationFields(_ event:DiagnosticCriticalJournal.Event)->[DiagnosticReviewField] {
+        guard let c=event.context else{return []}
+        var result:[DiagnosticReviewField]=[]
+        if event.failure.stage == .captureDisposition,event.failure.code==8{result.append(.init(label:"상세 연결",value:"같은 조회 또는 본문 변화의 상세 \(c.incident)에 연결했습니다. 각 발생 기록은 유지합니다."))}
+        if c.detailPolicy==2{result.append(.init(label:"보관 방식",value:"관측 요약 보관 · 상세 저장 실패가 아닙니다. 정상 입력으로 판정했다는 뜻은 아닙니다."))}
+        if event.failure.stage == .boundaryCompletion{result.append(.init(label:"전환 상태",value:"초기 입력 전달 완료"))}
+        guard event.failure.stage == .slowRead else{return result}
+        result.append(.init(label:"조회 · 목적",value:"\(c.operationID.map(String.init) ?? "미측정") · \([0:"미측정",1:"배경 관측",2:"입력·복구 관련"][c.readPurpose ?? 0] ?? "미측정")"))
+        result.append(.init(label:"결과 · 소요 시간",value:"\(c.outcome.flatMap{InputIncidentTrace.ReadOutcome(rawValue:$0)}?.label ?? "조회 진행 중") · \(c.durationMicros.map(String.init) ?? "미측정")µs"))
+        if let token=c.readToken{result.append(.init(label:"조회 연결 ID",value:token))}
+        if let unchanged=c.activityUnchanged{result.append(.init(label:"조회 중 입력·상태 변화",value:unchanged ? "관측되지 않음":"관측됨"))}
+        if let ax=c.axResult{result.append(.init(label:"AX 반환 코드 · 시스템 / 앱 / 속성",value:"\(ax.system.map(String.init) ?? "미측정") / \(ax.application.map(String.init) ?? "미측정") / \(ax.attributes.map(String.init) ?? "미측정")"))}
+        return result
     }
     fileprivate static func capture(_ object: [String: Any], phase: Int,
         enumerate: ((([String:Any])throws->Void)throws->Void)? = nil) throws -> DiagnosticReviewDocument {
@@ -482,7 +499,8 @@ final class DiagnosticReviewSnapshot {
                           32: "첫 키 자판 대기", 33: "첫 키 두벌식 자판 확인", 34: "첫 키 자판 대기 만료",
                           35: "첫 키 입력 대상 변경", 36: "첫 키 소스 변경", 37: "첫 키 묶음 반영 확인", 38: "원래 키 전달 재개",
                           39: "입력칸 밖 전환 후 두벌식 선택·ABC 자판·오버라이드 없음", 40: "입력칸 밖 전환 후 두벌식 자판 확인",
-                          41: "입력칸 밖 전환 후 자판 판정 불가", 42: "입력칸 밖 전환 후 소스 변경"]
+                          41: "입력칸 밖 전환 후 자판 판정 불가", 42: "입력칸 밖 전환 후 소스 변경",
+                          43: "초기 입력 전달 완료", 44: "본문 변화 후 일반 입력 재개", 45: "전체 선택 후 본문 변화로 일반 입력 재개"]
         let sourceActions = [1: "입력 소스 관측", 2: "입력 소스 전환 요청", 3: "입력 소스 선택 확인",
                              4: "소스 조회 상충으로 확인 보류", 5: "입력 소스 재확인 후 관측 재개", 6: "소스 상태 인계 거부", 7: "영문 소스에서 관측 생략"]
         let decisions = [1: "영문 소스에서 보정 생략", 2: "입력 관측 불허", 3: "전환 전 입력으로 분류", 4: "입력칸 조회 불가",

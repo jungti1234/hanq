@@ -15,7 +15,7 @@ enum OperationalStage:Int,Codable {
     case permissionDenied,permissionUnavailable,permissionRestored,watchdog,transport
     case budgetPersistence=30,storageWrite
     case storagePrepare,storageOwnership,storagePublish,storagePrune,storageEncode,storageStatus
-    case recoveryFailure=40,incidentTrigger,termination,captureDisposition,journalOverflow,storageRead,slowRead
+    case recoveryFailure=40,incidentTrigger,termination,captureDisposition,journalOverflow,storageRead,slowRead,boundaryCompletion
 }
 struct OperationalFailure:Error,Codable,Hashable {
     enum Domain:Int,Codable {case policy=0,posix,cocoa,osStatus,mach,other}
@@ -173,6 +173,11 @@ final class DiagnosticCriticalLane {
         var operationID:Int?=nil
         var beganMilliseconds:Int?=nil
         var outcome:Int?=nil
+        var readPurpose:Int?=nil
+        var activityUnchanged:Bool?=nil
+        var detailPolicy:Int?=nil // 1 full detail, 2 compact background observation
+        var readToken:String?=nil
+        var axResult:InputIncidentAXResult?=nil
     }
     struct Event:Codable {
         let run:String,sequence:Int,milliseconds:Int64,failure:OperationalFailure,context:Context?
@@ -780,6 +785,16 @@ enum InputIncidentMarkedRange: Int, Codable {
     }
 }
 
+struct InputIncidentAXResult:Codable,Equatable {
+    var system:Int32?,application:Int32?,attributes:Int32?
+    var hasFailure:Bool{[system,application,attributes].compactMap{$0}.contains{$0 != 0}}
+    mutating func focus(_ route:Int,_ code:AXError) {
+        if route==1 {if system==nil || code != .success{system=code.rawValue}}
+        else if route==2 {if application==nil || code != .success{application=code.rawValue}}
+    }
+    mutating func attribute(_ code:AXError){if attributes==nil || code != .success{attributes=code.rawValue}}
+}
+
 struct InputIncidentFocusEvidence:Codable,Equatable {
     var markedRangeState: InputIncidentMarkedRange? = nil
     let path:Int // 1 onset, 2 synchronous mismatch, 3 idle mismatch worker
@@ -857,16 +872,42 @@ final class InputIncidentFieldRegistry {
 // engine, never captured by a diagnostic closure or encoded. No extra AX read,
 // content hash, cursor coordinate or raw text enters the trace. UTF-16 equality
 // detects equal-length substitutions (including canonically equivalent strings).
+// Main-thread-only comparison of existing AX snapshots. One bounded owned text
+// value stays in RAM; only revision numbers leave this object. No content hash.
+final class InputIncidentShapeCorrelation {
+    private var text:String?,field:UInt?,generation:Int32=0,window=0,identityEpoch=0
+    private var activity:Int64=0,revision=0,previous:Int?
+    func reset(){text=nil;field=nil;previous=nil}
+    #if HANQ_DIAGNOSTIC_TESTING
+    var retainedUTF16ForTest:Int{text?.utf16.count ?? 0}
+    #endif
+    func observe(_ value:String,field:UInt,generation:Int32,window:Int,identityEpoch:Int,activity:Int64)->(revision:Int,previous:Int?)? {
+        // Reject large values before creating an additional Foundation bridge.
+        guard value.utf16.count<=8192 else{reset();return nil}
+        let sameContext=self.field==field && self.generation==generation && self.window==window && self.identityEpoch==identityEpoch && self.activity==activity
+        let sameText=text.map{CFStringCompare($0 as CFString,value as CFString,CFStringCompareFlags(rawValue:0)) == .compareEqualTo} ?? false
+        if !sameContext || !sameText {
+            previous=sameContext && text != nil ? revision:nil
+            revision+=1
+            // Own the small value, never retain a slice of a large AX string.
+            text=String(decoding:Array(value.utf8),as:UTF8.self)
+            self.field=field;self.generation=generation;self.window=window;self.identityEpoch=identityEpoch;self.activity=activity
+        }
+        return (revision,previous)
+    }
+}
+
 struct InputIncidentShapeProbe {
     private var text:String?,selection:NSRange?,field:UInt?,generation:Int32=0
     private var sample=0
+    private var sharedRevision:Int?
     private var valueClass=0,priorWindow=0,priorEpoch=0,caretPrecedingClass=0
     private static func sameContent(_ a:String,_ b:String)->Bool {
         // Literal CF comparison handles native and AX/NSString-backed storage
         // without a per-code-unit Swift loop or a diagnostic content hash.
         CFStringCompare(a as CFString,b as CFString,CFStringCompareFlags(rawValue:0)) == .compareEqualTo
     }
-    mutating func reset(){text=nil;selection=nil;field=nil;generation=0;sample=0;valueClass=0;priorWindow=0;priorEpoch=0;caretPrecedingClass=0}
+    mutating func reset(){text=nil;selection=nil;field=nil;generation=0;sample=0;valueClass=0;priorWindow=0;priorEpoch=0;caretPrecedingClass=0;sharedRevision=nil}
     // One UTF-16 unit from the already verified snapshot; never exports a character.
     static func precedingClass(_ text:String,_ selection:NSRange)->Int {
         guard selection.length==0,selection.location>0,selection.location<=text.utf16.count else{return 0}
@@ -878,7 +919,7 @@ struct InputIncidentShapeProbe {
         default:return 5
         }
     }
-    mutating func observe(identity:UInt,text:String,selection:NSRange,generation:Int32,ax:InputIncidentAXEvidence?=nil)->InputIncidentTrace.ShapeChange {
+    mutating func observe(identity:UInt,text:String,selection:NSRange,generation:Int32,ax:InputIncidentAXEvidence?=nil,correlation:InputIncidentShapeCorrelation?=nil,activity:Int64=0)->InputIncidentTrace.ShapeChange {
         if self.generation != generation{reset();self.generation=generation}
         let sameField=field==identity && self.text != nil
         let changedWindow=priorWindow>0 && (ax?.window ?? 0)>0 && priorWindow != ax!.window
@@ -911,8 +952,11 @@ struct InputIncidentShapeProbe {
             priorWindow=window
         }
         if !known || content || cursor{caretPrecedingClass=Self.precedingClass(text,selection)}
+        let shared=correlation?.observe(text,field:identity,generation:generation,window:ax?.window ?? 0,identityEpoch:ax?.identityEpoch ?? 0,activity:activity)
+        let transition=known && content && sharedRevision != nil && sharedRevision==shared?.previous ? shared?.revision:nil
+        sharedRevision=shared?.revision
         sample+=1;self.text=text;self.selection=selection;field=identity
-        return .init(sample:sample,known:known,content:content,selection:cursor,ax:evidence,caretPrecedingClass:caretPrecedingClass,selectionMotion:motion)
+        return .init(sample:sample,known:known,content:content,selection:cursor,ax:evidence,caretPrecedingClass:caretPrecedingClass,selectionMotion:motion,transitionID:transition)
     }
 }
 
@@ -921,6 +965,10 @@ struct InputIncidentShapeProbe {
 // input callbacks never wait for the diagnostic lock or filesystem.
 final class InputIncidentTrace {
     let fieldRegistry=InputIncidentFieldRegistry()
+    let shapeCorrelation=InputIncidentShapeCorrelation()
+    private var activitySequence:Int64=0
+    var activityEpoch:Int64 {OSAtomicAdd64Barrier(0,&activitySequence)}
+    private func noteActivity(){OSAtomicIncrement64Barrier(&activitySequence)}
     enum Lane:Int,Codable {case hid=1,main,onset,mismatch,boundary,onsetAX,mismatchAX,sourceBoundary}
     enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison,onsetObservation}
     // AX samples only. Native input callbacks, DOM transactions and replacement
@@ -1110,6 +1158,7 @@ final class InputIncidentTrace {
         case manualEditStarted,manualEditVerified,manualEditUnverified
         case initialLayoutWait,initialLayoutReady,initialLayoutDeadline,initialContextChanged,initialSourceChanged,initialNativeBatchObserved,initialOriginalResumed
         case unfocusedLayoutConflict,unfocusedLayoutReady,unfocusedLayoutUnknown,unfocusedSourceChanged
+        case initialTransportCompleted,editorDivergedInputResumed,nativeSelectAllDivergedInputResumed
         static func event(_ stage:String)->BoundaryStage? {
             switch stage {
             case "initial_original_resumed":return .initialOriginalResumed
@@ -1143,7 +1192,9 @@ final class InputIncidentTrace {
             case "waiting_for_focus":return .focusWait
             case "waiting_for_selection_commit":return .selectionCommitWait
             case "waiting_for_source_commit":return .sourceCommitWait
-            case "initial_transport_completed","editor_diverged_input_resumed","native_select_all_diverged_input_resumed":return .inputResumed
+            case "initial_transport_completed":return .initialTransportCompleted
+            case "editor_diverged_input_resumed":return .editorDivergedInputResumed
+            case "native_select_all_diverged_input_resumed":return .nativeSelectAllDivergedInputResumed
             case "editor_insertion_style_matched":return .editorStyleMatched
             case "editor_terminal_lf_matched":return .terminalLFMatched
             case "editor_terminal_lf_style_matched":return .terminalLFStyleMatched
@@ -1278,7 +1329,7 @@ final class InputIncidentTrace {
             elapsedMicros:work.clockValid ? work.endedAtMicros-work.beganAtMicros:0,
             cpuState:work.cpuState,cpuMicros:work.cpuMicros))
     }
-    struct ShapeChange {let sample:Int;let known:Bool;let content:Bool;let selection:Bool;var ax:InputIncidentAXEvidence?=nil;var caretPrecedingClass:Int?=nil;var selectionMotion:Int?=nil}
+    struct ShapeChange {let sample:Int;let known:Bool;let content:Bool;let selection:Bool;var ax:InputIncidentAXEvidence?=nil;var caretPrecedingClass:Int?=nil;var selectionMotion:Int?=nil;var transitionID:Int?=nil}
     struct ShapeEvidence:Codable {
         // phase 1=new baseline, 2=checkpoint/current capture, 3=closed span.
         let phase:Int;let comparisonKnown:Bool;let contentChanged:Bool;let selectionChanged:Bool
@@ -1320,6 +1371,7 @@ final class InputIncidentTrace {
         let trigger:Int;let milliseconds:Int;let afterSequence:Int
         let lane:Int;let detail:Int;let event:Int;let inputOrigin:Int
         var requestID:String?=nil
+        var correlationID:String?=nil
     }
     struct CapturePreservation:Codable {
         let deferred:Bool;let requests:[CaptureRequest]
@@ -1547,7 +1599,7 @@ final class InputIncidentTrace {
     private var fields:[UInt:Int]=[:]
     private var nextField=0,lastEdit = -Double.infinity,lastTrigger = -Double.infinity
     private var captures=0
-    private var reads:[UUID:(id:Int,began:Double,lane:Lane)]=[:]
+    private var reads:[UUID:(id:Int,began:Double,lane:Lane,span:ReadSpan)]=[:]
     private var slowReads=Set<Int>()
     private var readSequence=0
     private var timer:DispatchSourceTimer?
@@ -1677,6 +1729,7 @@ final class InputIncidentTrace {
     }
     // Main-thread UI control. Preparation/draining stays on background queues.
     func setCollectionEnabled(_ active:Bool,completion:(()->Void)?=nil){
+        shapeCorrelation.reset()
         let paused=gate.pause()
         timer?.cancel();timer=nil
         // The writer barrier queues reset after write-completion bookkeeping.
@@ -1903,11 +1956,11 @@ final class InputIncidentTrace {
             if op==1{skippedEvents[lane,default:0]+=count}else{skippedAuxiliary[lane,default:0]+=count}
         }
     }
-    private func requestCapture(_ reason:Trigger,lane:Lane = .main,detail:Int=0,event:CGEvent?=nil,episode:Int?=nil,duration:Double?=nil,manual:DiagnosticManualCapture?=nil){
+    private func requestCapture(_ reason:Trigger,lane:Lane = .main,detail:Int=0,event:CGEvent?=nil,episode:Int?=nil,duration:Double?=nil,manual:DiagnosticManualCapture?=nil,correlation:String?=nil){
         guard enabled else{manual?.finish(.unavailable);return}
-        requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock(),episode:episode,duration:duration,manual:manual)
+        requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock(),episode:episode,duration:duration,manual:manual,correlation:correlation)
     }
-    private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double,episode:Int?=nil,duration:Double?=nil,manual:DiagnosticManualCapture?=nil){
+    private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double,episode:Int?=nil,duration:Double?=nil,manual:DiagnosticManualCapture?=nil,correlation:String?=nil){
         let generation=gate.generation;guard generation>0,OSAtomicAdd32Barrier(0,&preparingQuit)==0,reason != .onsetObservation else{manual?.finish(.unavailable);return}
         let requestID=UUID().uuidString
         var requestContext=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:0,lane:lane.rawValue,kind:reason.rawValue,category:detail,count:0,episode:episode ?? 0)
@@ -1930,7 +1983,16 @@ final class InputIncidentTrace {
                 let (identifier,origin)=reference.map{eventIdentity($0)} ?? (0,0)
                 var request=CaptureRequest(trigger:reason.rawValue,milliseconds:Int(max(0,time-self.origin)*1000),afterSequence:sequence,lane:lane.rawValue,detail:detail,event:identifier,inputOrigin:origin)
                 request.requestID=requestID
+                request.correlationID=correlation
                 captureRequested[reason.rawValue,default:0]+=1
+                if let correlation,reason == .axDelay || reason == .possibleShrink,
+                   let window=windows.values.first(where:{!$0.closed && $0.before.trigger==reason && $0.requests.first?.correlationID==correlation && $0.requests.count<32 && $0.post.count<capacity}) {
+                    window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
+                    var linked=DiagnosticCriticalJournal.Context(trace:runID,incident:window.before.incident,sequence:sequence,lane:lane.rawValue,kind:reason.rawValue,category:detail,count:window.requests.count,episode:episode ?? 0)
+                    linked.requestID=requestID;linked.observedMilliseconds=request.milliseconds
+                    OperationalDiagnostics.shared.record(.policy(.captureDisposition,8),context:linked,observation:true)
+                    scheduleClose(window);return
+                }
                 if sharedStore==nil,!limitsWrites,reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
                     window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
                     let code=reason == window.before.trigger ? reason.rawValue%8:reason.rawValue%8+8
@@ -2088,6 +2150,7 @@ final class InputIncidentTrace {
     // No extra event tag, AX call, event copy, key post or source selection.
     func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0,started:CallbackStart?=nil){
         guard enabled,!secureInput() else{return}
+        noteActivity()
         let work=finishCallback(started),workGeneration=started?.generation
         let time=clock(),reference=EventReference(event,type)
         let evidence = lane == .hid || lane == .main ? EventEvidence(time:time,origin:origin,type:type,event:event):nil
@@ -2232,27 +2295,33 @@ final class InputIncidentTrace {
             }
         }
     }
+    enum ReadPurpose:Int,Codable {case unknown=0,background,active}
+    static func compactRead(_ purpose:ReadPurpose,_ outcome:ReadOutcome?,activityUnchanged:Bool)->Bool {
+        purpose == .background && activityUnchanged && outcome.map{[ReadOutcome.success,.unsupportedTextField,.focusChanged,.targetNotFrontmost].contains($0)} == true
+    }
     final class ReadSpan {
         fileprivate let token=UUID(),began:Double
         fileprivate let generation:Int32
+        fileprivate let purpose:ReadPurpose,activity:Int64
+        fileprivate var watchdogCaptured=false // decisionQueue only
         private let credits:DispatchSemaphore
         private let endCredits=DispatchSemaphore(value:1)
         fileprivate func reserveEnd()->Bool {endCredits.wait(timeout:.now()) == .success}
         private var released=false
         fileprivate func finish(){if !released{released=true;credits.signal()}}
-        fileprivate init(began:Double,credits:DispatchSemaphore,generation:Int32){self.began=began;self.credits=credits;self.generation=generation}
+        fileprivate init(began:Double,credits:DispatchSemaphore,generation:Int32,purpose:ReadPurpose,activity:Int64){self.began=began;self.credits=credits;self.generation=generation;self.purpose=purpose;self.activity=activity}
         deinit {
             // Restore a claimed one-shot semaphore before libdispatch destroys it.
             _ = endCredits.wait(timeout:.now());endCredits.signal()
             if !released{credits.signal()}
         }
     }
-    func beginRead(_ lane:Lane)->ReadSpan? {
+    func beginRead(_ lane:Lane,purpose:ReadPurpose = .unknown,activityAtRequest:Int64?=nil)->ReadSpan? {
         let generation=gate.generation;guard generation>0 else{return nil}
         guard readCredits.wait(timeout:.now()) == .success else {
             observationOverflowSignals[observationCode(.readStart,lane)].signal();return nil
         }
-        let span=ReadSpan(began:clock(),credits:readCredits,generation:generation)
+        let span=ReadSpan(began:clock(),credits:readCredits,generation:generation,purpose:purpose,activity:activityAtRequest ?? activityEpoch)
         // One lease reserves both queued endpoints and an active read, independent
         // of event/shape floods. No AX object or CGEvent is retained.
         let enqueued=observationClock()
@@ -2262,16 +2331,17 @@ final class InputIncidentTrace {
             guard reads.count<readCapacity else {
                 observationOverflow[observationCode(.readStart,lane),default:0]+=1;return
             }
-            readSequence+=1;reads[span.token]=(readSequence,span.began,lane)
+            readSequence+=1;reads[span.token]=(readSequence,span.began,lane,span)
             append(lane,.read,observedAt:span.began,observationTiming:timing,event:readSequence,category:1)
             }
         }
         return span
     }
-    func endRead(_ lane:Lane,_ span:ReadSpan?,outcome:ReadOutcome?=nil,focus:InputIncidentFocusEvidence?=nil){
+    func endRead(_ lane:Lane,_ span:ReadSpan?,outcome:ReadOutcome?=nil,focus:InputIncidentFocusEvidence?=nil,axResult:InputIncidentAXResult?=nil){
         guard let span else{if enabled{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         guard span.reserveEnd() else{if gate.generation==span.generation{observationOmittedSignals[observationCode(.readEnd,lane)].signal()};return}
         let ended=clock(),duration=ended-span.began
+        let unchanged=span.activity==activityEpoch
         let work=workEvidence(began:span.began,ended:ended)
         let enqueued=observationClock()
         decisionQueue.async{[self,span] in
@@ -2282,8 +2352,10 @@ final class InputIncidentTrace {
                 observationOmitted[observationCode(.readEnd,lane),default:0]+=1;return
             }
             if duration>=0.05 {
-                if slowReads.insert(read.id).inserted{recordSlowRead(id:read.id,lane:lane,began:read.began,observed:read.began,phase:1)}
-                recordSlowRead(id:read.id,lane:lane,began:read.began,observed:ended,phase:2,outcome:outcome)
+                let compact = !span.watchdogCaptured && axResult?.hasFailure != true && Self.compactRead(span.purpose,outcome,activityUnchanged:unchanged)
+                if slowReads.insert(read.id).inserted{recordSlowRead(id:read.id,lane:lane,began:read.began,observed:read.began,phase:1,span:span)}
+                recordSlowRead(id:read.id,lane:lane,began:read.began,observed:ended,phase:2,outcome:outcome,span:span,unchanged:unchanged,compact:compact,axResult:axResult)
+                if !compact{requestCapture(.axDelay,lane:lane,detail:outcome?.rawValue ?? 0,reference:nil,time:ended,duration:duration,correlation:span.token.uuidString)}
             }
             slowReads.remove(read.id)
             append(lane,.read,observedAt:ended,observationTiming:timing,event:read.id,category:2,duration:duration)
@@ -2293,12 +2365,12 @@ final class InputIncidentTrace {
             updatePreservedLastFrame()
             }
         }
-        if gate.generation==span.generation,duration>=0.05{requestCapture(.axDelay,lane:lane,duration:duration)}
     }
-    private func recordSlowRead(id:Int,lane:Lane,began:Double,observed:Double,phase:Int,outcome:ReadOutcome?=nil){
+    private func recordSlowRead(id:Int,lane:Lane,began:Double,observed:Double,phase:Int,outcome:ReadOutcome?=nil,span:ReadSpan?=nil,unchanged:Bool?=nil,compact:Bool=false,axResult:InputIncidentAXResult?=nil){
         var context=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:sequence,lane:lane.rawValue,kind:Kind.read.rawValue,category:phase,count:1,episode:0)
         context.operationID=id;context.beganMilliseconds=Int(max(0,(began-origin)*1000));context.observedMilliseconds=Int(max(0,(observed-origin)*1000))
         let duration=max(0,observed-began);context.durationMicros=Int(min(duration,60)*1_000_000);context.durationClipped=duration>60;context.outcome=outcome?.rawValue
+        context.readToken=span?.token.uuidString;context.readPurpose=span?.purpose.rawValue;context.activityUnchanged=unchanged;context.detailPolicy=phase==2 ? (compact ? 2:1):nil;context.axResult=axResult
         OperationalDiagnostics.shared.record(.policy(.slowRead,phase),context:context,observation:true)
     }
     func start(){
@@ -2312,9 +2384,12 @@ final class InputIncidentTrace {
             _ = self.submit(.timer,.main,observedAt:time){[self] _ in
                 self.ring.trim(now:Int(max(0,(time-self.origin)*1000)))
                 for read in self.reads.values where time-read.began>=0.1 && self.slowReads.insert(read.id).inserted {
-                    self.recordSlowRead(id:read.id,lane:read.lane,began:read.began,observed:time,phase:1)
+                    self.recordSlowRead(id:read.id,lane:read.lane,began:read.began,observed:time,phase:1,span:read.span)
                 }
-                if let read=self.reads.values.filter({time-$0.began>=0.1}).min(by:{$0.began<$1.began}){self.requestCapture(.axDelay,lane:read.lane,duration:time-read.began)}
+                for read in self.reads.values where time-read.began>=0.1 && !read.span.watchdogCaptured {
+                    read.span.watchdogCaptured=true
+                    self.requestCapture(.axDelay,lane:read.lane,duration:time-read.began,correlation:read.span.token.uuidString)
+                }
             }
         }
         timer=source;source.resume()
@@ -2386,11 +2461,12 @@ final class InputIncidentTrace {
                 shapes[lane]=current
             }
             let suspect=previous.map{$0.active && $0.field==identity && !$0.selected && !selected && count<$0.count} ?? false
-            if suspect && !editing && time-lastEdit>0.4{requestCapture(.possibleShrink,lane:lane)}
+            if suspect && !editing && time-lastEdit>0.4{requestCapture(.possibleShrink,lane:lane,correlation:change?.transitionID.map{"shape-\($0)"})}
         }
     }
     func state(_ lane:Lane,_ state:State,pending:Int=0){
         guard enabled else{return};let time=clock()
+        noteActivity()
         _ = submit(.state,lane,state.rawValue,observedAt:time){[self] timing in
             if state != .buffered{lastEdit=time;invalidateShapes()}
             append(lane,.state,observedAt:time,observationTiming:timing,category:state.rawValue,count:pending)
@@ -2474,17 +2550,24 @@ final class InputIncidentTrace {
     }
     func context(){
         guard enabled else{return};let time=clock()
+        noteActivity()
         _ = submit(.context,.main,observedAt:time){[self] timing in lastEdit=time;invalidateShapes();append(.main,.context,observedAt:time,observationTiming:timing)}
     }
     func sourceBoundary(_ stage:BoundaryStage,queued:Int,awaitingOnset:Int){
         guard enabled else{return};let time=clock()
+        noteActivity()
         // Accounting has 32 detail slots per lane. Keep each full stage on
         // the frame and use the reserved aggregate slot for appended stages.
         let detail=stage.rawValue<32 ? stage.rawValue:0
         _ = submit(.boundary,.sourceBoundary,detail,observedAt:time){[self] timing in
             append(.sourceBoundary,.sourceBoundary,observedAt:time,observationTiming:timing,event:awaitingOnset,category:stage.rawValue,count:queued)
         }
-        if stage == .retained || stage == .deadline || stage == .focusChanged || stage == .failed || stage == .manualEditUnverified || stage == .inputResumed {requestCapture(.boundaryInterrupted,lane:.sourceBoundary,detail:stage.rawValue)}
+        if stage == .retained || stage == .deadline || stage == .focusChanged || stage == .failed || stage == .manualEditUnverified || stage == .inputResumed || stage == .editorDivergedInputResumed || stage == .nativeSelectAllDivergedInputResumed {requestCapture(.boundaryInterrupted,lane:.sourceBoundary,detail:stage.rawValue)}
+        if stage == .initialTransportCompleted {
+            var completed=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:0,lane:Lane.sourceBoundary.rawValue,kind:Kind.sourceBoundary.rawValue,category:stage.rawValue,count:queued,episode:0)
+            completed.observedMilliseconds=Int(max(0,(time-origin)*1000));completed.detailPolicy=2
+            OperationalDiagnostics.shared.record(.policy(.boundaryCompletion,stage.rawValue),context:completed,observation:true)
+        }
     }
     func boundaryComparison(_ evidence:BoundaryEvidence){
         guard enabled,evidence.valid else{return};let time=clock()

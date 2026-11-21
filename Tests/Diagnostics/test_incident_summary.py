@@ -392,7 +392,7 @@ class IncidentSummaryTests(unittest.TestCase):
     def test_editor_equivalence_and_resumed_input_are_not_source_commits(self):
         records=[dict(frame(8,7,category=category),count=0) for category in [23,24,25,26,27,28]]
         result=summary.summarize(dict(schema=1,trigger=5,frames=records))
-        self.assertEqual(result['source_boundary_editor_outcomes'],{'input_resumed_without_switch':1,'insertion_style_matched':1,'terminal_lf_matched':1,'terminal_lf_and_style_matched':1,'delivered_prefix_pending':1,'initial_body_removal_matched':1})
+        self.assertEqual(result['source_boundary_editor_outcomes'],{'legacy_input_resumed_reason_unknown':1,'insertion_style_matched':1,'terminal_lf_matched':1,'terminal_lf_and_style_matched':1,'delivered_prefix_pending':1,'initial_body_removal_matched':1})
         self.assertFalse(result['recipient_receipt_verified'])
         old=summary.summarize(dict(schema=1,trigger=5,frames=[]))
         self.assertEqual(old['source_boundary_editor_outcomes'],{})
@@ -475,6 +475,19 @@ class ControlSummaryTests(unittest.TestCase):
         self.assertEqual(result['control_decisions'][0]['route_name'],'filter_consumed')
 
 class ManualEditBoundarySummaryTests(unittest.TestCase):
+    def test_correlated_capture_identity_and_split_resume_reasons(self):
+        request=dict(trigger=3,milliseconds=20,afterSequence=10,lane=6,detail=1,event=0,inputOrigin=0,correlationID='00000000-0000-4000-8000-000000000001')
+        value=dict(deferred=False,requests=[request],postCapacity=65536,postOmittedFrames=0,closed=False,endedOnShutdown=False)
+        self.assertEqual(summary.capture_preservation(value),value)
+        shape=dict(request,trigger=4,correlationID='shape-77')
+        self.assertEqual(summary.capture_preservation(dict(value,requests=[shape]))['requests'],[shape])
+        for bad in [dict(request,correlationID='private text'),dict(shape,correlationID='shape--1'),dict(shape,correlationID='shape-9999999999999999999'),dict(shape,trigger=1),dict(request,detail=45)]:
+            with self.assertRaises(ValueError):summary.capture_preservation(dict(value,requests=[bad]))
+        rows=[dict(frame(8,7,category=k),count=0) for k in [23,43,44,45]]
+        for detail in [43,44,45]:summary.capture_preservation(dict(value,requests=[dict(trigger=5,milliseconds=20,afterSequence=10,lane=8,detail=detail,event=0,inputOrigin=0)]))
+        result=summary.summarize(dict(schema=1,trigger=1,frames=rows))
+        self.assertEqual(result['source_boundary_editor_outcomes'],dict(legacy_input_resumed_reason_unknown=1,initial_transport_completed=1,editor_diverged_input_resumed=1,native_select_all_diverged_input_resumed=1))
+
     def test_manual_edit_phases(self):
         rows=[dict(frame(8,7,category=k),count=0) for k in [29,30,31]]
         result=summary.summarize(dict(schema=1,trigger=1,frames=rows))

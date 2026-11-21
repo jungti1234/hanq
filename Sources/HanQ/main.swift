@@ -142,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var onsetRecovery: OnsetRecoveryController = {
         let controller = OnsetRecoveryController()
         controller.inputAllowed = { [weak self] in self?.freshPermissionGate.allowsInput ?? false }
+        controller.diagnosticBackgroundAllowed = { [weak self] in self?.diagnosticBackgroundIsIdle() ?? false }
         controller.unfocusedKeyCheck = { [weak self] in self?.sourceSwitchBarrier.unfocusedKeyCheck($0,needsReadyLayout:$1) ?? .noSwitch }
         controller.canRun = { [weak self] in
             guard let self else { return false }
@@ -170,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var mismatchRecovery: MismatchRecoveryController = {
         let controller=MismatchRecoveryController()
         controller.engine.inputAllowed = { [weak self] in self?.freshPermissionGate.allowsInput ?? false }
+        controller.engine.diagnosticBackgroundAllowed = { [weak self] in self?.diagnosticBackgroundIsIdle() ?? false }
         controller.engine.sourceEvidence=self.inputSourceEvidence
         controller.canRun = { [weak self] in
             guard let self else{return false}
@@ -285,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         barrier.readFocus = { [weak self] in
             guard let self,self.inputPermissionReady,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
             let access=self.mismatchRecovery.engine.focusAccess
-            return access.read(access.system)
+            return access.readElement(access.system)
         }
         barrier.select = { [weak self] target in self?.selectionSourceSwitch.select(target,asynchronous:true) ?? -50 }
         barrier.webActivation = { [weak self] target, field in self?.safariActivation.select(target, field: field) }
@@ -363,6 +365,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _exit(72)
     })
     var permissionGranted = false
+    // A missing-permission episode has one initial diagnostic boundary. A new
+    // collection generation must still be able to describe the current stop.
+    private var permissionWaitDiagnosticGeneration:Int32?
     func pauseForPermissionProbe(_ failure:OperationalFailure,generation:Int32) {
         guard freshPermissionGate.generation==generation else{return}
         permissionProbeFailure=failure
@@ -456,6 +461,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keyboardObserverLock = NSLock()
     private var keyboardObserver: KeyboardOriginDiagnostics?
 
+    // Diagnostic eligibility only: never changes polling, key delivery or repair.
+    private func diagnosticBackgroundIsIdle()->Bool {
+        guard inputPermissionReady,!sourceSwitchBarrier.busy,!selectionSourceSwitch.isPending,!safariActivation.pending,
+              !jamoRepair.isEditing,!externalKeyboards.isCapturing,let onset=onsetRecovery.engine else{return false}
+        let mismatch=mismatchRecovery.engine
+        return !mismatch.recovering && !mismatch.sourceWorkPaused && mismatch.pending.isEmpty && mismatch.retained.isEmpty && mismatch.plan==nil &&
+            !onset.recovering && onset.pending.isEmpty && onset.retainedInput.isEmpty && onset.prefixRemainder.isEmpty && onset.currentPlan==nil &&
+            onset.gate != nil && onset.gate?.reservation()==nil && onset.gate?.deferredReservation()==nil && onset.gate?.passedObservation()==nil
+    }
     private func configureKeyboardObservation() {
         let trace = InputIncidentTrace.shared
         let generation = trace.collectionGeneration
@@ -685,9 +699,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSWorkspace.shared.open(url)
         }
     }
-    func updatePermission() {
+    func updatePermission(isTrusted:()->Bool = {AXIsProcessTrusted()}) {
         InputDiagnostics.shared.record("main.ax.begin")
-        let granted = AXIsProcessTrusted()
+        let granted = isTrusted()
         InputDiagnostics.shared.record("main.ax.end granted=\(granted)")
         permissionRecovery.observePermission(granted)
         let lostPermission = permissionGranted && !granted
@@ -704,10 +718,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if permissionGranted || tap != nil {
                 NSLog("입력 감지 해제: 손쉬운 사용 권한 없음")
             }
-            stopMapping()
+            let generation=InputIncidentTrace.shared.collectionGeneration
+            stopMapping(recordIdleBoundaryFailure:permissionWaitDiagnosticGeneration != generation)
+            permissionWaitDiagnosticGeneration=generation
             pendingActivation = true
             hud.hide()
         }
+        if granted { permissionWaitDiagnosticGeneration=nil }
         permissionGranted = granted
         permissionContent.isHidden = granted
         if granted { window.orderOut(nil) }
@@ -1073,7 +1090,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Fail open: remove the system hook, not just the feature flags.
     /// Called outside the tap callback. The watchdog stays armed until cleanup ends.
-    func stopMapping(afterIdleTimeout:Bool=false,keepPermissionMonitor:Bool=false) {
+    func stopMapping(afterIdleTimeout:Bool=false,keepPermissionMonitor:Bool=false,recordIdleBoundaryFailure:Bool=true) {
         timeoutRestart?.cancel();timeoutRestart=nil
         explicitTapStop=false
         inputDeliveryOrigin?.stop();inputDeliveryOrigin=nil
@@ -1083,7 +1100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mismatchRecovery.engine.releasePostedKeys()
             onsetRecovery.engine?.releasePostedKeys()
         }
-        sourceSwitchBarrier.fail("input_stopped")
+        sourceSwitchBarrier.fail("input_stopped",recordIdleInputStop:recordIdleBoundaryFailure)
         InputDiagnostics.shared.record("tap.stop.begin present=\(tap != nil)")
         mismatchRecovery.stop(afterIdleTimeout:afterIdleTimeout)
         onsetRecovery.stop()

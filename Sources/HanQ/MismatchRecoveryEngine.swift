@@ -380,7 +380,7 @@ final class MismatchRecoveryEngine:NSObject {
 
     func attr(_ element:AXUIElement,_ name:String)->CFTypeRef?{var value:CFTypeRef?;guard AXUIElementCopyAttributeValue(element,name as CFString,&value) == .success else{return nil};return value}
     func focusedElement(_ application:AXUIElement,pid:pid_t)->AXUIElement? {
-        focusAccess.read=testFocusedRead ?? InputFocusAccess.readFocused
+        focusAccess.read=testFocusedRead
         return focusAccess.focusedElement(application:application,pid:pid)
     }
     // Combo editors are admitted only by the explicit selection/source boundary.
@@ -390,15 +390,19 @@ final class MismatchRecoveryEngine:NSObject {
     }
     func snapshot(includeContent:Bool=true,allowComboBox:Bool=false,observeOutsideWindow:((pid_t,AXUIElement)->Void)?=nil)->MismatchSnapshot?{
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
+        var axResult=InputIncidentAXResult()
+        let oldResultObserver=focusAccess.observeResult
+        if incidentRead != nil{focusAccess.observeResult={route,code in axResult.focus(route,code)}}
         var incidentMeasured=false
         let incidentGeneration=InputIncidentTrace.shared.collectionGeneration
         var focusRead:InputIncidentFocusProbe.Read?
         let oldFocusObserver=focusAccess.observeFocus
         defer{
             focusAccess.observeFocus=oldFocusObserver
+            focusAccess.observeResult=oldResultObserver
             let allowed=incidentMeasured && !["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason)
             let focus=incidentFocusProbe.finish(allowed ? focusRead:nil,generation:incidentGeneration,path:2)
-            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason,includesContent:includeContent):nil,focus:focus)
+            InputIncidentTrace.shared.endRead(.mismatchAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason,includesContent:includeContent):nil,focus:focus,axResult:allowed ? axResult:nil)
         }
         let queryStart=ProcessInfo.processInfo.systemUptime,previousID=activeSnapshotID
         traceSequence+=1;let id=traceSequence;activeSnapshotID=id
@@ -741,7 +745,7 @@ final class MismatchRecoveryEngine:NSObject {
             let (identity,owner,window,epoch)=incidentTrace.fieldRegistry.identify(snap.element,owner:target?.processIdentifier ?? 0,window:snap.incidentGeneration==incidentTrace.collectionGeneration ? snap.incidentWindow:nil,generation:incidentTrace.collectionGeneration)
             var evidence=snap.incidentGeneration==incidentTrace.collectionGeneration ? (snap.incidentAX ?? InputIncidentAXEvidence()):InputIncidentAXEvidence()
             evidence.owner=owner;evidence.window=window;evidence.identityEpoch=epoch
-            let change=incidentShapeProbe.observe(identity:identity,text:snap.text,selection:snap.selection,generation:incidentTrace.collectionGeneration,ax:evidence)
+            let change=incidentShapeProbe.observe(identity:identity,text:snap.text,selection:snap.selection,generation:incidentTrace.collectionGeneration,ax:evidence,correlation:incidentTrace.shapeCorrelation,activity:incidentTrace.activityEpoch)
             incidentTrace.shape(.mismatchAX,identity:identity,count:snap.text.utf16.count,selected:snap.selection.length>0,editing:recovering,change:change)
         } else {incidentShapeProbe.reset()}
         if let known=verifiedDeliveryHistory?(snap,allowPrior),known.plan.sourceID==currentSource(),
@@ -1386,6 +1390,7 @@ final class MismatchRecoveryEngine:NSObject {
     }
     var inputAllowed:()->Bool = { true }
     var canObserve:()->Bool = { true }
+    var diagnosticBackgroundAllowed:()->Bool = { false }
     var canToggleRightCommand:()->Bool = { true }
     var canBeginRepair:()->Bool = { true }
     var willBeginRepair:()->Void = {}

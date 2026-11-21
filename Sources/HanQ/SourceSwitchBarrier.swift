@@ -1014,7 +1014,13 @@ final class SourceSwitchBarrier {
         recordNativeBatchEdge(event)
         awaitingReplay=true;deadline=now()+1.0;send(event);schedule()
     }
-    func fail(_ reason:String){
+    func fail(_ reason:String,recordIdleInputStop:Bool=true){
+        // Rechecking an already stopped, empty permission wait is not another
+        // failed transaction. Keep every cleanup action and every real pending
+        // boundary failure; never apply this exception to other failure causes.
+        let interruptedWork = !canPrepareFreshMismatchObservation || heldStart != nil ||
+            switchSnapshot != nil || waitingForRepairBoundary || target != nil || diagnosticTransaction != nil
+        let recordFailure = reason != "input_stopped" || recordIdleInputStop || interruptedWork
         heldStart=nil;entry=nil;resumedOriginalBatch=false
         finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
         manualEdit=nil;manualEditSequence+=1
@@ -1027,7 +1033,7 @@ final class SourceSwitchBarrier {
         generation+=1;scheduled=false;busy=false;transactionField=nil;target=nil;targetTimestamp=0;awaitingReplay=false;externalEditPending=false
         let pending=queued;queued=[];resetObservation()
         if !pending.isEmpty{retained(pending)}
-        trace(reason)
+        if recordFailure { trace(reason) }
     }
 
     private func diagnosticEnabled()->Bool {
