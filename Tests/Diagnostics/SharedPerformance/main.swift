@@ -32,16 +32,17 @@ if mode=="writer" {
     let faultLock=NSLock();var fault=false
     let journal=mode=="outage" ? DiagnosticCriticalJournal(directory:root.appendingPathComponent("critical")):nil
     if let journal{OperationalDiagnostics.shared.installJournal(journal)}
-    let trace=["trace","outage"].contains(mode) ? InputIncidentTrace(secureInput:{false},destination:root.appendingPathComponent("trace"),clock:{traceTime},sharedWriter:{fd,p,n in
+    let trace=["trace","trace-dense","outage"].contains(mode) ? InputIncidentTrace(secureInput:{false},destination:root.appendingPathComponent("trace"),clock:{traceTime},sharedWriter:{fd,p,n in
         faultLock.lock();let fail=fault;faultLock.unlock()
         if fail{errno=ENOSPC;return -1};return Darwin.write(fd,p,n)
     }):nil
     trace?.flush()
     let allocated=metrics()
-    var rawBytes=0,maximumPacket=0,roundtrips=0
+    var rawBytes=0,maximumPacket=0,roundtrips=0,lastSequence=0,lastMilliseconds=0
     while let line=readLine(){autoreleasepool{
         do {
             let data=Data(line.utf8),frame=try JSONDecoder().decode(InputIncidentTrace.Frame.self,from:data)
+            lastSequence=frame.sequence;lastMilliseconds=frame.milliseconds
             if let history{history[rows%65536]=frame;history.trim(now:frame.milliseconds)}
             if let trace{traceTime=Double(frame.milliseconds)/1000;trace.replayFrameForTest(frame)}
             if !old.isEmpty{old[rows%capacity]=frame}
@@ -87,10 +88,19 @@ if mode=="writer" {
     }
     if let trace,mode != "outage" {
         trace.captureForTest(.axDelay);trace.flush();trace.captureForTest(.manual);trace.flush()
+        if mode=="trace-dense" {
+            for i in 1...3000 {
+                traceTime=Double(lastMilliseconds+i)/1000
+                let frame=InputIncidentTrace.Frame(sequence:lastSequence+i,milliseconds:lastMilliseconds+i,lane:.main,kind:.context,event:0,edge:0,category:0,inputOrigin:0,consumed:false,durationMicros:0,count:0,selected:false,field:0,decisionTiming:nil,observationTiming:nil)
+                trace.replayFrameForTest(frame)
+                if i%500==0{trace.flush();sample()}
+            }
+        }
         trace.finishCaptureWindowsForTest();trace.flush()
     }
     sample()
     let retained=history?.retainedCount ?? old.compactMap{$0}.count
     emit(["mode":mode,"outage":outage,"initial":initial,"allocated":allocated,"beforeCapture":beforeCapture,"final":metrics(),"peakSamples":peak,"rows":rows,"inputBytes":bytes,"seconds":ProcessInfo.processInfo.systemUptime-start,"retained":retained,"accountedBytes":trace?.historyBytesForTest() ?? history?.accountedBytes ?? old.count*MemoryLayout<InputIncidentTrace.Frame?>.stride,"packedPayloadBytes":rawBytes,"maximumPacketBytes":maximumPacket,"roundtripEqual":roundtrips])
+    if let stats=trace?.sharedStatsForTest(){emit(["sharedStats":try! JSONSerialization.jsonObject(with:JSONEncoder().encode(stats))])}
     trace?.stopAndFlush();withExtendedLifetime(old){};withExtendedLifetime(history){}
 }

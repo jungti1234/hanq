@@ -227,19 +227,33 @@ final class DiagnosticCriticalLane {
         return Status(pendingErrors:pending.filter{!$0.1}.count,pendingObservations:pending.filter{$0.1}.count,
             droppedErrors:droppedErrors,droppedObservations:droppedObservations,writeFailures:writeFailures,lastErrno:lastErrno,lastPolicy:lastPolicy,writtenBytes:writtenBytes,rotations:rotations)
     }
-    static func decode(_ data:Data)->Decoded? {
+    static func scan(_ data:Data,visit:(Event)->Void)->(generation:Int,incomplete:Int)? {
         guard data.count<=maximumSegmentBytes else{return nil}
-        let lines=data.split(separator:10,omittingEmptySubsequences:false)
-        guard let first=lines.first,let header=try? JSONDecoder().decode(Header.self,from:Data(first)),(header.schema==2 || header.schema==3),header.generation>0,header.generation<9_000_000_000_000_000 else{return nil}
-        var events:[Event]=[],incomplete=0
-        for (offset,line) in lines.dropFirst().enumerated() {
-            if line.isEmpty && offset==lines.count-2{continue}
-            if let event=try? JSONDecoder().decode(Event.self,from:Data(line)),event.valid{events.append(event)}else{incomplete+=1}
+        var start=data.startIndex,generation:Int?,incomplete=0
+        let decoder=JSONDecoder()
+        while start<data.endIndex {
+            let end=data[start...].firstIndex(of:10) ?? data.endIndex
+            let line=Data(data[start..<end])
+            if generation==nil {
+                guard let header=try? decoder.decode(Header.self,from:line),
+                      (header.schema==2 || header.schema==3),header.generation>0,
+                      header.generation<9_000_000_000_000_000 else{return nil}
+                generation=header.generation
+            }else{
+                autoreleasepool {
+                    if let event=try? decoder.decode(Event.self,from:line),event.valid{visit(event)}else{incomplete+=1}
+                }
+            }
+            start=end==data.endIndex ? end:data.index(after:end)
         }
-        return Decoded(generation:header.generation,events:events,incomplete:incomplete)
+        guard let generation else{return nil};return (generation,incomplete)
     }
-    static func readFiles(_ dir:Int32)throws ->[(String,Data)] {
-        var result:[(String,Data)]=[]
+    static func decode(_ data:Data)->Decoded? {
+        var events:[Event]=[]
+        guard let result=scan(data,visit:{events.append($0)}) else{return nil}
+        return Decoded(generation:result.generation,events:events,incomplete:result.incomplete)
+    }
+    static func forEachFile(_ dir:Int32,_ body:(String,Data)throws->Void)throws {
         for name in try DiagnosticOwnedIO.names(dir).filter({filenames.contains($0) || validName($0)}) {
             let fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
             if fd<0 {if errno==ENOENT{continue};throw DiagnosticLogExport.Failure.unavailable}
@@ -249,9 +263,12 @@ final class DiagnosticCriticalLane {
                   info.st_nlink==1,info.st_size>=0,info.st_size<=maximumSegmentBytes else{throw DiagnosticLogExport.Failure.unavailable}
             let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:Int(info.st_size)) ?? Data()
             guard data.count==info.st_size else{throw DiagnosticLogExport.Failure.unavailable}
-            result.append((String(name.dropFirst()),data))
+            try autoreleasepool{try body(String(name.dropFirst()),data)}
         }
-        return result
+    }
+    static func readFiles(_ dir:Int32)throws ->[(String,Data)] {
+        var files:[(String,Data)]=[]
+        try forEachFile(dir){files.append(($0,$1))};return files
     }
     static func validName(_ name:String)->Bool {
         name.hasPrefix(".critical-") && name.contains("-v3-") && name.hasSuffix(".jsonl") && !name.contains("/")
@@ -3456,8 +3473,6 @@ final class DiagnosticLogStore {
         guard ownershipHealthy,let dir=openDirectory() else{throw DiagnosticLogExport.Failure.unavailable}
         defer{close(dir)}
         let captures=(groups+manualGroups).flatMap{$0.files}
-        let critical=try DiagnosticCriticalJournal.readFiles(dir)
-        guard includeEmpty || !captures.isEmpty || !critical.isEmpty else{throw DiagnosticLogExport.Failure.noLogs}
         try FileManager.default.createDirectory(at:destination,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
         var completed=false
         defer{if !completed{try? FileManager.default.removeItem(at:destination)}}
@@ -3499,11 +3514,14 @@ final class DiagnosticLogStore {
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
             request.report(.copying,index+1,captures.count)
         }
-        for (name,data) in critical {
+        var criticalCount=0
+        try DiagnosticCriticalJournal.forEachFile(dir){name,data in
+            try request.check();try checkSpace(data.count);criticalCount+=1
             let path=destination.appendingPathComponent(name)
             try data.write(to:path,options:.withoutOverwriting)
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
         }
+        guard includeEmpty || !captures.isEmpty || criticalCount>0 else{throw DiagnosticLogExport.Failure.noLogs}
         if let data=try? JSONEncoder().encode(StatusDocument(status:status)) {
             let path=destination.appendingPathComponent("storage-status.json")
             try data.write(to:path,options:.withoutOverwriting)

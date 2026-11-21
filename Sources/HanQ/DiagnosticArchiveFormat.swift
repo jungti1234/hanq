@@ -187,6 +187,53 @@ enum DiagnosticJSON:Codable,Equatable {
 }
 
 enum DiagnosticArchiveIO {
+    static let chunkBytes = 64 * 1024
+    /// Hash/copy bounded chunks while checking both the open file and its name.
+    /// A changed, linked or replaced snapshot is never published as reviewed.
+    @discardableResult
+    static func scan(_ url:URL,maximum:Int,check:()throws->Void = {},
+                     consume:(Data)throws->Void = {_ in})throws->(bytes:Int,digest:String) {
+        let fd=open(url.path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
+        guard fd>=0 else{throw NSError(domain:NSPOSIXErrorDomain,code:Int(errno))}
+        defer{close(fd)}
+        let before=try regular(fd,maximum:maximum)
+        var hash=SHA256(),total=0,buffer=[UInt8](repeating:0,count:chunkBytes)
+        while true {
+            try check()
+            let count=Darwin.read(fd,&buffer,buffer.count)
+            if count<0{if errno==EINTR{continue};throw NSError(domain:NSPOSIXErrorDomain,code:Int(errno))}
+            if count==0{break}
+            guard count<=maximum-total else{throw DiagnosticPackedError.oversized}
+            try autoreleasepool {
+                let data=Data(buffer.prefix(count));hash.update(data:data);try consume(data)
+            }
+            total+=count
+        }
+        var named=stat()
+        guard total==before.st_size,same(before,try regular(fd,maximum:maximum)),
+              lstat(url.path,&named)==0,named.st_mode&S_IFMT==S_IFREG,same(before,named) else{throw DiagnosticPackedError.invalid}
+        return (total,hash.finalize().map{String(format:"%02x",$0)}.joined())
+    }
+    static func copy(_ source:URL,to destination:URL,bytes:Int,digest:String,
+                     check:()throws->Void = {})throws {
+        let fd=open(destination.path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0o600)
+        guard fd>=0 else{throw NSError(domain:NSPOSIXErrorDomain,code:Int(errno))}
+        var completed=false
+        defer{close(fd);if !completed{_ = unlink(destination.path)}}
+        let actual=try scan(source,maximum:bytes,check:check){data in
+            try data.withUnsafeBytes{buffer in
+                var offset=0
+                while offset<buffer.count {
+                    try check()
+                    let count=Darwin.write(fd,buffer.baseAddress!.advanced(by:offset),buffer.count-offset)
+                    if count<0{if errno==EINTR{continue};throw NSError(domain:NSPOSIXErrorDomain,code:Int(errno))}
+                    guard count>0 else{throw DiagnosticPackedError.invalid};offset+=count
+                }
+            }
+        }
+        guard actual.bytes==bytes,actual.digest==digest else{throw DiagnosticPackedError.invalid}
+        completed=true
+    }
     static func regular(_ fd:Int32,maximum:Int)throws->stat {
         var s=stat();guard fstat(fd,&s)==0 else{throw NSError(domain:NSPOSIXErrorDomain,code:Int(errno))}
         guard s.st_mode&S_IFMT==S_IFREG,s.st_uid==getuid(),s.st_mode&0o7777==0o600,s.st_nlink==1,s.st_size>=0,s.st_size<=maximum else{throw DiagnosticPackedError.invalid}
@@ -235,7 +282,8 @@ enum DiagnosticArchiveReader {
               header.ranges.reduce(0,{$0+$1.count})==header.frameCount else{throw DiagnosticPackedError.invalid}
         return (header,state)
     }
-    static func read(_ url:URL)throws->(Header,Payload) {
+    struct FileEvidence:Equatable {let bytes:Int,digest:String}
+    static func read(_ url:URL,observe:((FileEvidence)->Void)?=nil)throws->(Header,Payload) {
         let (header,state)=try readHeader(url),data=try DiagnosticArchiveIO.read(url,maximum:maximumFileBytes)
         var after=stat();guard lstat(url.path,&after)==0,DiagnosticArchiveIO.same(state,after),data.count==state.st_size else{throw DiagnosticPackedError.invalid}
         let length=data[8..<12].enumerated().reduce(0){$0+(Int($1.element)<<($1.offset*8))},body=Data(data.dropFirst(12+length))
@@ -248,38 +296,65 @@ enum DiagnosticArchiveReader {
         }else{guard body.count==header.rawBytes else{throw DiagnosticPackedError.invalid};raw=body}
         let payload=try JSONDecoder().decode(Payload.self,from:raw)
         guard payload.frames.count==header.ownFrameCount,payload.fields.count<=4096,Set(payload.fields).count==payload.fields.count else{throw DiagnosticPackedError.invalid}
+        observe?(FileEvidence(bytes:data.count,digest:SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()))
         return (header,payload)
     }
-    struct Expanded {let header:Header,metadata:DiagnosticJSON,frames:[[String:Any]],dependencies:Set<String>}
-    static func expand(_ name:String,in directory:URL,includeFrames:Bool=true)throws->Expanded {
+    struct Selection {
+        let name:String,directory:URL,header:Header,payload:Payload,metadata:DiagnosticJSON
+        let metadataDependencies:Set<String>
+        let metadataEvidence:[String:FileEvidence]
+        /// Retain packed sources only; expanded objects live for one visit.
+        /// Dependencies come from the same validated pass as the preview.
+        func visit(check:()throws->Void = {},observe:(String,FileEvidence)throws->Void = {_,_ in},
+                   _ body:([String:Any])throws->Void)throws->Set<String> {
+            var dependencies=metadataDependencies,previousName="",previous:Payload?
+            for (name,evidence) in metadataEvidence{try observe(name,evidence)}
+            for range in header.ranges {
+                try check()
+                let source:Payload
+                if range.file==name{source=payload}
+                else if range.file==previousName,let previous{source=previous}
+                else {
+                    var evidence:FileEvidence?
+                    let pair=try read(directory.appendingPathComponent(range.file),observe:{evidence=$0})
+                    guard pair.0.owner==header.owner,pair.0.runID==header.runID else{throw DiagnosticPackedError.invalid}
+                    try observe(range.file,evidence!)
+                    source=pair.1;previousName=range.file;previous=source
+                }
+                dependencies.insert(range.file)
+                guard range.first+range.count<=source.frames.count else{throw DiagnosticPackedError.invalid}
+                for (index,p) in source.frames[range.first..<range.first+range.count].enumerated() {
+                    if index%256==0{try check()}
+                    try autoreleasepool {
+                        let object=try DiagnosticPackedCodec.object(p.data,fields:source.fields)
+                        guard let frame=object as? [String:Any],frame["sequence"] as? Int==p.sequence,
+                              frame["milliseconds"] as? Int==p.milliseconds else{throw DiagnosticPackedError.invalid}
+                        try body(frame)
+                    }
+                }
+            }
+            return dependencies
+        }
+    }
+    static func selection(_ name:String,in directory:URL)throws->Selection {
         guard validName(name) else{throw DiagnosticPackedError.invalid}
-        var visited=Set<String>(),dependencies=Set<String>()
+        var visited=Set<String>(),dependencies=Set<String>(),evidence:[String:FileEvidence]=[:]
         func meta(_ name:String)throws->(Header,Payload,DiagnosticJSON) {
             guard visited.count<64,visited.insert(name).inserted else{throw DiagnosticPackedError.invalid}
-            let (header,payload)=try read(directory.appendingPathComponent(name));dependencies.insert(name)
+            let (header,payload)=try read(directory.appendingPathComponent(name),observe:{evidence[name]=$0});dependencies.insert(name)
             var value:DiagnosticJSON = .object([:])
             if let base=header.metadataBase {let prior=try meta(base);guard prior.0.owner==header.owner else{throw DiagnosticPackedError.invalid};value=prior.2}
             try value.apply(payload.changes);return (header,payload,value)
         }
         let (header,payload,metadata)=try meta(name)
+        return Selection(name:name,directory:directory,header:header,payload:payload,metadata:metadata,metadataDependencies:dependencies,metadataEvidence:evidence)
+    }
+    struct Expanded {let header:Header,metadata:DiagnosticJSON,frames:[[String:Any]],dependencies:Set<String>}
+    static func expand(_ name:String,in directory:URL,includeFrames:Bool=true)throws->Expanded {
+        let selection=try selection(name,in:directory)
         var frames:[[String:Any]]=[]
-        if includeFrames {
-            // One source file at a time bounds decompression workspace.
-            var previousName="",previous:Payload?
-            for range in header.ranges {
-                let source:Payload
-                if range.file==name{source=payload}
-                else if range.file==previousName,let previous{source=previous}
-                else {let pair=try read(directory.appendingPathComponent(range.file));guard pair.0.owner==header.owner,pair.0.runID==header.runID else{throw DiagnosticPackedError.invalid};source=pair.1;previousName=range.file;previous=source}
-                dependencies.insert(range.file)
-                guard range.first+range.count<=source.frames.count else{throw DiagnosticPackedError.invalid}
-                for p in source.frames[range.first..<range.first+range.count] {
-                    let object=try DiagnosticPackedCodec.object(p.data,fields:source.fields)
-                    guard let frame=object as? [String:Any],frame["sequence"] as? Int==p.sequence,frame["milliseconds"] as? Int==p.milliseconds else{throw DiagnosticPackedError.invalid};frames.append(frame)
-                }
-            }
-        }
-        return Expanded(header:header,metadata:metadata,frames:frames,dependencies:dependencies)
+        let dependencies=includeFrames ? try selection.visit{frames.append($0)}:selection.metadataDependencies
+        return Expanded(header:selection.header,metadata:selection.metadata,frames:frames,dependencies:dependencies)
     }
     static func normalized(_ name:String,in directory:URL)throws->Data {
         let result=try expand(name,in:directory)

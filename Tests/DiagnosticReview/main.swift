@@ -69,7 +69,7 @@ for phrase in ["전환 대기 기한 초과", "보정 시작", "허용 상태 �
     check(before.readableText.contains(phrase), "readable fixed-label interpretation: \(phrase)")
 }
 check(files.last!.readableText.contains("내역 (누적)"), "storage counters retain concise cumulative scope")
-let exportedSummary = String(data: files.first!.data, encoding: .utf8)!
+let exportedSummary = try String(data: files.first!.data, encoding: .utf8)!
 check(exportedSummary == files.first!.readableText, "summary preview and exported text match exactly")
 check(files.first!.readableText.contains("기록 수　1건")
       && files.first!.readableText.contains("발생 전·후 모두 있음"), "summary preview provides selection and complete-pair information")
@@ -99,7 +99,7 @@ let five = try snapshot.files(selected: Set(snapshot.incidents.prefix(5).map(\.i
 check(five.count == 13, "five incidents include ten pre/post files and all mandatory documents")
 check(five.first!.readableText.contains("기록 수　5건"), "pre/post pairs count as five incidents")
 check(five.filter { $0.path.hasPrefix("incident-") }.allSatisfy { file in
-    (try? Data(contentsOf: snapshotURL.appendingPathComponent(file.path))) == file.data
+    (try? Data(contentsOf: snapshotURL.appendingPathComponent(file.path))) == (try? file.data)
 }, "all five selected pairs retain original bytes")
 check(try snapshot.files(selected: Set(snapshot.incidents.suffix(5).map(\.id)), environment: environment).count == 13, "older incidents beyond the first five remain selectable")
 do {
@@ -113,7 +113,7 @@ do { _ = try snapshot.files(selected: ["absent"], environment: environment); che
 check(store.save(try capture(8, 0), incident: 8, phase: 0, automatic: false) == .saved, "new live incident")
 let archive = try DiagnosticReviewArchive(files: files)
 let original = try Data(contentsOf: archive.url)
-check(original.count == archive.bytes && archive.sourceBytes == files.reduce(0) { $0 + $1.data.count }, "actual compressed and source sizes")
+check(original.count == archive.bytes && archive.sourceBytes == files.reduce(0) { $0 + $1.bytes }, "actual compressed and source sizes")
 let output = root.appendingPathComponent("selected.zip")
 try archive.save(to: output)
 check(try Data(contentsOf: output) == original, "saved ZIP exactly matches reviewed ZIP")

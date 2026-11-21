@@ -170,13 +170,15 @@ final class DiagnosticSharedStore {
     private struct Record {let header:Header,identity:stat}
     private struct Cached {let packet:DiagnosticPackedFrame,file:String,index:Int}
     private final class Pending {
-        let name:String,temporary:String,data:Data,input:Input,header:Header,newFrames:[DiagnosticPackedFrame]
+        let name:String,temporary:String,chunks:[Data],input:Input,header:Header,newFrames:[DiagnosticPackedFrame]
+        let bytes:Int
         var fd:Int32 = -1,offset=0,linked=false,temporaryRemoved=false
+        var chunkIndex=0,chunkOffset=0
         var identity:stat?
         var metadataPending:Pending?
         var metadataName:String?,metadataCheckpoint=false
-        init(name:String,data:Data,input:Input,header:Header,newFrames:[DiagnosticPackedFrame]){
-            self.name=name;temporary=".shared-partial-"+UUID().uuidString;self.data=data;self.input=input;self.header=header;self.newFrames=newFrames
+        init(name:String,chunks:[Data],input:Input,header:Header,newFrames:[DiagnosticPackedFrame]){
+            self.name=name;temporary=".shared-partial-"+UUID().uuidString;self.chunks=chunks;bytes=chunks.reduce(0){$0+$1.count};self.input=input;self.header=header;self.newFrames=newFrames
         }
         deinit{if fd>=0{close(fd)}}
     }
@@ -196,7 +198,7 @@ final class DiagnosticSharedStore {
         self.clock=clock;self.retryClock=retryClock;self.writer=writer
     }
     deinit{if lockFD>=0{close(lockFD)}}
-    var stats:Stats {lock.lock();defer{lock.unlock()};var s=counters;s.pendingBytes=(pending?.data.count ?? 0)+(pending?.metadataPending?.data.count ?? 0)+waitingBytes;s.cachedFrameBytes=cache.values.reduce(0){$0+$1.packet.accountedBytes+128};return s}
+    var stats:Stats {lock.lock();defer{lock.unlock()};var s=counters;s.pendingBytes=(pending?.bytes ?? 0)+(pending?.metadataPending?.bytes ?? 0)+waitingBytes;s.cachedFrameBytes=cache.values.reduce(0){$0+$1.packet.accountedBytes+128};return s}
     var lastCaptureIncident:Int {lock.lock();defer{lock.unlock()};return records.values.filter{($0.header.role ?? 0)==0}.map{$0.header.incident}.max() ?? 0}
     static func validName(_ name:String)->Bool {name.hasPrefix("shared-") && name.hasSuffix(".hqdiag") && UUID(uuidString:String(name.dropFirst(7).dropLast(7))) != nil}
     private func fail(_ error:Error){
@@ -329,18 +331,17 @@ final class DiagnosticSharedStore {
     }
     private func makePending(name:String,input:Input,frames:[DiagnosticPackedFrame],ranges:[FrameRange],changes:[DiagnosticJSON.Change],base:String?,role:Int)throws->Pending {
         let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
-        let raw=try encoder.encode(Payload(fields:role==1 ? []:DiagnosticPackedCodec.shared.fields,frames:frames,changes:changes))
-        guard raw.count<=Self.maximumFileBytes else{throw DiagnosticPackedError.oversized}
-        let compressed=Self.compress(raw),payload=compressed ?? raw
+        let payload=try DiagnosticPayloadStream.encode(fields:role==1 ? []:DiagnosticPackedCodec.shared.fields,frames:frames,changes:changes)
+        var hash=SHA256();for chunk in payload.chunks{hash.update(data:chunk)}
         var header=Header(schema:1,owner:owner!,runID:input.run,incident:input.incident,phase:input.phase,trigger:input.trigger,
             milliseconds:input.milliseconds,metadataBase:base,ranges:ranges,frameCount:role==1 ? 0:input.frames.count,ownFrameCount:frames.count,
-            rawBytes:raw.count,compressed:compressed != nil,digest:SHA256.hash(data:payload).map{String(format:"%02x",$0)}.joined())
+            rawBytes:payload.rawBytes,compressed:payload.compressed,digest:hash.finalize().map{String(format:"%02x",$0)}.joined())
         header.role=role
         let h=try encoder.encode(header);guard h.count<=1024*1024 else{throw DiagnosticPackedError.oversized}
-        var size=UInt32(h.count).littleEndian,data=Data("HQSHR001".utf8)
-        withUnsafeBytes(of:&size){data.append(contentsOf:$0)};data.append(h);data.append(payload)
-        guard data.count<=Self.maximumFileBytes else{throw DiagnosticPackedError.oversized}
-        return Pending(name:name,data:data,input:input,header:header,newFrames:frames)
+        var size=UInt32(h.count).littleEndian,prefix=Data("HQSHR001".utf8)
+        withUnsafeBytes(of:&size){prefix.append(contentsOf:$0)}
+        guard prefix.count+h.count+payload.bytes<=Self.maximumFileBytes else{throw DiagnosticPackedError.oversized}
+        return Pending(name:name,chunks:[prefix,h]+payload.chunks,input:input,header:header,newFrames:frames)
     }
     private func publish(_ p:Pending,dir:Int32)throws {
         if let meta=p.metadataPending{try publishBytes(meta,dir:dir);p.metadataPending=nil}
@@ -372,12 +373,14 @@ final class DiagnosticSharedStore {
         guard fstatat(dir,p.temporaryRemoved ? p.name:p.temporary,&named,AT_SYMLINK_NOFOLLOW)==0,DiagnosticOwnedIO.same(actual,named) else{throw OperationalFailure.policy(.storageOwnership,10)}
         if p.linked{guard fstatat(dir,p.name,&named,AT_SYMLINK_NOFOLLOW)==0,DiagnosticOwnedIO.same(actual,named) else{throw OperationalFailure.policy(.storageOwnership,10)}}
         defer{var state=stat();if fstat(p.fd,&state)==0{p.identity=state}}
-        while p.offset<p.data.count {
-            let result=p.data.withUnsafeBytes{b in writer(p.fd,b.baseAddress!.advanced(by:p.offset),b.count-p.offset)}
+        while p.chunkIndex<p.chunks.count {
+            let chunk=p.chunks[p.chunkIndex]
+            let result=chunk.withUnsafeBytes{b in writer(p.fd,b.baseAddress!.advanced(by:p.chunkOffset),b.count-p.chunkOffset)}
             counters.writeCalls+=1
             if result<0{if errno==EINTR{continue};throw OperationalFailure.posix(.storageWrite,errno)}
-            guard result>0,result<=p.data.count-p.offset else{throw OperationalFailure.policy(.storageWrite,1)}
-            p.offset+=result;counters.writtenBytes+=result
+            guard result>0,result<=chunk.count-p.chunkOffset else{throw OperationalFailure.policy(.storageWrite,1)}
+            p.offset+=result;p.chunkOffset+=result;counters.writtenBytes+=result
+            if p.chunkOffset==chunk.count{p.chunkIndex+=1;p.chunkOffset=0}
         }
         counters.fsyncCalls+=1;guard fsync(p.fd)==0 else{throw OperationalFailure.posix(.storageWrite,errno)}
         if !p.linked {guard linkat(dir,p.temporary,dir,p.name,0)==0 else{throw OperationalFailure.posix(.storagePublish,errno)};p.linked=true}
@@ -404,13 +407,6 @@ final class DiagnosticSharedStore {
         }
         lastPruned=clock()
     }
-    static func compress(_ source:Data)->Data? {
-        var output=Data(count:source.count+source.count/8+1024)
-        let count=output.withUnsafeMutableBytes{dst in source.withUnsafeBytes{src in
-            compression_encode_buffer(dst.bindMemory(to:UInt8.self).baseAddress!,dst.count,src.bindMemory(to:UInt8.self).baseAddress!,src.count,nil,COMPRESSION_ZLIB)
-        }}
-        guard count>0,count<source.count else{return nil};output.count=count;return output
-    }
     static func readHeader(_ url:URL)throws->(Header,stat) {
         do{return try DiagnosticArchiveReader.readHeader(url)}
         catch{throw (error as? OperationalFailure) ?? OperationalFailure.capture(error,stage:.storageRead)}
@@ -428,10 +424,146 @@ final class DiagnosticSharedStore {
             var actual=stat();guard fstatat(dir,name,&actual,AT_SYMLINK_NOFOLLOW)==0,DiagnosticOwnedIO.same(actual,record.identity) else{throw OperationalFailure.policy(.storageOwnership,9)}
             let source=directory.appendingPathComponent(name),target=destination.appendingPathComponent(name)
             try FileManager.default.copyItem(at:source,to:target)
-            guard SHA256.hash(data:try DiagnosticOwnedIO.read(source,maximum:Self.maximumFileBytes))==SHA256.hash(data:try DiagnosticOwnedIO.read(target,maximum:Self.maximumFileBytes)),fstatat(dir,name,&actual,AT_SYMLINK_NOFOLLOW)==0,DiagnosticOwnedIO.same(actual,record.identity) else{throw DiagnosticPackedError.invalid}
+            let sourceHash=try DiagnosticArchiveIO.scan(source,maximum:Self.maximumFileBytes)
+            let targetHash=try DiagnosticArchiveIO.scan(target,maximum:Self.maximumFileBytes)
+            guard sourceHash.bytes==targetHash.bytes,sourceHash.digest==targetHash.digest,fstatat(dir,name,&actual,AT_SYMLINK_NOFOLLOW)==0,DiagnosticOwnedIO.same(actual,record.identity) else{throw DiagnosticPackedError.invalid}
         }
         let data=try JSONEncoder().encode(stats);let path=destination.appendingPathComponent("shared-storage-status.json")
         try data.write(to:path,options:.withoutOverwriting);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+    }
+}
+
+/// Produces the existing JSON/zlib payload in bounded working buffers. The
+/// retained output is only the final bytes needed for a retry, in <=64KiB
+/// chunks; there is no whole raw JSON, oversized destination or final copy.
+enum DiagnosticPayloadStream {
+    struct Result {
+        let chunks:[Data],rawBytes:Int,compressed:Bool
+        var bytes:Int{chunks.reduce(0){$0+$1.count}}
+    }
+    private final class Sink {
+        static let size=64*1024
+        let compressed:Bool
+        private let destination=UnsafeMutablePointer<UInt8>.allocate(capacity:size)
+        private var stream:compression_stream
+        private var initialized=false,buffer=Data(),chunks:[Data]=[]
+        private(set) var rawBytes=0
+        init(compressed:Bool) {
+            self.compressed=compressed
+            stream=compression_stream(dst_ptr:destination,dst_size:Self.size,src_ptr:UnsafePointer(destination),src_size:0,state:nil)
+            if compressed {
+                initialized=compression_stream_init(&stream,COMPRESSION_STREAM_ENCODE,COMPRESSION_ZLIB) != COMPRESSION_STATUS_ERROR
+            }
+            buffer.reserveCapacity(Self.size)
+        }
+        deinit{if initialized{compression_stream_destroy(&stream)};destination.deallocate()}
+        func append(_ data:Data)throws {
+            guard data.count<=DiagnosticSharedStore.maximumFileBytes-rawBytes else{throw DiagnosticPackedError.oversized}
+            rawBytes+=data.count
+            try data.withUnsafeBytes{source in
+                var offset=0
+                while offset<source.count {
+                    let count=min(Self.size-buffer.count,source.count-offset)
+                    buffer.append(contentsOf:source[offset..<offset+count]);offset+=count
+                    if buffer.count==Self.size{try flush(final:false)}
+                }
+            }
+        }
+        private func flush(final:Bool)throws {
+            if !compressed {
+                if !buffer.isEmpty{chunks.append(buffer);buffer=Data();buffer.reserveCapacity(Self.size)}
+                return
+            }
+            guard initialized else{throw DiagnosticPackedError.invalid}
+            try buffer.withUnsafeBytes{source in
+                stream.src_ptr=source.bindMemory(to:UInt8.self).baseAddress ?? UnsafePointer(destination)
+                stream.src_size=source.count
+                repeat {
+                    stream.dst_ptr=destination;stream.dst_size=Self.size
+                    let previous=stream.src_size
+                    let status=compression_stream_process(&stream,final ? Int32(COMPRESSION_STREAM_FINALIZE.rawValue):0)
+                    guard status != COMPRESSION_STATUS_ERROR else{throw DiagnosticPackedError.invalid}
+                    let count=Self.size-stream.dst_size
+                    if count>0{chunks.append(Data(bytes:destination,count:count))}
+                    if status==COMPRESSION_STATUS_END {
+                        guard final,stream.src_size==0 else{throw DiagnosticPackedError.invalid};break
+                    }
+                    guard previous != stream.src_size || count>0 || (!final && stream.src_size==0) else{throw DiagnosticPackedError.invalid}
+                }while final || stream.src_size>0
+            }
+            buffer.removeAll(keepingCapacity:true)
+        }
+        func finish()throws->Result {
+            try flush(final:true)
+            return Result(chunks:chunks,rawBytes:rawBytes,compressed:compressed)
+        }
+    }
+    static func encode(fields:[String],frames:[DiagnosticPackedFrame],changes:[DiagnosticJSON.Change])throws->Result {
+        func build(_ compressed:Bool)throws->Result {
+            let sink=Sink(compressed:compressed),encoder=JSONEncoder()
+            encoder.outputFormatting=[.sortedKeys]
+            func token(_ value:String)throws{try sink.append(Data(value.utf8))}
+            // Strings can be long metadata values; escape bytes without a
+            // second complete encoded string allocation.
+            func string(_ value:String)throws {
+                try token("\"");var escaped=Data();escaped.reserveCapacity(Sink.size)
+                let hex=Array("0123456789abcdef".utf8)
+                for byte in value.utf8 {
+                    switch byte {
+                    case 34,47,92:escaped.append(92);escaped.append(byte)
+                    case 8:escaped.append(contentsOf:[92,98])
+                    case 9:escaped.append(contentsOf:[92,116])
+                    case 10:escaped.append(contentsOf:[92,110])
+                    case 12:escaped.append(contentsOf:[92,102])
+                    case 13:escaped.append(contentsOf:[92,114])
+                    case 0...31:escaped.append(contentsOf:[92,117,48,48,hex[Int(byte>>4)],hex[Int(byte&15)]])
+                    default:escaped.append(byte)
+                    }
+                    if escaped.count>=Sink.size-6{try sink.append(escaped);escaped.removeAll(keepingCapacity:true)}
+                }
+                try sink.append(escaped);try token("\"")
+            }
+            func json(_ value:DiagnosticJSON,_ depth:Int=0)throws {
+                guard depth<=512 else{throw DiagnosticPackedError.invalid}
+                switch value {
+                case .null:try token("null")
+                case .bool(let v):try token(v ? "true":"false")
+                case .integer(let v):try token(String(v))
+                case .real(let v):try sink.append(encoder.encode(v))
+                case .string(let v):try string(v)
+                case .array(let values):
+                    try token("[")
+                    for (i,v) in values.enumerated(){if i>0{try token(",")};try json(v,depth+1)}
+                    try token("]")
+                case .object(let values):
+                    try token("{")
+                    for (i,key) in values.keys.sorted().enumerated(){if i>0{try token(",")};try string(key);try token(":");try json(values[key]!,depth+1)}
+                    try token("}")
+                }
+            }
+            func strings(_ values:[String])throws {
+                try token("[");for (i,value) in values.enumerated(){if i>0{try token(",")};try string(value)};try token("]")
+            }
+            try token("{\"changes\":[")
+            for (i,change) in changes.enumerated(){
+                if i>0{try token(",")};try token("{\"path\":");try strings(change.path)
+                if let value=change.value{try token(",\"value\":");try json(value)}
+                try token("}")
+            }
+            try token("],\"fields\":");try strings(fields);try token(",\"frames\":[")
+            for (i,frame) in frames.enumerated(){
+                if i>0{try token(",")}
+                // A packet is bounded to 64KiB by the packed codec. Retain the
+                // exact Codable fields/base64 encoding of the existing format.
+                try autoreleasepool{try sink.append(encoder.encode(frame))}
+            }
+            try token("]}");return try sink.finish()
+        }
+        var compressed:Result?=try build(true)
+        if compressed!.bytes<compressed!.rawBytes{return compressed!}
+        // Rare incompressible payload: discard compressed output before a
+        // second in-memory pass. Never spool raw JSON to disk.
+        compressed=nil;return try build(false)
     }
 }
 
@@ -485,13 +617,17 @@ final class DiagnosticCriticalJournal {
     static func exportedName(_ name:String)->Bool {
         filenames.map{String($0.dropFirst())}.contains(name) || DiagnosticCriticalLane.validName("."+name)
     }
-    static func readFiles(_ dir:Int32)throws->[(String,Data)] {
-        var result=try DiagnosticCriticalLane.readFiles(dir)
+    static func forEachFile(_ dir:Int32,_ body:(String,Data)throws->Void)throws {
+        try DiagnosticCriticalLane.forEachFile(dir,body)
         for name in laneDirectories {
             let fd=openat(dir,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
             if fd<0{if errno==ENOENT{continue};throw DiagnosticLogExport.Failure.unavailable};defer{close(fd)}
             var info=stat();guard fstat(fd,&info)==0,info.st_uid==getuid(),info.st_mode&0o077==0 else{throw DiagnosticLogExport.Failure.unavailable}
-            result += try DiagnosticCriticalLane.readFiles(fd)
-        };return result
+            try DiagnosticCriticalLane.forEachFile(fd,body)
+        }
+    }
+    static func readFiles(_ dir:Int32)throws->[(String,Data)] {
+        var files:[(String,Data)]=[]
+        try forEachFile(dir){files.append(($0,$1))};return files
     }
 }

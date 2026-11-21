@@ -148,7 +148,7 @@ let environment=DiagnosticReviewEnvironment(appVersion:"0",build:"test",macOSVer
 let exportFiles=try! review.files(selected:[],environment:environment)
 let criticalFile=exportFiles.first{DiagnosticCriticalJournal.exportedName($0.path)}!
 let original=files(reviewDir).first{$0.key.hasSuffix("."+criticalFile.path)}!.value
-check(criticalFile.data==original,"minimum original bytes preserved by review/export")
+check(try criticalFile.data==original,"minimum original bytes preserved by review/export")
 let linkDir=dir("critical-link"),sentinel=root.appendingPathComponent("sentinel")
 try! Data("preserve".utf8).write(to:sentinel)
 try! fm.createSymbolicLink(at:linkDir.appendingPathComponent(DiagnosticCriticalJournal.laneDirectories[0]),withDestinationURL:sentinel)
