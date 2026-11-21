@@ -68,6 +68,12 @@ final class DiagnosticFrameHistory {
         for i in 0..<count {if let packet=slots[(head+i)%slots.count],packet.milliseconds>=minimum,packet.milliseconds<=maximum{result.append(packet)}}
         return DiagnosticFrameSelection(result)
     }
+    // Menu admission only needs the charge, not another array of frame references.
+    func selectionMemoryCharge(from minimum:Int,through maximum:Int)->Int {
+        seal();var result=0
+        for i in 0..<count {if let packet=slots[(head+i)%slots.count],packet.milliseconds>=minimum,packet.milliseconds<=maximum{result+=packet.accountedBytes}}
+        return result
+    }
     func packet(at index:Int)->DiagnosticPackedFrame? {seal();return slots.isEmpty ? nil:slots[index]}
     func trim(now:Int){
         seal()
@@ -161,7 +167,7 @@ final class DiagnosticSharedStore {
     typealias FrameRange=DiagnosticArchiveReader.FrameRange
     typealias Header=DiagnosticArchiveReader.Header
     struct Payload:Codable {let fields:[String],frames:[DiagnosticPackedFrame],changes:[DiagnosticJSON.Change]}
-    struct Input {let metadata:DiagnosticJSON,frames:[DiagnosticPackedFrame],run:String,incident:Int,phase:Int,trigger:Int,milliseconds:Int64;var lease:DiagnosticCaptureLease?=nil}
+    struct Input {let metadata:DiagnosticJSON,frames:[DiagnosticPackedFrame],run:String,incident:Int,phase:Int,trigger:Int,milliseconds:Int64;var lease:DiagnosticCaptureLease?=nil;var completion:((Bool)->Void)?=nil}
     struct Stats:Codable {
         var submitted=0,saved=0,failures=0,rejected=0,writtenBytes=0,writeCalls=0,fsyncCalls=0
         var suppliedFrames=0,storedFrames=0,reusedFrames=0,retiredFiles=0,pendingBytes=0,incompleteFiles=0,cachedFrameBytes=0
@@ -191,7 +197,27 @@ final class DiagnosticSharedStore {
     private var metadata:DiagnosticJSON?,metadataFile:String?,metadataDepth=0,lastSavedAt=0.0
     private var pending:Pending?,waiting:[Input]=[],waitingBytes=0
     private var retryAt=0.0,retryDelay=1.0,blocked=false,lastPruned=0.0,loaded=false
+    private var failureMilliseconds:Int64?
     private var counters=Stats()
+    private(set) var hasVerifiedWrite=false
+    var canRetry:Bool{lock.lock();defer{lock.unlock()};return !blocked}
+    func storageIssue(retryScheduled:Bool)->DiagnosticStorageIssue? {
+        lock.lock();defer{lock.unlock()}
+        guard let failure=counters.lastFailure else{return nil}
+        return DiagnosticStorageIssue(component:.detail,failure:failure,
+            retry:blocked ? .stopped:(retryScheduled ? .automatic:.notScheduled),
+            milliseconds:failureMilliseconds,pendingCount:waiting.count+(pending==nil ? 0:1))
+    }
+    func canAcceptManualCapture(frameBytes:Int,awaitingPosts:Int,awaitingPostBytes:Int)->Bool {
+        lock.lock();defer{lock.unlock()}
+        guard !blocked else{return false}
+        // A healthy writer drains each phase. During an outage, leave room for
+        // the open windows' posts and both phases of the proposed new request.
+        if counters.lastFailure==nil,pending==nil,waiting.isEmpty{return true}
+        let manual=waiting.filter{$0.trigger==1}
+        let bytes=manual.reduce(0){$0+$1.frames.reduce(0){$0+$1.accountedBytes}+32768}
+        return manual.count+awaitingPosts+2<=4 && bytes+awaitingPostBytes+frameBytes+2*32768<=8*1024*1024
+    }
     init(directory:URL,preserve:Bool=false,clock:@escaping ()->Double={Date().timeIntervalSince1970},
          retryClock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}){
         self.directory=directory.appendingPathComponent(Self.directoryName,isDirectory:true);self.preserve=preserve
@@ -204,7 +230,14 @@ final class DiagnosticSharedStore {
     private func fail(_ error:Error){
         let failure=(error as? OperationalFailure) ?? OperationalFailure.capture(error,stage:.storageWrite)
         counters.failures+=1;counters.lastFailure=failure
+        failureMilliseconds=Int64(clock()*1000)
         if !DiagnosticWriteBudget.transient(failure),failure.domain != .cocoa{blocked=true}
+        if blocked {
+            // A later retry can become unsafe. Keep its evidence queued, but
+            // do not leave a manual request promising retries that have stopped.
+            pending?.input.completion?(false)
+            for input in waiting{input.completion?(false)}
+        }
         retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
         OperationalDiagnostics.shared.record(failure)
     }
@@ -266,21 +299,29 @@ final class DiagnosticSharedStore {
     @discardableResult func prepare()->Bool {
         lock.lock();defer{lock.unlock()}
         guard !blocked,retryClock()>=retryAt else{return false}
-        do {let dir=try openDirectory();defer{close(dir)};try prune(dir);counters.lastFailure=nil;return true}catch{fail(error);return false}
+        do {
+            let dir=try openDirectory();defer{close(dir)};try prune(dir)
+            // Merely opening an export window cannot prove failed writes recovered.
+            if counters.lastFailure != nil {
+                guard pending==nil,waiting.isEmpty else{return false}
+                try verifyRecoveryWrite(dir)
+            }
+            counters.lastFailure=nil;retryAt=0;retryDelay=1;return true
+        }catch{fail(error);return false}
     }
-    @discardableResult func save(_ capture:InputIncidentTrace.Capture,lease:DiagnosticCaptureLease?=nil)->Bool {
+    @discardableResult func save(_ capture:InputIncidentTrace.Capture,lease:DiagnosticCaptureLease?=nil,completion:((Bool)->Void)?=nil)->Bool {
         do {
             var header=capture;header.frames=DiagnosticFrameSelection([])
             let value=try JSONDecoder().decode(DiagnosticJSON.self,from:JSONEncoder().encode(header))
-            return submit(Input(metadata:value,frames:capture.frames.packets,run:capture.runID,incident:capture.incident,phase:capture.phase,trigger:capture.trigger.rawValue,milliseconds:Int64(clock()*1000),lease:lease))
-        }catch{lock.lock();fail(error);lock.unlock();return false}
+            return submit(Input(metadata:value,frames:capture.frames.packets,run:capture.runID,incident:capture.incident,phase:capture.phase,trigger:capture.trigger.rawValue,milliseconds:Int64(clock()*1000),lease:lease,completion:completion))
+        }catch{lock.lock();fail(error);lock.unlock();completion?(false);return false}
     }
     @discardableResult func submit(_ input:Input)->Bool {
         lock.lock();defer{lock.unlock()};counters.submitted+=1
         let cost=input.frames.reduce(0){$0+$1.accountedBytes}+32768
         let kind=waiting.filter{($0.trigger==1)==(input.trigger==1)}
         let sameKind=kind.reduce(0){$0+$1.frames.reduce(0){$0+$1.accountedBytes}+32768}
-        guard kind.count<(input.trigger==1 ? 4:64),sameKind+cost<=8*1024*1024 else{counters.rejected+=1;disposition(input,6);return false}
+        guard kind.count<(input.trigger==1 ? 4:64),sameKind+cost<=8*1024*1024 else{counters.rejected+=1;disposition(input,6);input.completion?(false);return false}
         waiting.append(input);waitingBytes+=cost
         _ = drain()
         let completed=pending==nil && waiting.isEmpty && counters.lastFailure==nil
@@ -292,16 +333,38 @@ final class DiagnosticSharedStore {
         guard !blocked,retryClock()>=retryAt else{return false}
         do {
             let dir=try openDirectory();defer{close(dir)}
+            if counters.lastFailure != nil,pending==nil,waiting.isEmpty{try verifyRecoveryWrite(dir)}
             while pending != nil || !waiting.isEmpty {
                 if pending==nil {pending=try plan(waiting[0]);waiting.removeFirst();waitingBytes=waiting.reduce(0){$0+$1.frames.reduce(0){$0+$1.accountedBytes}+32768}}
                 guard let p=pending else{break}
                 try publish(p,dir:dir)
                 disposition(p.input,1)
-                pending=nil;counters.saved+=1;counters.lastFailure=nil;retryAt=0;retryDelay=1
+                pending=nil;counters.saved+=1;counters.lastFailure=nil;hasVerifiedWrite=true;retryAt=0;retryDelay=1
+                p.input.completion?(true)
             }
             if clock()-lastSavedAt>65{cache.removeAll()}
             try prune(dir);counters.lastFailure=nil;return true
         }catch{fail(error);return false}
+    }
+    // Only after a failure with no queued payload. Healthy timer ticks never
+    // write probes. Use the same injected writer and preserve unrelated files.
+    private func verifyRecoveryWrite(_ dir:Int32)throws {
+        let name=".storage-check-"+UUID().uuidString
+        let fd=openat(dir,name,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0o600)
+        guard fd>=0 else{throw OperationalFailure.posix(.storageWrite,errno)}
+        var created=stat()
+        guard fstat(fd,&created)==0 else{close(fd);throw OperationalFailure.posix(.storageWrite,errno)}
+        defer{
+            var current=stat()
+            if fstatat(dir,name,&current,AT_SYMLINK_NOFOLLOW)==0,current.st_dev==created.st_dev,current.st_ino==created.st_ino{unlinkat(dir,name,0)}
+            close(fd)
+        }
+        let data=Data(UUID().uuidString.utf8)
+        if let error=writeAll(data,to:fd){throw error}
+        counters.fsyncCalls+=1
+        guard fsync(fd)==0,lseek(fd,0,SEEK_SET)==0 else{throw OperationalFailure.posix(.storageWrite,errno)}
+        guard try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:data.count+1)==data else{throw OperationalFailure.policy(.storageRead,1)}
+        hasVerifiedWrite=true
     }
     private func disposition(_ input:Input,_ code:Int){
         var context=DiagnosticCriticalJournal.Context(trace:input.run,incident:input.incident,sequence:input.frames.last?.sequence ?? 0,lane:0,kind:input.trigger,category:input.phase,count:input.frames.count,episode:0)
@@ -583,10 +646,11 @@ final class DiagnosticCriticalJournal {
     private let lock=NSLock(),run=UUID().uuidString
     private var sequence=0
     private let wallClock:()->Double
+    let directory:URL
     init(directory:URL,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},
          segmentBytes:Int=maximumSegmentBytes,preserve:Bool=false,wallClock:@escaping ()->Double={Date().timeIntervalSince1970},
          writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}) {
-        self.wallClock=wallClock
+        self.wallClock=wallClock;self.directory=directory.standardizedFileURL
         errors=DiagnosticCriticalLane(directory:directory.appendingPathComponent(Self.laneDirectories[0]),clock:clock,segmentBytes:segmentBytes,lane:"errors",preserve:preserve,wallClock:wallClock,writer:writer)
         observations=DiagnosticCriticalLane(directory:directory.appendingPathComponent(Self.laneDirectories[1]),clock:clock,segmentBytes:segmentBytes,lane:"observations",preserve:preserve,wallClock:wallClock,writer:writer)
         terminal=DiagnosticCriticalLane(directory:directory.appendingPathComponent(Self.laneDirectories[2]),clock:clock,segmentBytes:segmentBytes,lane:"terminal",preserve:preserve,wallClock:wallClock,writer:writer)
@@ -612,6 +676,9 @@ final class DiagnosticCriticalJournal {
             droppedErrors:a.droppedErrors+c.droppedErrors,droppedObservations:b.droppedObservations,
             writeFailures:all.reduce(0){$0+$1.writeFailures},lastErrno:all.last{$0.lastErrno != 0}?.lastErrno ?? 0,
             lastPolicy:all.last{$0.lastPolicy != 0}?.lastPolicy ?? 0,writtenBytes:all.reduce(0){$0+$1.writtenBytes},rotations:all.reduce(0){$0+$1.rotations})
+    }
+    func storageIssues()->[DiagnosticStorageIssue] {
+        [errors.storageIssue(component:.criticalErrors),observations.storageIssue(component:.observations),terminal.storageIssue(component:.termination)].compactMap{$0}
     }
     static func decode(_ data:Data)->Decoded? {DiagnosticCriticalLane.decode(data)}
     static func exportedName(_ name:String)->Bool {

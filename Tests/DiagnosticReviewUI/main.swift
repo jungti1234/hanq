@@ -174,8 +174,32 @@ check(!saveButton.isEnabled, "empty selection disables saving")
 checkbox(0).performClick(nil)
 awaitFiles(5)
 check(fileTable.numberOfRows == 5 && saveButton.isEnabled && selectionLabel?.stringValue == "선택한 기록 1/5건", "new selection replaces stale async results and enables saving without capacity gate")
+let normalWarning=views.compactMap{$0 as? NSTextField}.first{$0.identifier?.rawValue=="diagnosticExportWarning"}!
+check(normalWarning.isHidden,"complete export has no omission warning")
 controller.close()
 check(fm.fileExists(atPath: root.appendingPathComponent("store").path), "close preserves original store")
+
+let partialURL=root.appendingPathComponent("partial-snapshot")
+let partialStore=DiagnosticLogStore(directory:root.appendingPathComponent("partial-store"),policy:.incidentDefault)
+let partialOriginal=try Data(contentsOf:snapshotURL.appendingPathComponent(snapshot.incidents[0].originals[0]!.filename))
+check(partialStore.save(partialOriginal,incident:snapshot.incidents[0].number,phase:0,automatic:false) == .saved,"fixture legitimately stores a pre without post")
+try partialStore.copyExportSnapshot(to:partialURL,reviewMetadata:true)
+let partialController=DiagnosticReviewController(environment:environment)
+partialController.window!.setFrameOrigin(NSPoint(x:-5000,y:-5000))
+partialController.install(try DiagnosticReviewSnapshot(directory:partialURL))
+let partialViews=descendants(partialController.window!.contentView!)
+let warning=partialViews.compactMap{$0 as? NSTextField}.first{$0.identifier?.rawValue=="diagnosticExportWarning"}!
+let warningDeadline=Date().addingTimeInterval(10)
+while warning.isHidden && Date()<warningDeadline{RunLoop.current.run(until:Date().addingTimeInterval(0.02))}
+check(!warning.isHidden && warning.stringValue.contains("포함 범위"),"real review window shows missing-phase banner before saving")
+let partialPreview=partialViews.compactMap{$0 as? NSTextView}.first!
+check(partialPreview.string.contains("발생 후 기록 없음") && partialPreview.string.contains("포함 범위 안내"),"initial summary explains the selected missing phase")
+check(partialViews.compactMap{$0 as? NSButton}.contains{$0.title=="내보내기…" && $0.isEnabled},"incomplete originals remain exportable with notice")
+partialController.window!.contentView!.layoutSubtreeIfNeeded()
+let warningBitmap=partialController.window!.contentView!.bitmapImageRepForCachingDisplay(in:partialController.window!.contentView!.bounds)!
+partialController.window!.contentView!.cacheDisplay(in:partialController.window!.contentView!.bounds,to:warningBitmap)
+if CommandLine.arguments.count>1{try warningBitmap.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:CommandLine.arguments[1]).deletingLastPathComponent().appendingPathComponent("review-warning.png"))}
+partialController.close()
 
 // A hidden/minimized review must still finish loading; visibility is not its lifetime.
 let trace = InputIncidentTrace(destination: root.appendingPathComponent("trace"))
@@ -187,7 +211,9 @@ check(hidden.window!.isVisible == false, "hidden review fixture does not show or
 hidden.load(from: trace)
 let hiddenDeadline = Date().addingTimeInterval(5)
 while hiddenFiles.numberOfRows == 0 && Date() < hiddenDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
-check(hiddenFiles.numberOfRows == 5, "loading survives hidden/minimized review and collection OFF")
+let hiddenPreview=descendants(hidden.window!.contentView!).compactMap{$0 as? NSTextView}.first!
+check(hiddenFiles.numberOfRows>=5 && hidden.hasRecords && hiddenPreview.string.contains("발생 전·후 모두 있음"),"hidden review loads both phases and all format-dependent shared files while OFF")
+print("INFO hidden review loaded",hiddenFiles.numberOfRows,"files, with both phases and shared dependencies")
 hidden.close()
 let cancelled = DiagnosticReviewController(environment: environment)
 let cancelledTable = descendants(cancelled.window!.contentView!).compactMap { $0 as? NSTableView }.first { $0.numberOfColumns == 1 }!

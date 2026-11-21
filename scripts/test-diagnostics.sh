@@ -8,6 +8,7 @@ trap 'rm -rf "$stage"' EXIT
 bash scripts/test-diagnostic-write-budget.sh
 bash scripts/test-diagnostic-durability.sh
 bash scripts/test-shared-diagnostics.sh
+bash scripts/test-diagnostic-status.sh
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/KeyboardOriginDiagnostics.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/KeyboardOrigin/main.swift -o "$stage/keyboard-origin-tests"
 hanq_test_run "$stage/keyboard-origin-tests" "$stage/keyboard-origin.json"
 python3 -B scripts/summarize-input-incident.py "$stage/keyboard-origin.json" > "$stage/keyboard-origin-summary.json"

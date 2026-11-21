@@ -16,5 +16,5 @@ if [[ "${1:-}" == --ui ]]; then
     hanq_test_run "$stage/ui-tests" "$stage/review.png"
     mkdir -p .build/hanq/diagnostic-review
     cp "$stage/review.png" .build/hanq/diagnostic-review/review.png
-    cp "$stage/review-dark-summary.png" "$stage/review-light-environment.png" .build/hanq/diagnostic-review/
+    cp "$stage/review-dark-summary.png" "$stage/review-light-environment.png" "$stage/review-warning.png" .build/hanq/diagnostic-review/
 fi

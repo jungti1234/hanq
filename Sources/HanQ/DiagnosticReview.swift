@@ -17,8 +17,9 @@ struct DiagnosticReviewSection {
 struct DiagnosticReviewDocument {
     let title: String
     let sections: [DiagnosticReviewSection]
-    init(_ title: String, _ sections: [DiagnosticReviewSection]) {
-        self.title = title; self.sections = sections
+    var exportWarnings:[String]
+    init(_ title: String, _ sections: [DiagnosticReviewSection],exportWarnings:[String]=[]) {
+        self.title = title; self.sections = sections;self.exportWarnings=exportWarnings
     }
     var readableText: String {
         ([title] + sections.map { section in
@@ -170,7 +171,7 @@ struct DiagnosticReviewOriginal {
             guard selection.header.runID==header.runID,selection.header.incident==header.incident,selection.header.phase==header.phase,selection.header.trigger==header.trigger else{throw DiagnosticReviewError.invalidCapture}
             let value=try DiagnosticReviewSnapshot.object(JSONEncoder().encode(selection.metadata))
             var dependencies:[String:DiagnosticArchiveReader.FileEvidence]=[:]
-            let document=try DiagnosticReviewSnapshot.capture(value,phase:header.phase){visit in
+            var document=try DiagnosticReviewSnapshot.capture(value,phase:header.phase){visit in
                 _ = try selection.visit(check:request.check,observe:{name,evidence in
                     guard dependencies[name].map({$0==evidence}) ?? true else{throw DiagnosticReviewError.invalidCapture}
                     dependencies[name]=evidence
@@ -181,13 +182,16 @@ struct DiagnosticReviewOriginal {
                 }
             }
             guard dependencies[filename] == .init(bytes:bytes,digest:digest) else{throw DiagnosticReviewError.invalidCapture}
+            document.exportWarnings=DiagnosticReviewSnapshot.coverageWarnings(value,phase:header.phase)
             return (document,dependencies)
         }
         let data=try source.read()
         guard DiagnosticReviewCaptureHeader.read(data)==header else{throw DiagnosticReviewError.invalidCapture}
         let object=try DiagnosticReviewSnapshot.object(data)
         guard object["frames"] is [[String:Any]] else{throw DiagnosticReviewError.invalidCapture}
-        return (try DiagnosticReviewSnapshot.capture(object,phase:header.phase),[:])
+        var document=try DiagnosticReviewSnapshot.capture(object,phase:header.phase)
+        document.exportWarnings=DiagnosticReviewSnapshot.coverageWarnings(object,phase:header.phase)
+        return (document,[:])
     }
 }
 
@@ -225,6 +229,7 @@ final class DiagnosticReviewSnapshot {
     private let storageData: Data
     private let sharedStatus:DiagnosticReviewFile?
     private let criticalFiles:[DiagnosticReviewFile]
+    private var exportWarnings:[String]=[]
     let critical:DiagnosticReviewDocument?
     var hasRecords:Bool{!incidents.isEmpty || critical != nil}
     fileprivate static let maximumFileBytes = 32 * 1024 * 1024
@@ -294,10 +299,29 @@ final class DiagnosticReviewSnapshot {
         let status = try Self.object(storageData)
         guard Self.integer(status["schema"]) == 1, let values = status["status"] as? [String: Any] else { throw DiagnosticReviewError.invalidCapture }
         storage = Self.storageDocument(values)
-        var criticalFiles:[DiagnosticReviewFile]=[],sections:[DiagnosticReviewSection]=[]
+        var criticalFiles:[DiagnosticReviewFile]=[],sections:[DiagnosticReviewSection]=[],notices:[String]=[]
+        let criticalStatusURL=directory.appendingPathComponent("critical-storage-status.json")
+        if FileManager.default.fileExists(atPath:criticalStatusURL.path) {
+            let data=try Self.read(criticalStatusURL),status=try JSONDecoder().decode(DiagnosticCriticalJournal.Status.self,from:data)
+            guard [status.pendingErrors,status.pendingObservations,status.droppedErrors,status.droppedObservations,status.writeFailures,status.lastErrno,status.lastPolicy,status.writtenBytes,status.rotations].allSatisfy({$0>=0}) else{throw DiagnosticReviewError.invalidCapture}
+            if status.pendingErrors>0{notices.append("중요 오류 기록이 아직 저장 대기 중입니다. 이 내보내기에 해당 오류의 전체 내용이 포함되지 않을 수 있습니다.")}
+            if status.pendingObservations>0{notices.append("일반 사건 기록이 아직 저장 대기 중입니다. 이 내보내기에 전체 내용이 포함되지 않을 수 있습니다.")}
+            if status.droppedErrors>0{notices.append("오류 기록 대기 용량을 초과해 파일에 남지 못한 오류가 있습니다.")}
+            if status.droppedObservations>0{notices.append("일반 관측 기록 대기 용량을 초과해 파일에 남지 못한 관측이 있습니다.")}
+            let section=DiagnosticReviewSection(title:"사건 기록 저장 상태",fields:[
+                .init(label:"저장 대기 중인 오류 · 일반 사건",value:"\(status.pendingErrors) · \(status.pendingObservations)"),
+                .init(label:"대기 초과 오류 · 일반 사건 (누적)",value:"\(status.droppedErrors) · \(status.droppedObservations)"),
+                .init(label:"저장 실패 시도 (누적)",value:"\(status.writeFailures)")])
+            let document=DiagnosticReviewDocument("사건 기록 저장 상태",[section])
+            criticalFiles.append(DiagnosticReviewFile("critical-storage-status.json","사건 기록 저장 상태",original:data,preview:document))
+            sections.append(section)
+        }
         let sharedURL=directory.appendingPathComponent("shared-storage-status.json")
         if FileManager.default.fileExists(atPath:sharedURL.path) {
             let data=try Self.read(sharedURL),stats=try JSONDecoder().decode(DiagnosticSharedStore.Stats.self,from:data)
+            if stats.pendingBytes>0{notices.append("아직 저장 대기 중인 상세 기록은 이 내보내기에 포함되지 않습니다. 잠시 후 창을 다시 열어 확인해 주세요.")}
+            if stats.rejected>0{notices.append("저장 대기 용량을 초과해 상세 기록을 받지 못한 이력이 있습니다. 모든 사건의 상세가 보관되어 있다고 보장할 수 없습니다.")}
+            if stats.incompleteFiles>0{notices.append("완료되지 않은 저장 파일이 있습니다. 해당 파일은 완성된 상세 기록에 포함되지 않습니다.")}
             let document=DiagnosticReviewDocument("공유 상세 저장 상태",[.init(title:"저장과 중복 제거",fields:[
                 .init(label:"완료 · 대기 바이트",value:"\(stats.saved) · \(stats.pendingBytes)"),
                 .init(label:"새 관측 · 재사용 관측",value:"\(stats.storedFrames) · \(stats.reusedFrames)"),
@@ -323,6 +347,7 @@ final class DiagnosticReviewSnapshot {
                 if recent.count==20{recent.removeFirst()};recent.append(event)
             }
             guard let decoded=scanned else{
+                notices.append("해석할 수 없는 사건 기록이 있습니다. 해당 원본은 그대로 포함합니다.")
                 let document=DiagnosticReviewDocument("불완전한 최소 사건 기록",[.init(title:"부분 저장",fields:[.init(label:"상태",value:"파일 머리말을 읽을 수 없습니다. 원본 바이트를 보존합니다.")])])
                 criticalFiles.append(DiagnosticReviewFile(name,"불완전한 최소 사건 기록",source:source,preview:document));sections+=document.sections;return
             }
@@ -330,11 +355,13 @@ final class DiagnosticReviewSnapshot {
                 .init(label:"상세 저장 대기·실패 기록",value:"\(omitted)"),
                 .init(label:"해석하지 못한 부분 기록",value:"\(decoded.incomplete)"),
                 .init(label:"보관 구간 번호",value:"\(decoded.generation)")]
+            if decoded.incomplete>0{notices.append("일부 사건 기록이 불완전합니다. 해석하지 못한 부분도 원본에 그대로 포함합니다.")}
             if let first,let last {
                 fields.append(.init(label:"최초 · 최종 기록 시각 (UTC 밀리초)",value:"\(first.milliseconds) · \(last.milliseconds)"))
             }
             for code in [1,2] {
                 let dropped=dropped[code,default:0]
+                if dropped>0{notices.append(code==1 ? "오류 기록 대기 용량을 초과해 파일에 남지 못한 오류가 있습니다.":"일반 관측 기록 대기 용량을 초과해 파일에 남지 못한 관측이 있습니다.")}
                 if dropped>0{fields.append(.init(label:code==1 ? "대기 용량 초과로 파일에 남지 못한 오류":"대기 용량 초과로 파일에 남지 못한 일반 관측",value:"\(dropped)"))}
             }
             let summary=DiagnosticReviewSection(title:"최소 사건 기록",fields:fields)
@@ -351,6 +378,7 @@ final class DiagnosticReviewSnapshot {
         }
         self.criticalFiles=criticalFiles
         critical=sections.isEmpty ? nil:DiagnosticReviewDocument("최소 사건 기록",sections)
+        self.exportWarnings=notices
         owner.owned=true
     }
 
@@ -360,9 +388,12 @@ final class DiagnosticReviewSnapshot {
         defer { close(fd) }
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
-              info.st_mode & 0o077 == 0, info.st_size >= 0, info.st_size <= maximumFileBytes,
-              let data = try FileHandle(fileDescriptor: fd, closeOnDealloc: false).read(upToCount: maximumFileBytes + 1),
-              data.count == Int(info.st_size) else { throw DiagnosticReviewError.invalidCapture }
+              info.st_mode & 0o077 == 0, info.st_size >= 0, info.st_size <= maximumFileBytes else { throw DiagnosticReviewError.invalidCapture }
+        // A failed first journal write may leave a real zero-byte file. Keep
+        // that original and show the incomplete-header notice instead of
+        // hiding every other record behind a failed snapshot load.
+        let data = try FileHandle(fileDescriptor: fd, closeOnDealloc: false).read(upToCount: maximumFileBytes + 1) ?? Data()
+        guard data.count == Int(info.st_size) else { throw DiagnosticReviewError.invalidCapture }
         return data
     }
     fileprivate static func object(_ data: Data) throws -> [String: Any] {
@@ -649,6 +680,8 @@ final class DiagnosticReviewSnapshot {
         let chosen = incidents.filter { selected.contains($0.id) }
         guard (!chosen.isEmpty || !criticalFiles.isEmpty), chosen.count == selected.count else { throw DiagnosticReviewError.emptySelection }
         guard chosen.count <= Self.selectionLimit else { throw DiagnosticReviewError.tooManySelections }
+        var warnings=exportWarnings
+        if chosen.contains(where:{!$0.complete}){warnings.append("선택한 기록 중 발생 전 또는 후 기록이 없는 항목이 있습니다. 보관된 부분만 포함합니다.")}
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ko_KR"); formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         let preview = DiagnosticReviewDocument("요약", [
             .init(title: "선택한 기록", fields: [.init(label: "기록 수", value: "\(chosen.count)건")])
@@ -666,6 +699,7 @@ final class DiagnosticReviewSnapshot {
                 if let original = incident.originals[phase] {
                     try request.check()
                     let reviewed=try original.review(request:request)
+                    warnings+=reviewed.document.exportWarnings
                     for (name,evidence) in reviewed.dependencies {
                         guard dependencies[name].map({$0==evidence}) ?? true else{throw DiagnosticReviewError.invalidCapture}
                         dependencies[name]=evidence
@@ -693,7 +727,19 @@ final class DiagnosticReviewSnapshot {
         if let sharedStatus{files.append(sharedStatus)}
         files.append(contentsOf:criticalFiles)
         files.append(DiagnosticReviewFile("storage-status.json", "저장 상태", original: storageData, preview: storage))
+        var seen=Set<String>();warnings=warnings.filter{seen.insert($0).inserted}
+        let notes=warnings.isEmpty ? []:[DiagnosticReviewSection(title:"포함 범위 안내",fields:warnings.map{.init(label:"확인된 제한",value:$0)})]
+        files[0]=DiagnosticReviewFile(summary:DiagnosticReviewDocument(preview.title,notes+preview.sections,exportWarnings:warnings))
         return files
+    }
+    fileprivate static func coverageWarnings(_ value:[String:Any],phase:Int)->[String] {
+        var result:[String]=[]
+        if let p=value["capturePreservation"] as? [String:Any],phase==1 {
+            if (integer(p["postOmittedFrames"]) ?? 0)>0{result.append("선택한 기록에 용량 제한으로 담지 못한 후속 관측이 있습니다.")}
+            if p["endedOnShutdown"] as? Bool == true{result.append("앱 종료로 후속 기록 구간이 짧아진 항목이 있습니다.")}
+        }
+        if let coverage=value["coverage"] as? [String:Any],(integer(coverage["sequenceGaps"]) ?? 0)>0{result.append("선택한 기록의 관측 순번에 공백이 있습니다. 실제 키 입력의 누락을 뜻하지는 않습니다.")}
+        return result
     }
 }
 
@@ -703,6 +749,10 @@ final class DiagnosticReviewArchive {
     let files: [DiagnosticReviewFile]
     let bytes: Int
     let sourceBytes: Int
+    var warningMessage:String? {
+        let warnings=files.first?.previewDocument?.exportWarnings ?? []
+        return warnings.isEmpty ? nil:warnings.joined(separator:"\n")
+    }
     private let digest: String
     init(files: [DiagnosticReviewFile],request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest()) throws {
         try request.check()

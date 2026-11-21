@@ -114,6 +114,6 @@ let badTrace=InputIncidentTrace(secureInput:{false},destination:badTraceParent.a
 check(!badTrace.waitForStorageReadiness().ready,"trace cannot report ready from configuration alone")
 check(DiagnosticStorageHealth(readiness:.notChecked,missingWrites:0).menuMessage==nil,"unrequested check is not a false error")
 check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0).menuMessage != nil,"storage failure has a visible explanation")
-check(DiagnosticStorageHealth(readiness:.ready,missingWrites:3).menuMessage?.contains("3")==true,"storage error count stays visible")
+check(DiagnosticStorageHealth(readiness:.ready,missingWrites:3).menuMessage==nil,"recovered storage hides cumulative errors without resetting history")
 print("\(failures==0 ? "PASS":"FAIL") \(checks) actual diagnostic storage readiness checks; no UI/keys/taps")
 exit(failures==0 ? 0:1)

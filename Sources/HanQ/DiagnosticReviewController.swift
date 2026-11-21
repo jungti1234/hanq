@@ -52,6 +52,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     private let selectionLabel = NSTextField(labelWithString: "선택한 기록 0/5건")
     private let statusLabel = NSTextField(labelWithString: "저장 중인 후속 기록을 기다리고 있습니다.")
     private let previewTitle = NSTextField(labelWithString: "미리보기")
+    private let exportWarningLabel = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "내보내기…", target: nil, action: nil)
     private let finderButton = NSButton(title: "Finder에서 보기", target: nil, action: nil)
     private let feedbackButton = NSButton(title: "피드백 열기", target: nil, action: nil)
@@ -213,6 +214,11 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         let records = configure(recordTable, columns: [("check", "", 34), ("date", "저장 시각", 165), ("title", "기록 내용", 515), ("kind", "구분", 70)])
         records.heightAnchor.constraint(equalToConstant: 232).isActive = true
         root.addArrangedSubview(records)
+        exportWarningLabel.identifier=NSUserInterfaceItemIdentifier("diagnosticExportWarning")
+        exportWarningLabel.font = .systemFont(ofSize:12)
+        exportWarningLabel.isHidden=true
+        root.addArrangedSubview(exportWarningLabel)
+        exportWarningLabel.widthAnchor.constraint(equalTo:root.widthAnchor).isActive=true
         root.addArrangedSubview(label("미리보기", size: 16, bold: true))
 
         let filesScroll = configure(fileTable, columns: [("file", "포함 파일", 220)])
@@ -317,6 +323,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         finderButton.isHidden = true; feedbackButton.isHidden = true
         saveButton.isEnabled = false; fileTable.reloadData(); textView.string = ""
         previewTitle.stringValue = "미리보기"
+        exportWarningLabel.stringValue="";exportWarningLabel.isHidden=true
         guard let snapshot, !selected.isEmpty || snapshot.critical != nil else {
             statusLabel.stringValue = snapshot?.incidents.isEmpty == true ? "보관 중인 기록이 없습니다." : "저장할 기록을 하나 이상 선택해 주세요."
             return
@@ -330,6 +337,9 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
                 switch result {
                 case .success(let archive):
                     self.archive = archive
+                    self.exportWarningLabel.stringValue=archive.warningMessage==nil ? "":"내보내기 포함 범위에 확인할 사항이 있습니다. 아래 요약의 ‘포함 범위 안내’를 확인해 주세요."
+                    self.exportWarningLabel.toolTip=archive.warningMessage
+                    self.exportWarningLabel.isHidden=archive.warningMessage==nil
                     self.fileTable.reloadData()
                     self.fileTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
                     self.showFile()

@@ -3,6 +3,69 @@ import ApplicationServices
 import Carbon
 import ServiceManagement
 
+// Informational content, not two disabled command rows. AppKit's menu draws
+// neither a command title nor a selection background for this view.
+final class DiagnosticStorageNoticeView:NSView {
+    let titleLabel=NSTextField(labelWithString:"")
+    let detailLabel=NSTextField(labelWithString:"")
+    private var notice:DiagnosticStorageNotice?
+    override init(frame:NSRect){
+        super.init(frame:frame)
+        for label in [titleLabel,detailLabel] {
+            label.font=NSFont.menuFont(ofSize:13);label.textColor = .secondaryLabelColor
+            label.isSelectable=false;label.lineBreakMode = .byClipping
+            addSubview(label)
+        }
+        titleLabel.setAccessibilityIdentifier("diagnosticStorageCause")
+        detailLabel.setAccessibilityIdentifier("diagnosticStorageRetry")
+        setAccessibilityElement(false)
+    }
+    required init?(coder:NSCoder){fatalError("init(coder:) has not been implemented")}
+    override func hitTest(_ point:NSPoint)->NSView?{nil}
+    override var acceptsFirstResponder:Bool{false}
+    func update(_ value:DiagnosticStorageNotice){
+        guard notice != value else{return};notice=value
+        titleLabel.stringValue=value.title;detailLabel.stringValue=value.detail
+        titleLabel.sizeToFit();detailLabel.sizeToFit()
+        let width=max(280,max(titleLabel.frame.width,detailLabel.frame.width)+36)
+        frame.size=NSSize(width:ceil(width),height:48)
+        titleLabel.frame=NSRect(x:18,y:26,width:width-36,height:17)
+        detailLabel.frame=NSRect(x:18,y:7,width:width-36,height:17)
+    }
+}
+final class DiagnosticStorageProblemController:NSObject {
+    let alert=NSAlert()
+    private let textView=NSTextView(frame:NSRect(x:0,y:0,width:480,height:300))
+    var onReview:(()->Void)?
+    private(set) var message=""
+    override init(){
+        super.init()
+        alert.messageText="진단 저장 문제"
+        alert.informativeText="현재 저장 문제와 자동 재시도 상태입니다."
+        let close=alert.addButton(withTitle:"닫기");close.target=self;close.action=#selector(dismiss)
+        let review=alert.addButton(withTitle:"진단 기록 보기…");review.target=self;review.action=#selector(showReview)
+        let scroll=NSScrollView(frame:NSRect(x:0,y:0,width:480,height:300))
+        scroll.hasVerticalScroller=true;scroll.borderType = .bezelBorder
+        textView.isEditable=false;textView.isSelectable=false;textView.drawsBackground=false
+        textView.font=NSFont.systemFont(ofSize:13);textView.textColor = .labelColor
+        textView.textContainerInset=NSSize(width:10,height:10)
+        textView.isVerticallyResizable=true;textView.isHorizontallyResizable=false
+        textView.autoresizingMask = [.width];textView.textContainer?.widthTracksTextView=true
+        textView.setAccessibilityIdentifier("diagnosticStorageProblemDetails")
+        scroll.documentView=textView;alert.accessoryView=scroll
+        alert.window.isReleasedWhenClosed=false
+    }
+    var isVisible:Bool{alert.window.isVisible}
+    func update(_ health:DiagnosticStorageHealth,show:Bool=false){
+        guard health.notice != nil else{dismiss();return}
+        let value=health.detailMessage
+        if value != message{message=value;textView.string=value}
+        if show{alert.layout();alert.window.center();alert.window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
+    }
+    @objc func dismiss(){alert.window.orderOut(nil)}
+    @objc private func showReview(){dismiss();onReview?()}
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let updater = AppUpdater()
     var updateRestricted = false
@@ -283,11 +346,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let loginItem = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     let inputDiagnosticsItem = NSMenuItem(title:"진단 기록 활성화",action:#selector(toggleInputDiagnostics),keyEquivalent:"")
     let diagnosticStorageItem = NSMenuItem(title:"",action:nil,keyEquivalent:"")
-    private var diagnosticStorageMessage:String?
+    let diagnosticStorageNoticeView=DiagnosticStorageNoticeView(frame:.zero)
+    let diagnosticStorageProblemItem=NSMenuItem(title:"저장 문제 확인…",action:#selector(showDiagnosticStorageProblem),keyEquivalent:"")
+    let diagnosticStorageSeparator = NSMenuItem.separator()
+    private var diagnosticStorageNotice:DiagnosticStorageNotice?
+    private var showStorageProblemRequested=false
+    private(set) var diagnosticStorageProblem:DiagnosticStorageProblemController?
+    var diagnosticStorageProblemPresenter:((DiagnosticStorageHealth)->Void)?
+    private var diagnosticManualCaptureAvailable=true
     private var diagnosticAvailabilityGeneration:UInt64=0
     var diagnosticStorageHealthLoader: (@escaping (DiagnosticStorageHealth)->Void)->Void = {
         InputIncidentTrace.shared.storageHealth($0)
     }
+    var diagnosticManualMarker: (@escaping (DiagnosticManualCapture.Status)->Void)->Void = {
+        InputIncidentTrace.shared.mark(completion:$0)
+    }
+    var diagnosticManualNoticePresenter:((DiagnosticManualCapture.Status)->Void)?
+    private var diagnosticManualAlert:NSAlert?
+    private var diagnosticManualAlertID:UUID?
     let inputIncidentItem = NSMenuItem(title:"방금 발생한 문제 기록",action:#selector(markInputIncident),keyEquivalent:"")
     let inputDiagnosticExportItem = NSMenuItem(title:"진단 기록 내보내기…",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
@@ -384,23 +460,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.addItem(updater.checkItem)
         statusMenu.addItem(makeFeedbackItem())
         statusMenu.addItem(.separator())
-        let diagnostics=NSMenu(title:"진단 및 로그")
-        diagnostics.autoenablesItems=false
         let diagnosticsItem=NSMenuItem(title:"진단 및 로그",action:nil,keyEquivalent:"")
-        diagnosticsItem.submenu=diagnostics
-        inputDiagnosticsItem.target=self
-        inputDiagnosticsItem.toolTip="재실행·재부팅 후에도 설정을 유지합니다. 끄면 수집을 중단하고 기존 기록은 보존합니다."
-        inputIncidentItem.target=self
-        inputIncidentItem.attributedTitle=NSAttributedString(string:inputIncidentItem.title,attributes:[.font:NSFont.boldSystemFont(ofSize:NSFont.systemFontSize)])
-        inputIncidentItem.toolTip="최근 입력 처리 상태를 로컬에 저장합니다. 입력 본문·키 값·클립보드는 저장하지 않습니다."
-        inputDiagnosticExportItem.target=self
-        inputDiagnosticExportItem.toolTip="보관 중인 최근 기록을 선택하고 파일 미리보기를 확인한 뒤 ZIP 파일로 저장합니다."
-        diagnostics.addItem(inputDiagnosticsItem)
-        diagnostics.addItem(.separator())
-        diagnostics.addItem(inputIncidentItem)
-        diagnosticStorageItem.isHidden=true
-        diagnostics.addItem(diagnosticStorageItem)
-        diagnostics.addItem(inputDiagnosticExportItem)
+        diagnosticsItem.submenu=makeDiagnosticsMenu()
         statusMenu.addItem(diagnosticsItem)
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "한Q 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
@@ -971,8 +1032,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshLaunchAtLogin()
         externalKeyboards.updateMenu()
     }
-    func menuWillOpen(_ menu: NSMenu) { statusIcon.setMenuOpen(true);refreshDiagnosticLogAvailability() }
-    func menuDidClose(_ menu: NSMenu) { statusIcon.setMenuOpen(false) }
+    func menuWillOpen(_ menu: NSMenu) { if menu.supermenu == nil{statusIcon.setMenuOpen(true)};refreshDiagnosticLogAvailability() }
+    func menuDidClose(_ menu: NSMenu) { if menu.supermenu == nil{statusIcon.setMenuOpen(false)} }
     private func refreshLaunchAtLogin() {
         switch SMAppService.mainApp.status {
         case .enabled:
@@ -1007,13 +1068,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         refreshLaunchAtLogin()
     }
+    func makeDiagnosticsMenu()->NSMenu {
+        let diagnostics=NSMenu(title:"진단 및 로그")
+        diagnostics.autoenablesItems=false
+        diagnostics.delegate=self
+        inputDiagnosticsItem.target=self
+        inputDiagnosticsItem.toolTip="재실행·재부팅 후에도 설정을 유지합니다. 끄면 수집을 중단하고 기존 기록은 보존합니다."
+        inputIncidentItem.target=self
+        inputIncidentItem.attributedTitle=NSAttributedString(string:inputIncidentItem.title,attributes:[.font:NSFont.boldSystemFont(ofSize:NSFont.systemFontSize)])
+        inputDiagnosticExportItem.target=self
+        inputDiagnosticExportItem.toolTip="보관 중인 최근 기록을 선택하고 파일 미리보기를 확인한 뒤 ZIP 파일로 저장합니다."
+        diagnostics.addItem(inputDiagnosticsItem)
+        diagnostics.addItem(.separator())
+        diagnosticStorageItem.view=diagnosticStorageNoticeView
+        diagnosticStorageItem.isEnabled=false;diagnosticStorageItem.isHidden=true
+        diagnostics.addItem(diagnosticStorageItem)
+        diagnosticStorageProblemItem.target=self;diagnosticStorageProblemItem.isHidden=true
+        diagnostics.addItem(diagnosticStorageProblemItem)
+        diagnosticStorageSeparator.isHidden=true
+        diagnostics.addItem(diagnosticStorageSeparator)
+        diagnostics.addItem(inputIncidentItem)
+        diagnostics.addItem(inputDiagnosticExportItem)
+        return diagnostics
+    }
     @objc func toggleInputDiagnostics(){
         guard !changingInputDiagnostics else{return}
         let active = !InputIncidentTrace.shared.enabled
         UserDefaults.standard.set(active,forKey:InputIncidentPreferences.key)
         changingInputDiagnostics=true
         diagnosticAvailabilityGeneration &+= 1
-        diagnosticStorageMessage=nil
+        diagnosticStorageNotice=nil
+        showStorageProblemRequested=false
+        diagnosticStorageProblem?.dismiss()
         stopKeyboardObservation()
         InputIncidentTrace.shared.setCollectionEnabled(active){[weak self] in
             self?.configureKeyboardObservation()
@@ -1031,7 +1117,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async{
                 guard let self,self.diagnosticAvailabilityGeneration==generation,
                       !self.changingInputDiagnostics else{return}
-                self.diagnosticStorageMessage=health.menuMessage
+                self.diagnosticStorageNotice=health.notice
+                self.diagnosticManualCaptureAvailable=health.manualCaptureAvailable
+                if self.showStorageProblemRequested,let presenter=self.diagnosticStorageProblemPresenter {
+                    presenter(health)
+                }else if self.showStorageProblemRequested,self.diagnosticStorageProblem==nil {
+                    let controller=DiagnosticStorageProblemController()
+                    controller.onReview={ [weak self] in self?.exportInputDiagnostics() }
+                    self.diagnosticStorageProblem=controller
+                }
+                self.diagnosticStorageProblem?.update(health,show:self.showStorageProblemRequested)
+                self.showStorageProblemRequested=false
                 self.refreshStatus()
             }
         }
@@ -1046,6 +1142,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.hasDiagnosticLogs=found;self.refreshStatus()
             }
         }
+    }
+    @objc func showDiagnosticStorageProblem(){
+        showStorageProblemRequested=true
+        refreshDiagnosticLogAvailability()
     }
     @objc func exportInputDiagnostics(){
         if let diagnosticReview {
@@ -1113,16 +1213,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             diagnosticsEnabled:InputIncidentTrace.shared.enabled,inputMonitoringEnabled:enabled,
             cachedAccessibilityPermission:permissionGranted,updateRestricted:updateRestricted)
     }
-    @objc func markInputIncident(){InputIncidentTrace.shared.mark();refreshDiagnosticLogAvailability()}
+    @objc func markInputIncident(){
+        let request=UUID()
+        diagnosticManualMarker{[weak self] status in
+            guard let self else{return}
+            self.refreshDiagnosticLogAvailability()
+            if let presenter=self.diagnosticManualNoticePresenter{presenter(status);return}
+            if status == .saved {
+                if self.diagnosticManualAlertID==request{self.dismissDiagnosticManualNotice()}
+                return
+            }
+            if self.diagnosticManualAlert==nil {
+                let alert=NSAlert();alert.messageText="문제 기록 저장 안내"
+                let close=alert.addButton(withTitle:"닫기");close.target=self;close.action=#selector(self.dismissDiagnosticManualNotice)
+                alert.window.isReleasedWhenClosed=false
+                self.diagnosticManualAlert=alert
+            }
+            self.diagnosticManualAlertID=request
+            self.diagnosticManualAlert?.informativeText=status.message
+            self.diagnosticManualAlert?.layout()
+            self.diagnosticManualAlert?.window.center()
+            self.diagnosticManualAlert?.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps:true)
+        }
+        refreshDiagnosticLogAvailability()
+    }
+    @objc private func dismissDiagnosticManualNotice(){diagnosticManualAlert?.window.orderOut(nil);diagnosticManualAlertID=nil}
     @objc func copyMismatchInput(){mismatchRecovery.copyRetained();refreshStatus()}
     func refreshStatus() {
         inputDiagnosticsItem.state=changingInputDiagnostics ? .mixed:(InputIncidentTrace.shared.enabled ? .on:.off)
         inputDiagnosticsItem.isEnabled = !changingInputDiagnostics
-        inputIncidentItem.isEnabled=InputIncidentTrace.shared.enabled
+        inputIncidentItem.isEnabled=InputIncidentTrace.shared.enabled && !changingInputDiagnostics && diagnosticManualCaptureAvailable
+        inputIncidentItem.toolTip=diagnosticManualCaptureAvailable ? "최근 입력 처리 상태를 로컬에 저장합니다. 입력 본문·키 값·클립보드는 저장하지 않습니다.":"현재 새 문제 기록을 받아둘 수 없습니다."
         inputDiagnosticExportItem.isEnabled=hasDiagnosticLogs && !changingInputDiagnostics
-        diagnosticStorageItem.isHidden=diagnosticStorageMessage==nil
-        diagnosticStorageItem.title=diagnosticStorageMessage ?? ""
-        inputDiagnosticExportItem.toolTip=diagnosticStorageMessage
+        diagnosticStorageItem.isHidden=diagnosticStorageNotice==nil
+        diagnosticStorageItem.title=diagnosticStorageNotice?.message ?? ""
+        if let notice=diagnosticStorageNotice{diagnosticStorageNoticeView.update(notice)}
+        diagnosticStorageProblemItem.isHidden=diagnosticStorageNotice?.needsDetails != true
+        diagnosticStorageProblemItem.isEnabled=diagnosticStorageNotice != nil
+        diagnosticStorageSeparator.isHidden=diagnosticStorageNotice==nil
+        inputDiagnosticExportItem.toolTip=diagnosticStorageNotice?.message
         retainedMismatchItem.isHidden=mismatchRecovery.engine.retained.isEmpty
         retainedMismatchItem.isEnabled = !mismatchRecovery.busy
 

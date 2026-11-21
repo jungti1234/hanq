@@ -134,9 +134,10 @@ func toggle(_ trace:InputIncidentTrace,_ active:Bool){
     trace.flush()
 }
 check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0,collectionEnabled:false).menuMessage==nil,"OFF receipt withdrawal is not a storage failure")
-check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:2,collectionEnabled:false).menuMessage?.contains("오류 2회")==true,"OFF retains actual historical write failures")
-check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0).menuMessage?.contains("확인 실패")==true,"ON unavailable still reports a real readiness failure")
-check(DiagnosticStorageHealth(readiness:.notChecked,missingWrites:2).menuMessage?.contains("오류 2회")==true,"not checked never hides known write failures")
+check(DiagnosticStorageHealth(readiness:.unavailable,missingWrites:2,collectionEnabled:false).menuMessage==nil,"OFF keeps historical counts out of the active warning")
+let unavailableHealth=DiagnosticStorageHealth(readiness:.unavailable,missingWrites:0)
+check(unavailableHealth.menuMessage?.split(separator:"\n").count==2 && unavailableHealth.notice?.needsDetails==true && unavailableHealth.activeIssues.first?.retry == .unknown,"ON unavailable reports the failure and an unknown retry state with a detail route")
+check(DiagnosticStorageHealth(readiness:.notChecked,missingWrites:2).menuMessage==nil,"historical failures do not establish a current storage outage")
 var captures:[InputIncidentTrace.Capture]=[]
 let trace=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{captures.append($0)})
 trace.state(.mismatch,.buffered,pending:11);trace.mark();trace.flush()

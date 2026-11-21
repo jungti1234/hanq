@@ -9,12 +9,26 @@ let owner = AppDelegate()
 do {
     _ = NSApplication.shared
     let app=AppDelegate()
+    let diagnostics=app.makeDiagnosticsMenu()
+    let noticeIndex=diagnostics.index(of:app.diagnosticStorageItem)
+    precondition(diagnostics.items[noticeIndex+1] === app.diagnosticStorageProblemItem)
+    precondition(diagnostics.items[noticeIndex+2] === app.diagnosticStorageSeparator)
+    precondition(diagnostics.items[noticeIndex+3] === app.inputIncidentItem,"notice and its divider precede manual recording")
+    precondition(!diagnostics.autoenablesItems && app.diagnosticStorageItem.action==nil && !app.diagnosticStorageItem.isEnabled)
+    precondition(app.diagnosticStorageItem.view === app.diagnosticStorageNoticeView)
+    precondition(app.diagnosticStorageNoticeView.hitTest(.zero)==nil && !app.diagnosticStorageNoticeView.acceptsFirstResponder,"information view cannot receive a click or keyboard focus")
     var replies:[(DiagnosticStorageHealth)->Void]=[]
     app.diagnosticStorageHealthLoader={replies.append($0)}
     func settle(){RunLoop.current.run(until:Date().addingTimeInterval(0.03))}
     app.refreshDiagnosticLogAvailability()
     replies.removeFirst()(.init(readiness:.unavailable,missingWrites:0))
-    settle();precondition(app.diagnosticStorageItem.title.contains("확인 실패"))
+    settle();precondition(app.diagnosticStorageItem.title.contains("저장하지 못하고"))
+    precondition(!app.diagnosticStorageProblemItem.isHidden,"unknown failure offers a real detail route")
+    var presented:[DiagnosticStorageHealth]=[]
+    app.diagnosticStorageProblemPresenter={presented.append($0)}
+    app.showDiagnosticStorageProblem()
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:0))
+    settle();precondition(presented.count==1 && presented[0].notice?.detail.contains("미확인")==true,"detail action fetches current health instead of acknowledging history")
     app.refreshDiagnosticLogAvailability()
     app.refreshDiagnosticLogAvailability()
     replies.removeLast()(.init(readiness:.unavailable,missingWrites:0,collectionEnabled:false))
@@ -23,11 +37,35 @@ do {
     settle();precondition(app.diagnosticStorageItem.isHidden,"stale ON failure cannot overwrite OFF")
     app.refreshDiagnosticLogAvailability()
     replies.removeFirst()(.init(readiness:.unavailable,missingWrites:2,collectionEnabled:false))
-    settle();precondition(app.diagnosticStorageItem.title.contains("오류 2회"),"real failures remain visible while OFF")
+    settle();precondition(app.diagnosticStorageItem.isHidden,"historical failures do not warn while OFF")
     app.refreshDiagnosticLogAvailability()
-    replies.removeFirst()(.init(readiness:.ready,missingWrites:0))
+    replies.removeFirst()(.init(readiness:.ready,missingWrites:11))
     settle();precondition(app.diagnosticStorageItem.isHidden,"successful ON clears warning without menu reopening")
-    print("PASS: diagnostic menu distinguishes OFF from failure and rejects stale readiness callbacks")
+    app.refreshDiagnosticLogAvailability()
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:12))
+    settle();precondition(!app.diagnosticStorageItem.isHidden,"a new current failure warns again")
+    app.refreshDiagnosticLogAvailability()
+    let space=DiagnosticStorageIssue(component:.detail,failure:.posix(.storageWrite,ENOSPC),retry:.automatic)
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:13,currentFailure:space.failure,manualCaptureAvailable:true,issues:[space]))
+    settle()
+    precondition(app.diagnosticStorageNoticeView.titleLabel.stringValue=="진단 기록을 저장할 공간이 부족합니다")
+    precondition(app.diagnosticStorageNoticeView.detailLabel.stringValue=="공간을 확보해 주세요 · 자동 재시도 중")
+    precondition(!app.diagnosticStorageItem.isEnabled && app.diagnosticStorageProblemItem.isHidden && !app.diagnosticStorageSeparator.isHidden)
+    precondition(app.inputIncidentItem.isEnabled==InputIncidentTrace.shared.enabled,"disk warning alone keeps admission enabled")
+    app.refreshDiagnosticLogAvailability()
+    replies.removeFirst()(.init(readiness:.unavailable,missingWrites:13,currentFailure:.posix(.storageWrite,ENOSPC),manualCaptureAvailable:false))
+    settle();precondition(!app.inputIncidentItem.isEnabled,"capacity failure disables manual action")
+    app.refreshDiagnosticLogAvailability()
+    replies.removeFirst()(.init(readiness:.ready,missingWrites:13,manualCaptureAvailable:true))
+    settle()
+    precondition(app.diagnosticStorageItem.isHidden && app.diagnosticStorageProblemItem.isHidden && app.diagnosticStorageSeparator.isHidden,"recovery hides information, detail action and divider")
+    precondition(app.inputIncidentItem.isEnabled==InputIncidentTrace.shared.enabled,"recovery restores admission without clearing history")
+    var statuses:[DiagnosticManualCapture.Status]=[]
+    app.diagnosticManualNoticePresenter={statuses.append($0)}
+    app.diagnosticManualMarker={reply in reply(.waiting);reply(.saved);reply(.incomplete);reply(.unavailable)}
+    app.markInputIncident()
+    precondition(statuses == [.waiting,.saved,.incomplete,.unavailable],"manual action routes only its real request results")
+    print("PASS: production gray notice/order/divider, admission/recovery/stale replies and manual result presentation routing")
 }
 owner.enabled = true
 owner.koreanEnabled = true

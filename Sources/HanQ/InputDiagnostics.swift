@@ -121,6 +121,17 @@ final class OperationalDiagnostics {
     func snapshot()->(entries:[Entry],evicted:Int) {
         lock.lock();defer{lock.unlock()};return(entries,evicted)
     }
+    func storageStatus(for directory:URL,flush:Bool=false)->DiagnosticCriticalJournal.Status? {
+        lock.lock();let journal=self.journal;lock.unlock()
+        guard let journal,journal.directory==directory.standardizedFileURL else{return nil}
+        if flush{_ = journal.flush(timeout:0.25)}
+        return journal.status()
+    }
+    func storageIssues(for directory:URL)->[DiagnosticStorageIssue] {
+        lock.lock();let journal=self.journal;lock.unlock()
+        guard let journal,journal.directory==directory.standardizedFileURL else{return []}
+        return journal.storageIssues()
+    }
 }
 enum OperationalIO {
     typealias Write=(Int32,UnsafeRawPointer?,Int)->Int
@@ -180,6 +191,8 @@ final class DiagnosticCriticalLane {
     private var reportedErrors=0,reportedObservations=0
     private var writtenBytes=0,inFlight:Data?,inFlightOffset=0,inFlightCount=0
     private var retryAt=0.0,retryDelay=1.0,blocked=false
+    // Published under lock; blocked/retryAt themselves belong to the writer queue.
+    private var currentStorageIssue:DiagnosticStorageIssue?
     private var directoryIdentity:stat?,lockIdentity:stat?,identities:[Int:stat]=[:]
     private var current=0,generation=0,descriptor:Int32 = -1,lockFD:Int32 = -1
     private var currentName="",created=0.0,lastPruned = -Double.infinity
@@ -226,6 +239,12 @@ final class DiagnosticCriticalLane {
         lock.lock();defer{lock.unlock()}
         return Status(pendingErrors:pending.filter{!$0.1}.count,pendingObservations:pending.filter{$0.1}.count,
             droppedErrors:droppedErrors,droppedObservations:droppedObservations,writeFailures:writeFailures,lastErrno:lastErrno,lastPolicy:lastPolicy,writtenBytes:writtenBytes,rotations:rotations)
+    }
+    func storageIssue(component:DiagnosticStorageIssue.Component)->DiagnosticStorageIssue? {
+        lock.lock();defer{lock.unlock()}
+        guard var issue=currentStorageIssue else{return nil}
+        issue.component=component;issue.pendingCount=pending.count
+        return issue
     }
     static func scan(_ data:Data,visit:(Event)->Void)->(generation:Int,incomplete:Int)? {
         guard data.count<=maximumSegmentBytes else{return nil}
@@ -279,13 +298,18 @@ final class DiagnosticCriticalLane {
         a.st_ctimespec.tv_sec==b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec==b.st_ctimespec.tv_nsec
     }
     private func policyFailure(_ code:Int) {
-        lock.lock();writeFailures+=1;lastErrno=0;lastPolicy=code;lock.unlock();blocked=true
+        blocked=true
+        lock.lock();writeFailures+=1;lastErrno=0;lastPolicy=code
+        currentStorageIssue=DiagnosticStorageIssue(component:.criticalErrors,failure:.policy(.storageWrite,code),retry:.stopped,milliseconds:Int64(wallClock()*1000))
+        lock.unlock()
         Logger(subsystem:"taek.in.hanq",category:"critical-storage").error("criticalStorage policy=\(code,privacy:.public)")
     }
     private func failed(_ code:Int32) {
-        lock.lock();writeFailures+=1;lastErrno=Int(code);lock.unlock()
-        Logger(subsystem:"taek.in.hanq",category:"critical-storage").error("criticalStorage errno=\(code,privacy:.public)")
         if !DiagnosticWriteBudget.transient(.posix(.storageWrite,code)){blocked=true}
+        lock.lock();writeFailures+=1;lastErrno=Int(code)
+        currentStorageIssue=DiagnosticStorageIssue(component:.criticalErrors,failure:.posix(.storageWrite,code),retry:blocked ? .stopped:.automatic,milliseconds:Int64(wallClock()*1000))
+        lock.unlock()
+        Logger(subsystem:"taek.in.hanq",category:"critical-storage").error("criticalStorage errno=\(code,privacy:.public)")
         retryAt=clock()+retryDelay;retryDelay=min(60,retryDelay*2)
     }
     private func openDirectory()->Int32? {
@@ -416,7 +440,7 @@ final class DiagnosticCriticalLane {
             }
             reportedErrors=droppedErrors;reportedObservations=droppedObservations
             lock.unlock()
-            inFlight=nil;inFlightCount=0;inFlightOffset=0;retryAt=0;retryDelay=1;lock.lock();lastErrno=0;lock.unlock()
+            inFlight=nil;inFlightCount=0;inFlightOffset=0;retryAt=0;retryDelay=1;lock.lock();lastErrno=0;currentStorageIssue=nil;lock.unlock()
             if !all{return}
         }while true
     }
@@ -1416,6 +1440,7 @@ final class InputIncidentTrace {
     // closures receive value snapshots; a window slot is held through both writes.
     private final class CaptureWindow {
         var before:Capture;var after:Capture?
+        var manualResult:DiagnosticManualCapture?
         var requests:[CaptureRequest];let deferred:Bool;let generation:Int32
         var post:[DiagnosticPackedFrame]=[];var postLease:DiagnosticCaptureLease?;var postOmitted=0;var revision=0;var closed=false;var submitted=false
         var closedMilliseconds:Int?;var endedOnShutdown=false
@@ -1470,6 +1495,9 @@ final class InputIncidentTrace {
     private var skippedEvents:[Int:Int]=[:],skippedAuxiliary:[Int:Int]=[:]
     private let writer:((Capture)->Void)?
     private var storageObserver:(()->Void)?
+    private var readinessRetryAt=0.0,readinessRetryDelay=1.0
+    private var lastJournalIssues:[DiagnosticStorageIssue]=[]
+    private var manualCapacityLimited=false // Writer queue; refresh only while admission is blocked.
     private var lastStorageNotice:Int?
     private var acceptedPres=Set<Int>() // Serial writer only; bounded by open windows.
     init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=65536,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,sharedWriter:OperationalIO.Write?=nil,writer:((Capture)->Void)?=nil){
@@ -1516,18 +1544,61 @@ final class InputIncidentTrace {
         if sharedStore != nil {
             let retry=DispatchSource.makeTimerSource(queue:queue)
             retry.schedule(deadline:.now()+1,repeating:1)
-            retry.setEventHandler{[weak self] in guard let self,self.enabled || (self.sharedStore?.stats.pendingBytes ?? 0)>0 else{return};_ = self.sharedStore?.drain()}
+            retry.setEventHandler{[weak self] in
+                guard let self else{return}
+                let journalIssues=self.destinationDirectory.map{OperationalDiagnostics.shared.storageIssues(for:$0)} ?? []
+                let journalChanged=self.lastJournalIssues != journalIssues
+                self.lastJournalIssues=journalIssues
+                guard self.enabled || (self.sharedStore?.stats.pendingBytes ?? 0)>0 || journalChanged else{return}
+                let previous=self.sharedStore?.stats.lastFailure
+                let wasReady=self.storage?.readiness.ready
+                _ = self.sharedStore?.drain()
+                if self.enabled,let storage=self.storage,!storage.readiness.ready,
+                   self.sharedStore?.hasVerifiedWrite != true,ProcessInfo.processInfo.systemUptime>=self.readinessRetryAt {
+                    let ready=storage.verifyReadiness().ready
+                    self.readinessRetryAt=ProcessInfo.processInfo.systemUptime+self.readinessRetryDelay
+                    self.readinessRetryDelay=ready ? 1:min(60,self.readinessRetryDelay*2)
+                }
+                if (self.enabled && self.manualCapacityLimited) || journalChanged || previous != self.sharedStore?.stats.lastFailure || wasReady != self.storage?.readiness.ready{self.storageObserver?()}
+            }
             storageRetryTimer=retry;retry.resume()
         }
     }
     func storageHealth(_ completion:@escaping(DiagnosticStorageHealth)->Void){
-        decisionQueue.async{[self] in queue.async{[self] in
-            let readiness=(sharedStore?.stats.lastFailure == nil) ? (storage?.readiness ?? .unavailable):.unavailable
+        decisionQueue.async{[self] in
+            let generation=gate.generation
+            lock.lock()
+            let manualWindows=windows.values.filter{$0.before.trigger == .manual}
+            let posts=manualWindows.filter{!$0.submitted}
+            let now=Int(max(0,(clock()-origin)*1000))
+            let metadata=snapshot(.manual,timing:DecisionTiming(queueMicros:0,lockWaitMicros:0,contended:false,clipped:false),incident:0,frames:[],sampleKeyboard:false).metadataMemoryCharge
+            let frameBytes=ring.selectionMemoryCharge(from:max(0,now-60000),through:now)
+            let windowSpace=manualWindows.count<4
+            let postCount=posts.count,postBytes=posts.reduce(0){$0+$1.post.reduce(0){$0+$1.accountedBytes}+32768}
+            lock.unlock()
+            queue.async{[self] in
+            let journalIssues=destinationDirectory.map{OperationalDiagnostics.shared.storageIssues(for:$0)} ?? []
+            let sharedPending=(sharedStore?.stats.pendingBytes ?? 0)>0
+            var issues=journalIssues
+            if let issue=sharedStore?.storageIssue(retryScheduled:enabled || sharedPending){issues.insert(issue,at:0)}
+            let baseReady=sharedStore?.hasVerifiedWrite == true ? .ready:(storage?.readiness ?? DiagnosticStorageReadiness.unavailable)
+            if !baseReady.ready,baseReady.reason != "not_checked" {
+                if let issue=storage?.readinessIssue(retryScheduled:storageRetryTimer != nil && enabled){issues.append(issue)}
+            }
+            let currentFailure=issues.first?.failure
+            let readiness=issues.isEmpty ? baseReady:.unavailable
             let missing=(storage.map{$0.status.unavailable+$0.status.encodingFailures+$0.status.limited+$0.status.statusWriteFailures} ?? 0)+(sharedStore.map{$0.stats.failures+$0.stats.rejected+$0.stats.incompleteFiles} ?? 0)
             let budget=storage?.status.writeBudget
+            let memorySpace=sharedStore==nil || frameBytes+2*metadata<=captureMemory.limit-captureMemory.status.manual
+            let writerSpace=sharedStore?.canAcceptManualCapture(frameBytes:frameBytes,awaitingPosts:postCount,awaitingPostBytes:postBytes) ?? (writer != nil || storage?.readiness.ready==true)
+            let available=enabled && gate.generation==generation && windowSpace && memorySpace && writerSpace
+            // Reuse the existing retry tick to recheck capacity while disabled.
+            // Healthy menus add no polling, disk probes or capture copies.
+            manualCapacityLimited=enabled && (!windowSpace || !memorySpace || (!writerSpace && sharedStore?.canRetry==true))
             completion(DiagnosticStorageHealth(readiness:readiness,missingWrites:missing,
                 suppressedWrites:(budget?["suppressedAutomatic"] ?? 0)+(budget?["suppressedManual"] ?? 0),
-                collectionEnabled:enabled))
+                collectionEnabled:enabled,pendingWrites:sharedPending || !journalIssues.isEmpty,
+                currentFailure:currentFailure,manualCaptureAvailable:available,issues:issues))
         }}
     }
     func observeStorage(_ callback:@escaping()->Void){queue.async{[self] in storageObserver=callback}}
@@ -1554,6 +1625,7 @@ final class InputIncidentTrace {
                 guard gate.generation==paused else{DispatchQueue.main.async{completion?()};return}
                 lock.lock()
                 for window in windows.values {
+                    window.manualResult?.finish(.incomplete)
                     for request in window.requests{captureDiscarded[request.trigger,default:0]+=1}
                 }
                 windows.removeAll();drainScheduled=false
@@ -1593,7 +1665,7 @@ final class InputIncidentTrace {
         }
     }
     private func updatePreservedLastFrame(){preservePreviousFrame()}
-    private func snapshot(_ reason:Trigger,timing:DecisionTiming,incident:Int,phase:Int=0,frames:[DiagnosticPackedFrame]?=nil,requestedFrom:Int?=nil,requestedThrough:Int?=nil)->Capture {
+    private func snapshot(_ reason:Trigger,timing:DecisionTiming,incident:Int,phase:Int=0,frames:[DiagnosticPackedFrame]?=nil,requestedFrom:Int?=nil,requestedThrough:Int?=nil,sampleKeyboard:Bool=true)->Capture {
         let now=Int(max(0,(clock()-origin)*1000))
         ring.trim(now:now)
         let selected=frames.map(DiagnosticFrameSelection.init) ?? ring.selection(from:max(0,now-(reason == .manual ? 60000:10000)),through:now)
@@ -1603,7 +1675,7 @@ final class InputIncidentTrace {
             firstAvailableMilliseconds:selected.packets.first?.milliseconds,lastAvailableMilliseconds:selected.packets.last?.milliseconds,frames:selected.count,sequenceGaps:sequenceGaps,historyEvictions:ring.dropped,historyByteEvictions:ring.byteEvictions,encodingFailures:ring.encodingFailures)
         value.clockOriginMicros=Int(max(0,min(origin*1_000_000,9_000_000_000_000_000)))
         value.recoveryFailures=recentRecoveryFailures.isEmpty ? nil:recentRecoveryFailures
-        if reason == .manual, let origin = value.clockOriginMicros, let keyboardSample {
+        if sampleKeyboard,reason == .manual, let origin = value.clockOriginMicros, let keyboardSample {
             // Counter drains may lag the loss. Restart comparison after the entire window ages out.
             let missing = lastKeyboardDownLoss.map { clock() - $0 <= 60 } ?? false
             value.keyboardOrigin = missing ? KeyboardSample(status: 5, bursts: []) : (try? value.frames.unpacked()).flatMap{keyboardSample($0,origin)} ?? KeyboardSample(status:5,bursts:[])
@@ -1765,12 +1837,12 @@ final class InputIncidentTrace {
             if op==1{skippedEvents[lane,default:0]+=count}else{skippedAuxiliary[lane,default:0]+=count}
         }
     }
-    private func requestCapture(_ reason:Trigger,lane:Lane = .main,detail:Int=0,event:CGEvent?=nil,episode:Int?=nil,duration:Double?=nil){
-        guard enabled else{return}
-        requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock(),episode:episode,duration:duration)
+    private func requestCapture(_ reason:Trigger,lane:Lane = .main,detail:Int=0,event:CGEvent?=nil,episode:Int?=nil,duration:Double?=nil,manual:DiagnosticManualCapture?=nil){
+        guard enabled else{manual?.finish(.unavailable);return}
+        requestCapture(reason,lane:lane,detail:detail,reference:event.map{EventReference($0,$0.type)},time:clock(),episode:episode,duration:duration,manual:manual)
     }
-    private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double,episode:Int?=nil,duration:Double?=nil){
-        let generation=gate.generation;guard generation>0,reason != .onsetObservation else{return}
+    private func requestCapture(_ reason:Trigger,lane:Lane,detail:Int,reference:EventReference?,time:Double,episode:Int?=nil,duration:Double?=nil,manual:DiagnosticManualCapture?=nil){
+        let generation=gate.generation;guard generation>0,reason != .onsetObservation else{manual?.finish(.unavailable);return}
         let requestID=UUID().uuidString
         var requestContext=DiagnosticCriticalJournal.Context(trace:runID,incident:0,sequence:0,lane:lane.rawValue,kind:reason.rawValue,category:detail,count:0,episode:episode ?? 0)
         requestContext.observedMilliseconds=Int(max(0,(time-origin)*1000));requestContext.requestID=requestID
@@ -1779,15 +1851,15 @@ final class InputIncidentTrace {
         // Bounded admission only. The input caller never copies
         // a ring, encodes JSON, or performs file I/O.
         guard captureCredits[reason.rawValue-1].wait(timeout:.now()) == .success else{
-            captureOverflowSignals[reason.rawValue-1].signal();OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:requestContext,observation:true);return
+            captureOverflowSignals[reason.rawValue-1].signal();OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:requestContext,observation:true);manual?.finish(.incomplete);return
         }
         let enqueued=observationClock()
         decisionQueue.async{[self] in
             defer{captureCredits[reason.rawValue-1].signal()}
-            guard gate.generation==generation else{return}
+            guard gate.generation==generation else{manual?.finish(.incomplete);return}
             collectDecisionOverflow();collectCaptureOverflow();let counters=collectObservationCounters()
             withObservation(.capture,.main,reason.rawValue%8,observedAt:time,enqueuedAt:enqueued){timing in
-                guard gate.generation==generation else{return}
+                guard gate.generation==generation else{manual?.finish(.incomplete);return}
                 mergeObservationCounters(counters)
                 let (identifier,origin)=reference.map{eventIdentity($0)} ?? (0,0)
                 var request=CaptureRequest(trigger:reason.rawValue,milliseconds:Int(max(0,time-self.origin)*1000),afterSequence:sequence,lane:lane.rawValue,detail:detail,event:identifier,inputOrigin:origin)
@@ -1805,7 +1877,7 @@ final class InputIncidentTrace {
                 let pending=windows.values.filter{($0.before.trigger == .manual)==(reason == .manual)}.count
                 guard pending<(reason == .manual ? 4:(sharedStore==nil ? 16:128)) else{
                     captureWindowOverflow[reason.rawValue,default:0]+=1
-                    OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:coreContext,observation:true);return
+                    OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:coreContext,observation:true);manual?.finish(.incomplete);return
                 }
                 // An older frozen pre must reach the ordered store first. A newer
                 // immediate pre would retire that older automatic incident.
@@ -1821,14 +1893,15 @@ final class InputIncidentTrace {
                 let postLease=sharedStore==nil ? nil:captureMemory.lease(before.metadataMemoryCharge,manual:reason == .manual)
                 guard sharedStore==nil || (preLease != nil && postLease != nil) else {
                     captureWindowOverflow[reason.rawValue,default:0]+=1
-                    OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:coreContext,observation:true);return
+                    OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:coreContext,observation:true);manual?.finish(.incomplete);return
                 }
                 let window=CaptureWindow(before,request,deferred:deferred,generation:generation)
+                window.manualResult=manual
                 window.postLease=postLease
                 windows[captures]=window
                 if !deferred {
                     var value=before;value.capturePreservation=preservation(window);value.captureBacklog=backlogSnapshot()
-                    queue.async{[self] in if gate.generation==generation{write(value,lease:preLease)}}
+                    queue.async{[self] in if gate.generation==generation{write(value,lease:preLease,manual:manual)}else{manual?.finish(.incomplete)}}
                     if sharedStore != nil{window.before.frames=DiagnosticFrameSelection([])}
                 }
                 scheduleClose(window)
@@ -1878,6 +1951,8 @@ final class InputIncidentTrace {
     private func submitWindow(_ window:CaptureWindow){
         guard !window.submitted,var after=window.after else{return}
         window.submitted=true;submittedWindows+=1
+        let manual=window.manualResult
+        if window.postOmitted>0{manual?.finish(.incomplete)}
         var before=window.before
         let value=preservation(window),backlog=backlogSnapshot()
         before.capturePreservation=value;before.captureBacklog=backlog
@@ -1886,16 +1961,18 @@ final class InputIncidentTrace {
             capturePostOverflow[before.trigger.rawValue,default:0]+=max(1,after.frames.count)
             var context=DiagnosticCriticalJournal.Context(trace:runID,incident:before.incident,sequence:sequence,lane:0,kind:before.trigger.rawValue,category:1,count:after.frames.count,episode:0);context.requestID=window.requests.first?.requestID
             OperationalDiagnostics.shared.record(.policy(.captureDisposition,6),context:context,observation:true)
+            manual?.finish(.incomplete)
             windows.removeValue(forKey:before.incident);return
         }
         let writeBefore=window.deferred,generation=window.generation,incident=before.incident,postLease=window.postLease
         queue.async{[self] in
             let attemptedPost=gate.generation==generation
+            if !attemptedPost{manual?.finish(.incomplete)}
             if limitsWrites {
-                if attemptedPost{write(after,lease:postLease)}
+                if attemptedPost{write(after,lease:postLease,manual:manual)}
             }else {
-                if writeBefore,attemptedPost{write(before)}
-                if attemptedPost{write(after,lease:postLease)}
+                if writeBefore,attemptedPost{write(before,manual:manual)}
+                if attemptedPost{write(after,lease:postLease,manual:manual)}
             }
             decisionQueue.async{[self] in
                 lock.lock();defer{lock.unlock()}
@@ -1907,16 +1984,21 @@ final class InputIncidentTrace {
             }
         }
     }
-    private func write(_ capture:Capture,lease:DiagnosticCaptureLease?=nil){
-        if let writer{writer(capture);return}
+    private func write(_ capture:Capture,lease:DiagnosticCaptureLease?=nil,manual:DiagnosticManualCapture?=nil){
+        if let writer{writer(capture);manual?.saved(phase:capture.phase);return}
         if let sharedStore {
-            _ = sharedStore.save(capture,lease:lease)
+            let phase=capture.phase
+            _ = sharedStore.save(capture,lease:lease,completion:manual.map{receipt in {saved in
+                if saved{receipt.saved(phase:phase)}else{receipt.finish(.incomplete)}
+            }})
+            if sharedStore.stats.lastFailure != nil{manual?.waiting(retry:sharedStore.canRetry)}
             storageObserver?()
             return
         }
-        guard let storage else{return}
+        guard let storage else{manual?.finish(.unavailable);return}
         var result=0
         defer {
+            if result==DiagnosticLogStore.Result.saved.rawValue{manual?.saved(phase:capture.phase)}else{manual?.finish(.incomplete)}
             if capture.phase==1{acceptedPres.remove(capture.incident)}
             let frame=capture.frames.last
             OperationalDiagnostics.shared.record(.policy(.captureDisposition,result),context:.init(trace:capture.runID,incident:capture.incident,
@@ -2356,10 +2438,11 @@ final class InputIncidentTrace {
               (lane == .onset && (7...9).contains(reason.rawValue)) else{return}
         requestCapture(.recoveryStarted,lane:lane,detail:reason.rawValue)
     }
-    func mark(){
-        guard enabled else{return};let time=clock()
+    func mark(completion:((DiagnosticManualCapture.Status)->Void)?=nil){
+        let manual=completion.map{DiagnosticManualCapture(completion:$0)}
+        guard enabled else{manual?.finish(.unavailable);return};let time=clock()
         _ = submit(.marker,.main,observedAt:time){[self] timing in append(.main,.marker,observedAt:time,observationTiming:timing)}
-        requestCapture(.manual)
+        requestCapture(.manual,manual:manual)
     }
     // Freeze the export's event boundary on the decision queue. New incidents
     // do not extend this wait; already requested post-captures finish first.
@@ -2382,10 +2465,21 @@ final class InputIncidentTrace {
             do {
                 guard let storage else{throw DiagnosticLogExport.Failure.noLogs}
                 let sharedPresent=sharedStore.map{FileManager.default.fileExists(atPath:$0.directory.path)} ?? false
-                if sharedPresent{_ = sharedStore?.prepare()}
+                if sharedPresent{
+                    let previous=sharedStore?.stats.lastFailure
+                    _ = sharedStore?.prepare()
+                    if previous != sharedStore?.stats.lastFailure{storageObserver?()}
+                }
                 let hasSharedCaptures=(sharedStore?.lastCaptureIncident ?? 0)>0
-                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request,includeEmpty:hasSharedCaptures)
+                let journal=destinationDirectory.flatMap{OperationalDiagnostics.shared.storageStatus(for:$0,flush:true)}
+                let hasJournalState=journal.map{$0.pendingErrors>0 || $0.pendingObservations>0 || $0.droppedErrors>0 || $0.droppedObservations>0 || $0.writeFailures>0} ?? false
+                try storage.copyExportSnapshot(to:directory,reviewMetadata:reviewMetadata,request:request,includeEmpty:hasSharedCaptures || hasJournalState)
                 if sharedPresent{try sharedStore?.copySnapshot(into:directory)}
+                if let journal {
+                    let path=directory.appendingPathComponent("critical-storage-status.json")
+                    try JSONEncoder().encode(journal).write(to:path,options:.withoutOverwriting)
+                    try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+                }
                 completion(.success(()))
             }catch{completion(.failure(error))}
         }
@@ -2398,6 +2492,7 @@ final class InputIncidentTrace {
     func sharedStatsForTest()->DiagnosticSharedStore.Stats?{queue.sync{sharedStore?.stats}}
     func historyBytesForTest()->Int{decisionQueue.sync{ring.accountedBytes}}
     func captureMemoryForTest()->DiagnosticCaptureMemory.Status{captureMemory.status}
+    func reserveManualMemoryForTest(_ bytes:Int)->DiagnosticCaptureLease?{captureMemory.lease(bytes,manual:true)}
     func captureForTest(_ reason:Trigger){requestCapture(reason)}
     func flushCaptureWorkerForTest(){decisionQueue.sync{}}
     func finishCaptureWindowsForTest(){decisionQueue.sync{for window in windows.values where !window.closed{closeWindow(window)}}}
@@ -2754,9 +2849,20 @@ final class DiagnosticLogStore {
     private(set) var actualWrittenBytes=0
     var limitsWrites:Bool{writeBudget != nil}
     private(set) var readiness=DiagnosticStorageReadiness.notChecked
+    private(set) var lastStorageFailure:OperationalFailure?
+    private(set) var lastStorageFailureMilliseconds:Int64?
+    func readinessIssue(retryScheduled:Bool)->DiagnosticStorageIssue {
+        // A timer can still call verifyReadiness after an ownership guard has
+        // permanently stopped it. That is not an actual storage retry.
+        let stopped=ownershipPrepared && !ownershipHealthy && !transientStorageFailure
+        return DiagnosticStorageIssue(component:.readiness,failure:lastStorageFailure,
+            retry:stopped ? .stopped:(retryScheduled ? .automatic:.notScheduled),
+            milliseconds:lastStorageFailureMilliseconds)
+    }
     private var readinessReceipt:File?
     private func storageFault(_ stage:OperationalStage,_ code:Int32=0,policy:Int=1)->Bool {
         let failure:OperationalFailure=code == 0 ? .policy(stage,policy):.posix(stage,code)
+        lastStorageFailure=failure;lastStorageFailureMilliseconds=Int64(Date().timeIntervalSince1970*1000)
         if DiagnosticWriteBudget.transient(failure) {
             transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
         }
@@ -2801,7 +2907,11 @@ final class DiagnosticLogStore {
     @discardableResult func verifyReadiness(receipt:Data?=nil,name:String?=nil)->DiagnosticStorageReadiness {
         readiness = .unavailable
         prepareOwnership()
-        guard ownershipHealthy,let dir=openDirectory() else{return readiness}
+        guard ownershipHealthy else {
+            if lastStorageFailure==nil{_ = storageFault(.storageOwnership,policy:1)}
+            return readiness
+        }
+        guard let dir=openDirectory() else{return readiness}
         defer{close(dir)}
         let keep=receipt != nil && name != nil
         guard (receipt==nil)==(name==nil) else{return readiness}
@@ -2813,9 +2923,9 @@ final class DiagnosticLogStore {
         let data=receipt ?? Data(UUID().uuidString.utf8)
         guard data.count<=4096 else{return readiness}
         let fd=openat(dir,filename,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{return readiness}
+        guard fd>=0 else{_ = storageFault(.storagePrepare,errno);return readiness}
         var created=stat()
-        guard fstat(fd,&created)==0 else{close(fd);return readiness}
+        guard fstat(fd,&created)==0 else{let code=errno;close(fd);_ = storageFault(.storagePrepare,code);return readiness}
         defer{
             close(fd)
             // Remove only this canary; never remove a replacement at its name.
@@ -2823,16 +2933,27 @@ final class DiagnosticLogStore {
             if !keep,fstatat(dir,filename,&current,AT_SYMLINK_NOFOLLOW)==0,
                current.st_dev==created.st_dev,current.st_ino==created.st_ino{unlinkat(dir,filename,0)}
         }
-        guard writeAll(data,fd),fsync(fd)==0 else{return readiness}
+        guard writeAll(data,fd) else{return readiness}
+        guard fsync(fd)==0 else{_ = storageFault(.storageWrite,errno);return readiness}
         let check=openat(dir,filename,O_RDONLY|O_NOFOLLOW|O_CLOEXEC)
-        guard check>=0 else{return readiness}
+        guard check>=0 else{_ = storageFault(.storageRead,errno);return readiness}
         defer{close(check)}
         var info=stat()
-        guard fstat(check,&info)==0,info.st_dev==created.st_dev,info.st_ino==created.st_ino,
+        guard fstat(check,&info)==0 else{_ = storageFault(.storageRead,errno);return readiness}
+        guard info.st_dev==created.st_dev,info.st_ino==created.st_ino,
               info.st_uid==getuid(),info.st_mode&S_IFMT==S_IFREG,info.st_mode&0o077==0,
-              info.st_size==data.count,
-              let actual=try? FileHandle(fileDescriptor:check,closeOnDealloc:false).read(upToCount:data.count+1),actual==data else{return readiness}
+              info.st_size==data.count else{_ = storageFault(.storageRead,policy:2);return readiness}
+        do {
+            guard try FileHandle(fileDescriptor:check,closeOnDealloc:false).read(upToCount:data.count+1)==data else{
+                _ = storageFault(.storageRead,policy:3);return readiness
+            }
+        }catch{
+            let failure=OperationalFailure.capture(error,stage:.storageRead)
+            lastStorageFailure=failure;lastStorageFailureMilliseconds=Int64(Date().timeIntervalSince1970*1000)
+            OperationalDiagnostics.shared.record(failure);return readiness
+        }
         readiness = .ready
+        lastStorageFailure=nil;lastStorageFailureMilliseconds=nil
         if keep{readinessReceipt=File(name:filename,phase:0,identity:info,digest:Self.digest(data))}
         return readiness
     }
@@ -3785,17 +3906,151 @@ final class PrivateProbeDirectory {
     }
 }
 
+struct DiagnosticStorageIssue:Equatable {
+    enum Component:String {case detail,readiness,criticalErrors,observations,termination
+        var title:String {switch self {
+        case .detail:return "전후 상세 기록"
+        case .readiness:return "진단 저장 준비"
+        case .criticalErrors:return "중요 오류 기록"
+        case .observations:return "사건 관측 기록"
+        case .termination:return "종료 사유 기록"
+        }}
+    }
+    enum Retry:String {case automatic,stopped,notScheduled,unknown
+        var message:String {switch self {
+        case .automatic:return "자동으로 다시 시도하고 있습니다."
+        case .stopped:return "자동 재시도가 중단되었습니다."
+        case .notScheduled:return "현재 자동 재시도가 예약되어 있지 않습니다."
+        case .unknown:return "자동 재시도 상태를 확인할 수 없습니다."
+        }}
+    }
+    enum Cause:String {case space,permission,readOnly,missing,busy,io,resources,validation,encoding,unknown
+        var title:String {switch self {
+        case .space:return "진단 기록을 저장할 공간이 부족합니다"
+        case .permission:return "진단 폴더에 접근할 권한이 없습니다"
+        case .readOnly:return "진단 저장 위치가 읽기 전용입니다"
+        case .missing:return "진단 저장 위치를 찾을 수 없습니다"
+        case .busy:return "진단 저장 작업이 지연되고 있습니다"
+        case .io:return "진단 기록을 읽거나 쓰지 못했습니다"
+        case .resources:return "진단 저장에 필요한 자원이 부족합니다"
+        case .validation:return "진단 기록의 안전한 저장을 확인하지 못했습니다"
+        case .encoding:return "진단 기록을 저장 형식으로 만들지 못했습니다"
+        case .unknown:return "진단 기록을 저장하지 못하고 있습니다"
+        }}
+        var guidance:String {switch self {
+        case .space:return "저장 공간을 확보해 주세요."
+        case .permission:return "진단 파일의 접근 권한 문제입니다. 손쉬운 사용 권한과는 별개입니다."
+        case .readOnly:return "현재 저장 위치에 파일을 쓸 수 없습니다."
+        case .missing:return "기존 저장 위치가 그대로 있는지 확인이 필요합니다."
+        case .busy:return "다른 저장 작업과의 충돌이나 일시적인 지연일 수 있습니다."
+        case .io:return "입출력 실패가 확인됐습니다. 이 정보만으로 디스크 고장을 판단할 수는 없습니다."
+        case .resources:return "파일을 열거나 메모리를 확보하는 데 필요한 자원이 부족합니다."
+        case .validation:return "기존 기록을 안전하게 다룰 수 있는지 확인하지 못했습니다. 기존 기록을 삭제하지 말고 문의해 주세요."
+        case .encoding:return "기록을 파일로 만드는 과정에서 오류가 발생했습니다. 계속되면 문의해 주세요."
+        case .unknown:return "현재 정보로 원인을 분류하지 못했습니다. 계속되면 아래 오류 정보와 함께 문의해 주세요."
+        }}
+    }
+    var component:Component
+    let failure:OperationalFailure?
+    var retry:Retry
+    var milliseconds:Int64?=nil
+    var pendingCount:Int?=nil
+    var cause:Cause {
+        guard let failure else{return .unknown}
+        let code=failure.domain == .posix ? failure.code:failure.underlyingPOSIX
+        switch Int32(clamping:code) {
+        case ENOSPC,EDQUOT:return .space
+        case EACCES,EPERM:return .permission
+        case EROFS:return .readOnly
+        case ENOENT,ENOTDIR,ENODEV:return .missing
+        case EAGAIN,EINTR,EBUSY:return .busy
+        case EIO:return .io
+        case EMFILE,ENFILE,ENOMEM:return .resources
+        default:break
+        }
+        if failure.domain == .cocoa {
+            switch failure.code {
+            case NSFileWriteOutOfSpaceError:return .space
+            case NSFileReadNoPermissionError,NSFileWriteNoPermissionError:return .permission
+            case NSFileWriteVolumeReadOnlyError:return .readOnly
+            case NSFileNoSuchFileError,NSFileReadNoSuchFileError:return .missing
+            default:break
+            }
+        }
+        if failure.stage == .storageEncode{return .encoding}
+        if failure.domain == .policy{return .validation}
+        return .unknown
+    }
+}
+struct DiagnosticStorageNotice:Equatable {
+    let title:String,detail:String
+    let needsDetails:Bool
+    var message:String{title+"\n"+detail}
+}
 struct DiagnosticStorageHealth {
     let readiness:DiagnosticStorageReadiness
     let missingWrites:Int
     var suppressedWrites:Int=0
     var collectionEnabled:Bool=true
-    var menuMessage:String? {
-        // OFF deliberately withdraws the readiness receipt. This is not a failed
-        // write, but real earlier write failures must remain visible while OFF.
-        if collectionEnabled && readiness.reason != "not_checked" && !readiness.ready{return "진단 저장 확인 실패 — 새 기록이 저장되지 않을 수 있습니다"}
-        if missingWrites>0{return "진단 저장 오류 \(missingWrites)회 — 기록을 확인하세요"}
-        if suppressedWrites>0{return "진단 쓰기 한도로 일부 기록 생략 — 기존 기록은 유지됩니다"}
-        return nil
+    var pendingWrites:Bool=false
+    var currentFailure:OperationalFailure?=nil
+    var manualCaptureAvailable:Bool=true
+    var issues:[DiagnosticStorageIssue]=[]
+    var activeIssues:[DiagnosticStorageIssue] {
+        guard (collectionEnabled || pendingWrites),readiness.reason != "not_checked",!readiness.ready else{return []}
+        // An errno alone cannot establish that a retry is actually scheduled.
+        return issues.isEmpty ? [DiagnosticStorageIssue(component:.readiness,failure:currentFailure,retry:.unknown)]:issues
     }
+    var notice:DiagnosticStorageNotice? {
+        let all=activeIssues;guard let first=all.first else{return nil}
+        let sameCause=all.allSatisfy{$0.cause==first.cause}
+        let automatic=all.filter{$0.retry == .automatic}.count
+        let title=sameCause ? first.cause.title:"진단 기록 저장에 여러 문제가 있습니다"
+        let detail:String
+        if automatic==all.count {
+            detail=sameCause && first.cause == .space ? "공간을 확보해 주세요 · 자동 재시도 중":"자동으로 다시 시도하고 있습니다"
+        }else if automatic>0 {detail="일부는 자동 재시도 중 · 문제 확인이 필요합니다"}
+        else if all.allSatisfy({$0.retry == .stopped}) {detail="자동 재시도 중단 · 문제 확인이 필요합니다"}
+        else if all.contains(where:{$0.retry == .unknown}) {detail="재시도 상태 미확인 · 문제를 확인해 주세요"}
+        else {detail="자동 재시도 대기 없음 · 문제를 확인해 주세요"}
+        return DiagnosticStorageNotice(title:title,detail:detail,needsDetails:automatic != all.count || !sameCause || first.cause != .space)
+    }
+    var menuMessage:String?{notice?.message}
+    var detailMessage:String {
+        let formatter=DateFormatter();formatter.dateStyle = .short;formatter.timeStyle = .medium
+        return activeIssues.map {issue in
+            var lines=[issue.component.title,issue.cause.title+".",issue.retry.message,issue.cause.guidance]
+            if let pending=issue.pendingCount,pending>0{lines.append("저장 대기: \(pending)개 기록 단계")}
+            if let time=issue.milliseconds{lines.append("최근 실패: "+formatter.string(from:Date(timeIntervalSince1970:Double(time)/1000)))}
+            if let error=issue.failure{lines.append("문의용 오류 정보: \(error.stage.rawValue)/\(error.domain.rawValue)/\(error.code)/\(error.underlyingPOSIX)")}
+            return lines.joined(separator:"\n")
+        }.joined(separator:"\n\n")
+    }
+}
+
+// One bounded receipt per user request, independent of the window/writer queue.
+// Success requires both phases; a failed attempt is not permanent data loss.
+final class DiagnosticManualCapture {
+    enum Status:Equatable {
+        case saved,waiting,incomplete,unavailable
+        var message:String {
+            switch self {
+            case .saved:return "문제 기록을 저장했습니다."
+            case .waiting:return "문제 기록을 아직 저장하지 못했습니다.\n저장 상태가 회복되면 자동으로 다시 시도합니다."
+            case .incomplete:return "문제 기록의 일부 또는 전부를 저장하지 못했습니다.\n이미 저장된 기록은 유지됩니다.\n‘진단 기록 내보내기’에서 보관된 내용을 확인할 수 있습니다."
+            case .unavailable:return "문제 기록을 저장하지 못했습니다.\n진단 기록이 비활성화되어 있거나 저장소를 사용할 수 없습니다."
+            }
+        }
+    }
+    private let lock=NSLock(),completion:(Status)->Void
+    private var phases=Set<Int>(),last:Status?,terminal=false
+    init(completion:@escaping(Status)->Void){self.completion=completion}
+    func saved(phase:Int){
+        lock.lock();defer{lock.unlock()}
+        guard !terminal else{return};phases.insert(phase)
+        if phases.contains(0),phases.contains(1){terminal=true;emit(.saved)}
+    }
+    func waiting(retry:Bool){if retry{lock.lock();defer{lock.unlock()};if !terminal{emit(.waiting)}}else{finish(.incomplete)}}
+    func finish(_ status:Status){lock.lock();defer{lock.unlock()};guard !terminal else{return};terminal=true;emit(status)}
+    private func emit(_ status:Status){guard last != status else{return};last=status;DispatchQueue.main.async{[completion] in completion(status)}}
 }
