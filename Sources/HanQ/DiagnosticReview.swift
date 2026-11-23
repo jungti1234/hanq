@@ -475,12 +475,13 @@ final class DiagnosticReviewSnapshot {
             try autoreleasepool {
             let data=try Self.read(url)
             let source=DiagnosticReviewSource(owner:snapshotOwner,url:url,bytes:data.count,digest:SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined())
-            var count=0,omitted=0,compact=0,linked=0,dropped=[1:0,2:0]
+            var count=0,omitted=0,contextsOmitted=0,compact=0,linked=0,dropped=[1:0,2:0]
             var first:DiagnosticCriticalJournal.Event?,last:DiagnosticCriticalJournal.Event?
             var recent:[DiagnosticCriticalJournal.Event]=[]
             let scanned=DiagnosticCriticalLane.scan(data){event in
                 if let info=event.context?.applicationInfo{journalApplications.include(event.context?.trace ?? event.run,info)}
                 count+=1;if first==nil{first=event};last=event
+                if event.contextOmission != nil{contextsOmitted+=1}
                 if event.failure.stage == .captureDisposition && ![1,8].contains(event.failure.code){omitted+=1}
                 if event.context?.detailPolicy==2{compact+=1}
                 if event.failure.stage == .captureDisposition && event.failure.code==8{linked+=1}
@@ -499,6 +500,11 @@ final class DiagnosticReviewSnapshot {
                 .init(label:"해석하지 못한 부분 기록",value:"\(decoded.incomplete)"),
                 .init(label:"보관 구간 번호",value:"\(decoded.generation)")]
             if decoded.incomplete>0{journalApplications.markIncomplete();notices.append("일부 사건 기록이 불완전합니다. 해석하지 못한 부분도 원본에 그대로 포함합니다.")}
+            if contextsOmitted>0 {
+                journalApplications.markIncomplete()
+                fields.append(.init(label:"세부 정보 없이 저장한 사건",value:"\(contextsOmitted)"))
+                notices.append("일부 사건은 세부 정보를 생략하고 발생 시각과 원인 코드를 저장했습니다.")
+            }
             if let first,let last {
                 fields.append(.init(label:"최초 · 최종 기록 시각 (UTC 밀리초)",value:"\(first.milliseconds) · \(last.milliseconds)"))
             }
@@ -573,6 +579,10 @@ final class DiagnosticReviewSnapshot {
         return fields
     }
     private static func observationFields(_ event:DiagnosticCriticalJournal.Event)->[DiagnosticReviewField] {
+        if let reason=event.contextOmission {
+            let text=reason == .segmentCapacity ? "세부 정보가 파일 한도를 초과했습니다." : "세부 정보를 저장 형식으로 만들지 못했습니다."
+            return [.init(label:"세부 정보 생략",value:text)]
+        }
         guard let c=event.context else{return []}
         var result:[DiagnosticReviewField]=[]
         if let refs=c.applicationReferences,let info=c.applicationInfo,refs.valid,info.valid {

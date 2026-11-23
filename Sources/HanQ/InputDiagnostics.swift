@@ -250,8 +250,12 @@ final class DiagnosticCriticalLane {
         var applicationInfo:DiagnosticApplicationSnapshot?=nil
     }
     struct Event:Codable {
+        enum ContextOmission:String,Codable {case encodingFailed,segmentCapacity}
+
         let run:String,sequence:Int,milliseconds:Int64,failure:OperationalFailure,context:Context?
+        var contextOmission:ContextOmission?=nil
         var valid:Bool {UUID(uuidString:run) != nil && sequence>0 && milliseconds>=0 &&
+            (contextOmission==nil || context==nil) &&
             (context.map{UUID(uuidString:$0.trace) != nil && $0.incident>=0 && $0.sequence>=0 && $0.episode>=0} ?? true)}
     }
     struct Header:Codable {let schema:Int,generation:Int;var createdMilliseconds:Int64?=nil;var lane:String?=nil;var session:String?=nil}
@@ -492,19 +496,33 @@ final class DiagnosticCriticalLane {
         guard needed,prepare(dir) else{return}
         repeat {
             if inFlight == nil {
-                lock.lock();let events=Array(pending.prefix(min(8,max(1,segmentBytes/1024-1))));lock.unlock()
+                lock.lock();let events=Array(pending.prefix(8));lock.unlock()
                 guard !events.isEmpty else{return}
                 let encoder=JSONEncoder()
-                var data=Data()
+                // Reserve room for a new segment header. Count the encoded bytes
+                // and each newline so app metadata can span more than one KiB.
+                let payloadCapacity=segmentBytes-512
+                var data=Data(),count=0
                 for (event,_) in events {
-                    guard let encoded=try? encoder.encode(event),encoded.count<=1024 else{policyFailure(1);return}
-                    data.append(encoded);data.append(10)
+                    let encoded=try? encoder.encode(event)
+                    let line:Data
+                    if let encoded,encoded.count<payloadCapacity {
+                        line=encoded
+                    }else{
+                        // Keep the original occurrence and reason even when its
+                        // optional context cannot fit in an empty segment.
+                        let occurrence=Event(run:UUID(uuidString:event.run)==nil ? run:event.run,
+                            sequence:event.sequence,milliseconds:event.milliseconds,
+                            failure:event.failure,context:nil,contextOmission:encoded==nil ? .encodingFailed:.segmentCapacity)
+                        line=try! encoder.encode(occurrence)
+                    }
+                    guard line.count<payloadCapacity-data.count else{break}
+                    data.append(line);data.append(10);count+=1
                 }
-                guard data.count+512<=segmentBytes else{policyFailure(1);return}
                 if Int(identities[current]?.st_size ?? 0)+data.count>segmentBytes || wallClock()-created>=60 {
                     guard rotate(dir,to:0) else{return}
                 }
-                inFlight=data;inFlightOffset=0;inFlightCount=events.count
+                inFlight=data;inFlightOffset=0;inFlightCount=count
             }
             guard let data=inFlight else{return}
             let failure=data.withUnsafeBytes{bytes->OperationalFailure? in

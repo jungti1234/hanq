@@ -118,6 +118,59 @@ let early=OperationalDiagnostics(sink:{_ in}),earlyDir=directory("early"),earlyJ
 for _ in 0..<100{early.record(cause)};early.installJournal(earlyJournal)
 check(earlyJournal.flush(timeout:5) && (try! records(earlyDir)).count==100,"pre-install repeats are not coalesced away")
 
+// Two apps at the supported Unicode bounds can take more than a KiB.
+do {
+    let apps=(1...2).map { id in
+        DiagnosticApplicationRecord(id:id,pid:Int32(100+id),name:String(repeating:"🚲",count:256),
+            bundleID:String(repeating:"🚲",count:256),version:String(repeating:"🚲",count:64),
+            build:String(repeating:"🚲",count:64),launchMilliseconds:1000)
+    }
+    let appInfo=DiagnosticApplicationSnapshot(records:apps,unavailableReferences:[])
+    check(appInfo.valid,"valid two-app metadata at the Unicode size limits")
+    var context=DiagnosticCriticalJournal.Context(trace:run,incident:7,sequence:1,lane:7,kind:2,category:2,count:1,episode:0)
+    context.applicationReferences=DiagnosticApplicationReferences(target:1,owner:2)
+    context.applicationInfo=appInfo
+    let observed=OperationalFailure.policy(.slowRead,2)
+    func observation(_ sequence:Int,withContext:Bool)->DiagnosticCriticalJournal.Event {
+        .init(run:run,sequence:sequence,milliseconds:Int64(sequence),failure:observed,context:withContext ? context:nil)
+    }
+    let large=observation(1,withContext:true)
+    let encodedSize=try! JSONEncoder().encode(large).count
+    check(encodedSize>4096 && encodedSize<8192-512,"valid row spans more than the smaller segment")
+    for segment in [8192,4096] {
+        let journalDir=directory("critical-size-\(segment)")
+        let sized=DiagnosticCriticalJournal(directory:journalDir,segmentBytes:segment,wallClock:{wall})
+        sized.record(large,observation:true)
+        sized.record(observation(2,withContext:true),observation:true)
+        sized.record(observation(3,withContext:false),observation:true)
+        check(sized.flush(timeout:5) && sized.storageIssues().isEmpty,"later ordinary event still persists within \(segment)-byte segments")
+        let saved=try! records(journalDir).sorted{$0.sequence<$1.sequence}
+        check(saved.map(\.sequence)==[1,2,3] && saved.allSatisfy{$0.run==run && $0.failure==observed},"every original occurrence and reason retained")
+        check(saved.map(\.milliseconds)==[1,2,3],"original occurrence times retained")
+        if segment==8192 {
+            check(saved.prefix(2).allSatisfy{$0.context?.applicationInfo?.records==apps && $0.contextOmission==nil},"full app metadata survives segment rotation")
+            check(sized.status().rotations>0,"real encoded size triggers rotation")
+        }else{
+            check(saved.prefix(2).allSatisfy{$0.context==nil && $0.contextOmission == .segmentCapacity},"unrepresentable context marks only its own occurrence")
+        }
+        check(saved[2].contextOmission==nil,"following small event needs no omission marker")
+        let fd=open(journalDir.path,O_RDONLY|O_NOFOLLOW|O_DIRECTORY)
+        let files=try! DiagnosticCriticalJournal.readFiles(fd)
+        close(fd)
+        check(files.allSatisfy{$0.1.count<=segment},"encoded rows, newlines and headers fit configured segment")
+        if segment==4096 {
+            let reviewDir=directory("omitted-context-review")
+            for (name,data) in files {try! DiagnosticSharedStore.writeExport(data,to:reviewDir.appendingPathComponent(name))}
+            try! DiagnosticSharedStore.writeExport(Data("{}".utf8),to:reviewDir.appendingPathComponent("review-dates.json"))
+            try! DiagnosticSharedStore.writeExport(Data(#"{"schema":1,"status":{}}"#.utf8),to:reviewDir.appendingPathComponent("storage-status.json"))
+            let review=try! DiagnosticReviewSnapshot(directory:reviewDir)
+            check(review.critical?.sections.flatMap(\.fields).contains{field in
+                field.label=="세부 정보 없이 저장한 사건" && field.value=="2"
+            }==true,"review reports original occurrences with omitted context")
+        }
+    }
+}
+
 // Product integration: routine observation never creates a capture; automatic
 // ten-second and manual sixty-second pre-windows retain the three-second post.
 let liveDir=directory("trace")
