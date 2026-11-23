@@ -14,11 +14,11 @@ func edit(_ dir:URL,_ change:(inout [String:Any])->Void)throws{
     var value=try index(dir);change(&value)
     try JSONSerialization.data(withJSONObject:value).write(to:dir.appendingPathComponent(indexName))
 }
-func capture(_ store:DiagnosticLogStore,_ id:Int,_ automatic:Bool){
+func capture(_ store:LegacyFixtureStore,_ id:Int,_ automatic:Bool){
     for phase in 0...1{check(store.save(Data(repeating:32,count:20),incident:id,phase:phase,automatic:automatic) == .saved,"pair saves")}
 }
 func fixture(_ name:String,parent:URL=root)throws->URL{
-    let dir=parent.appendingPathComponent(name),store=DiagnosticLogStore(directory:dir,policy:policy,persistentOwnership:true)
+    let dir=parent.appendingPathComponent(name),store=LegacyFixtureStore(directory:dir,policy:policy,persistentOwnership:true)
     capture(store,1,true);capture(store,2,false);return dir
 }
 func remount(_ dir:URL)throws{
@@ -31,14 +31,14 @@ func remount(_ dir:URL)throws{
     }
 }
 func refuses(_ dir:URL,_ message:String){
-    let store=DiagnosticLogStore(directory:dir,policy:policy,persistentOwnership:true)
+    let store=LegacyFixtureStore(directory:dir,policy:policy,persistentOwnership:true)
     check(store.save(Data([32]),incident:10,phase:0,automatic:false) == .unavailable,message)
     check(store.status.lastFailureStage==3,"ownership refusal remains explicit")
     check(store.legacyArchive==nil,"new-format failures never archive/reset the store")
 }
 let reboot=try fixture("reboot")
 try remount(reboot)
-let resumed=DiagnosticLogStore(directory:reboot,policy:policy,persistentOwnership:true)
+let resumed=LegacyFixtureStore(directory:reboot,policy:policy,persistentOwnership:true)
 resumed.prepareOwnership()
 check(resumed.usage.bytes==40 && resumed.manualUsage.bytes==40,"volume/inode/birth/hash resume both budgets after device and ctime changes")
 check(resumed.status.saved==4 && resumed.lastCaptureIncident==2,"reboot resumes counters and event seed")
@@ -46,7 +46,7 @@ capture(resumed,3,true);capture(resumed,4,false);capture(resumed,5,true);capture
 check(resumed.usage.bytes==80 && resumed.manualUsage.bytes==80,"reboot preserves independent quotas")
 check(resumed.status.evictedGroups==2 && resumed.status.evictedFiles==4,"reboot retains oldest-pair rotation")
 check(try (index(reboot)["schema"] as? Int)==3,"resumed writes schema3")
-let again=DiagnosticLogStore(directory:reboot,policy:policy,persistentOwnership:true)
+let again=LegacyFixtureStore(directory:reboot,policy:policy,persistentOwnership:true)
 again.prepareOwnership();check(again.status.saved==12 && again.usage==resumed.usage,"same-boot app relaunch also resumes")
 let exported=root.appendingPathComponent("resumed-export")
 try again.copyExportSnapshot(to:exported)
@@ -89,7 +89,7 @@ check(try Data(contentsOf:path).first==33,"tampered evidence never overwritten")
 // A strictly verified same-boot legacy store upgrades without moving evidence.
 let upgrade=try fixture("legacy-same-boot")
 try edit(upgrade){$0["schema"]=2}
-let upgraded=DiagnosticLogStore(directory:upgrade,policy:policy,persistentOwnership:true)
+let upgraded=LegacyFixtureStore(directory:upgrade,policy:policy,persistentOwnership:true)
 upgraded.prepareOwnership()
 check(upgraded.status.saved==4 && upgraded.legacyArchive==nil,"verified legacy schema2 upgrades in place")
 check(try index(upgrade)["schema"] as? Int==3,"legacy upgrade writes stable identity")
@@ -107,14 +107,14 @@ for schema in 1...2 {
         if schema==1{v.removeValue(forKey:"manualFiles")}
     }
     let old=try fm.contentsOfDirectory(at:legacy,includingPropertiesForKeys:nil).map{($0.lastPathComponent,try Data(contentsOf:$0))}
-    let recovered=DiagnosticLogStore(directory:legacy,policy:policy,persistentOwnership:true)
+    let recovered=LegacyFixtureStore(directory:legacy,policy:policy,persistentOwnership:true)
     recovered.prepareOwnership()
     check(recovered.legacyArchive != nil,"legacy remount archived as opaque preserved directory")
     for (name,bytes) in old{check(try Data(contentsOf:recovered.legacyArchive!.appendingPathComponent(name))==bytes,"every legacy byte preserved")}
     check(recovered.usage.files==0 && recovered.manualUsage.files==0,"unproven legacy files never adopted for pruning")
     capture(recovered,1,false);capture(recovered,2,true)
     check(recovered.status.saved==4 && recovered.status.evictedFiles==0,"new bounded store accepts both categories")
-    let restarted=DiagnosticLogStore(directory:legacy,policy:policy,persistentOwnership:true)
+    let restarted=LegacyFixtureStore(directory:legacy,policy:policy,persistentOwnership:true)
     restarted.prepareOwnership();check(restarted.status.saved==4,"recovered namespace resumes after relaunch")
 }
 

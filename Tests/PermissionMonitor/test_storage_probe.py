@@ -25,12 +25,12 @@ for case in ('valid', 'public-directory', 'linked-directory', 'existing-result')
         if case == 'existing-result':
             result.write_text('keep');result.chmod(0o600)
         process = subprocess.run([str(executable), '--diagnostic-storage-probe', str(workspace),
-                                  '--bounded-input-incidents', str(root / 'runtime')],
+                                  '--preserve-input-incidents', str(root / 'runtime')],
                                  cwd=root, capture_output=True, timeout=12)
         if case == 'valid':
             assert process.returncode == 0, (case, process.returncode, process.stderr)
             data = json.loads(result.read_text())
-            assert data['readiness']['ready'] and data['bounded'], data
+            assert data['readiness']['ready'] and not data['bounded'], data
             assert pathlib.Path(data['directory']).resolve() == root / 'runtime'
             assert data['token'] == root.name and data['pid'] > 1
             assert stat.S_IMODE(result.stat().st_mode) == 0o600

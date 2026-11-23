@@ -231,14 +231,11 @@ class BoundedReadinessTests(unittest.TestCase):
         return preflight.prepare(self.app, self.output, operations=self.ops,
                                  diagnostics=self.logs, diagnostic_mode='bounded')
 
-    def test_bounded_probe_and_launch_precede_current_process_proof(self):
-        self.assertEqual(self.prepare_bounded(), 0)
-        self.assertEqual(self.ops.calls[:3], ['diagnostic_probe', 'stop', 'reset'])
-        self.assertEqual(self.ops.probe_mode, 'bounded')
-        self.assertEqual(self.ops.launch_mode, 'bounded')
-        self.assertEqual(self.record()['diagnostics']['mode'], 'bounded')
-        self.assertEqual(self.check(), 0)
-        self.assertIs(self.record()['diagnostics']['receipt']['bounded'], True)
+    def test_retired_mode_rejected_before_probe_or_stop(self):
+        with self.assertRaisesRegex(preflight.PreflightError, '제거'):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.calls, [])
+
 
     def test_older_app_is_rejected_before_probe_or_stop(self):
         del self.info['HanQBoundedDiagnosticStorageVersion']
@@ -258,7 +255,7 @@ class BoundedReadinessTests(unittest.TestCase):
         self.ops.report_bounded_probe = False
         with self.assertRaises(preflight.PreflightError):
             self.prepare_bounded()
-        self.assertEqual(self.ops.calls, ['diagnostic_probe'])
+        self.assertEqual(self.ops.calls, [])
         self.assertEqual(self.record()['steps']['previous_app_stopped'], 'not_run')
 
     def test_active_writer_storage_refusal_never_stops_running_app(self):
@@ -268,22 +265,17 @@ class BoundedReadinessTests(unittest.TestCase):
         with self.assertRaises(preflight.PreflightError):
             self.prepare_bounded()
         self.assertEqual(self.ops.running, before)
-        self.assertEqual(self.ops.calls, ['diagnostic_probe'])
+        self.assertEqual(self.ops.calls, [])
 
     def test_nonbounded_main_receipt_is_not_input_ready(self):
-        self.ops.report_bounded_receipt = False
-        self.prepare_bounded()
-        with self.assertRaises(preflight.PreflightError):
-            self.check()
-        self.assertEqual(self.record()['status'], 'awaiting_diagnostics')
+        with self.assertRaisesRegex(preflight.PreflightError, '제거'):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.calls, [])
 
     def test_missing_bounded_receipt_field_cannot_reuse_permission(self):
-        self.prepare_bounded()
-        receipt = json.loads(self.ops.receipt.read_text())
-        del receipt['bounded']
-        self.ops.receipt.write_text(json.dumps(receipt))
-        with self.assertRaises(preflight.PreflightError):
-            self.check()
+        with self.assertRaisesRegex(preflight.PreflightError, '제거'):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.calls, [])
 
     def test_old_preserve_receipt_remains_compatible(self):
         preflight.prepare(self.app, self.output, operations=self.ops, diagnostics=self.logs)
@@ -299,14 +291,12 @@ class BoundedReadinessTests(unittest.TestCase):
         self.assertEqual(self.ops.calls, [])
 
     def test_bounded_mode_is_forwarded_to_real_launch_arguments(self):
-        ops = preflight.MacOS()
-        with mock.patch.object(ops, '_launch', return_value=700) as launch:
-            self.assertEqual(ops.launch_diagnostics('/test/HanQ.app', '/new/logs', 'nonce', mode='bounded'), 700)
-        launch.assert_called_once_with('/test/HanQ.app', ['--bounded-input-incidents', '/new/logs',
-                                                       '--diagnostic-readiness-token', 'nonce'])
+        with self.assertRaisesRegex(preflight.PreflightError, '제거'):
+            self.prepare_bounded()
+        self.assertEqual(self.ops.calls, [])
 
     def test_record_mode_corruption_revokes_readiness(self):
-        self.prepare_bounded()
+        preflight.prepare(self.app, self.output, operations=self.ops, diagnostics=self.logs)
         record = self.record()
         record['diagnostics']['mode'] = 'unknown'
         (self.output / 'record.json').write_text(json.dumps(record))

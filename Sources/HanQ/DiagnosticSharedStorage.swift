@@ -243,7 +243,7 @@ final class DiagnosticSharedStore {
         let failure=(error as? OperationalFailure) ?? OperationalFailure.capture(error,stage:.storageWrite)
         counters.failures+=1;counters.lastFailure=failure
         failureMilliseconds=Int64(clock()*1000)
-        if !DiagnosticWriteBudget.transient(failure),failure.domain != .cocoa{blocked=true}
+        if !DiagnosticStorageRecovery.transient(failure),failure.domain != .cocoa{blocked=true}
         if blocked {
             // A later retry can become unsafe. Keep its evidence queued, but
             // do not leave a manual request promising retries that have stopped.

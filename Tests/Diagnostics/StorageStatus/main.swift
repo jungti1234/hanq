@@ -13,7 +13,7 @@ func bytes(_ n:Int)->Data{Data(repeating:32,count:n)}
 let dir=root.appendingPathComponent("rotation")
 try fm.createDirectory(at:dir,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
 let protected=dir.appendingPathComponent("existing.json");try bytes(123).write(to:protected)
-let store=DiagnosticLogStore(directory:dir,policy:.init(maximumAutomaticFiles:4,maximumAutomaticBytes:100))
+let store=LegacyFixtureStore(directory:dir,policy:.init(maximumAutomaticFiles:4,maximumAutomaticBytes:100))
 check(store.status.attempts==0,"new store reports no prior writes")
 check(store.save(bytes(150),incident:1,phase:0,automatic:false) == .saved,"manual capture independent of budget")
 for id in 2...4 {for phase in 0...1{check(store.save(bytes(20),incident:id,phase:phase,automatic:true) == .saved,"automatic capture saves through rotation")}}
@@ -46,49 +46,34 @@ check(try Data(contentsOf:partialManual)==bytes(1),"published manual payload sur
 check(store.status.statusWriteFailures==1,"companion failure counted in memory")
 check(try Data(contentsOf:statusPath)==replacement,"changed companion never overwritten")
 let recoveredDir=root.appendingPathComponent("recovery")
-let recovered=DiagnosticLogStore(directory:recoveredDir,policy:.incidentDefault)
+var legacyRetryTime=0.0
+let recovered=LegacyFixtureStore(directory:recoveredDir,policy:.incidentDefault,retryClock:{legacyRetryTime})
 check(recovered.save(bytes(2),incident:1,phase:0,automatic:true) == .saved,"recovery initial capture")
 try fm.setAttributes([.posixPermissions:0o500],ofItemAtPath:recoveredDir.path)
 check(recovered.save(bytes(2),incident:2,phase:0,automatic:true) == .unavailable,"unwritable disk failure")
 check(recovered.status.lastFailureStage==4 && recovered.status.lastErrno != 0 && recovered.status.statusWriteFailures==1,"publication errno and unwritable status failure counted")
 try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:recoveredDir.path)
+legacyRetryTime+=61
 check(recovered.save(bytes(2),incident:3,phase:0,automatic:true) == .saved,"later capture resumes")
 check(try document(recoveredDir).status.unavailable==1 && document(recoveredDir).status.statusWriteFailures==1,"next good companion includes disk failures")
 check(try document(recoveredDir).status.lastFailureStage==0 && document(recoveredDir).status.lastErrno==0,"success clears last failure details")
-let restarted=DiagnosticLogStore(directory:recoveredDir,policy:.incidentDefault)
+let restarted=LegacyFixtureStore(directory:recoveredDir,policy:.incidentDefault)
 let previous=try Data(contentsOf:statuses(recoveredDir).first!)
 check(restarted.save(bytes(2),incident:1,phase:0,automatic:true) == .saved,"new store starts distinct status cohort")
 let previousStatusPreserved=try statuses(recoveredDir).contains{try Data(contentsOf:$0)==previous}
 check(statuses(recoveredDir).count==2 && previousStatusPreserved,"prior run status preserved")
-// Actual trace headers report only prior completed writes, never their own save.
+// Current captures report shared writer statistics, not legacy companion writes.
 var time=100.0
 let traceDir=root.appendingPathComponent("trace")
 let trace=InputIncidentTrace(secureInput:{false},destination:traceDir,clock:{time},retention:.init(maximumAutomaticFiles:2,maximumAutomaticBytes:1_000_000))
 trace.captureForTest(.axDelay);trace.flush()
-let pre=names(traceDir).first{$0.pathExtension=="json"}!
-let preData=try Data(contentsOf:pre)
-let preValue=try RecorderTrace.decode(preData)
-check(preValue.storageBeforeWrite?.attempts==0,"first capture explicitly reports prior state")
-check(try document(traceDir).status.attempts==1,"companion includes the current write")
-let postDeadline=ProcessInfo.processInfo.systemUptime+4
-while ProcessInfo.processInfo.systemUptime<postDeadline {
- trace.flush()
- if (try? document(traceDir).status.attempts)==2{break}
- Thread.sleep(forTimeInterval:0.05)
-}
-trace.flush()
-let post=names(traceDir).first{$0.lastPathComponent.hasPrefix("incident-1-1-")}!
-check(try RecorderTrace.decode(Data(contentsOf:post)).storageBeforeWrite?.attempts==1,"post header includes completed pre save")
-check(try document(traceDir).status.attempts==2 && document(traceDir).status.automaticFiles==2,"current companion and disk count match")
-time+=11;trace.captureForTest(.axDelay);trace.flush()
-check(try document(traceDir).status.evictedFiles==2 && document(traceDir).status.evictedGroups==1,"real trigger/encoder/writer exposes pair rotation")
-// Strict collector retains the latest status separately from new input evidence.
-let collected=root.appendingPathComponent("collected")
-let session=try RecorderSession(source:traceDir,outputRoot:collected,product:[:])
-try session.finish(scenario:"ordinary")
-check(session.storageStatuses==1 && session.copied==0,"baseline status collected as cumulative state, not new observations")
-let copy=try fm.contentsOfDirectory(at:session.directory,includingPropertiesForKeys:nil).first{$0.lastPathComponent.hasPrefix("storage-")}!
-check(try RecorderStorageDocument.decode(Data(contentsOf:copy)).status.evictedFiles==2,"sanitized status survives collector")
+check(trace.sharedStatsForTest()?.saved==1,"current pre has one shared completion")
+trace.finishCaptureWindowsForTest();trace.flush()
+check(trace.sharedStatsForTest()?.saved==2,"current post has a separate completion")
+time+=11;trace.captureForTest(.axDelay);trace.flush();trace.finishCaptureWindowsForTest();trace.flush()
+check(trace.sharedStatsForTest()?.saved==4,"legacy two-file cap is not a current writer limit")
+check(names(traceDir).filter{$0.pathExtension=="json" || $0.lastPathComponent.hasPrefix(".storage-")}.isEmpty,"no legacy capture or status file published")
+trace.stopAndFlush()
 var object=try JSONSerialization.jsonObject(with:statusData) as! [String:Any]
 var payload=object["status"] as! [String:Any]
 var oldPayload=payload
@@ -107,7 +92,12 @@ for (key,value) in invalids {
  var edited=payload;edited[key]=value;var doc=object;doc["status"]=edited
  check((try? RecorderStorageDocument.decode(JSONSerialization.data(withJSONObject:doc)))==nil,"strict status rejects invalid/unknown payload: \(key)")
 }
-var traceObject=try JSONSerialization.jsonObject(with:preData) as! [String:Any]
+let sharedDirectory=traceDir.appendingPathComponent(DiagnosticSharedStore.directoryName)
+let firstShared=try fm.contentsOfDirectory(at:sharedDirectory,includingPropertiesForKeys:nil).first{(try? DiagnosticSharedStore.readHeader($0).0.role)==0}!
+let expanded=try DiagnosticSharedStore.expand(firstShared.lastPathComponent,in:sharedDirectory)
+var traceObject=try JSONSerialization.jsonObject(with:JSONEncoder().encode(expanded.metadata)) as! [String:Any]
+traceObject["frames"]=try JSONSerialization.jsonObject(with:JSONEncoder().encode(expanded.frames))
+check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:traceObject))) != nil,"shared capture reconstructs valid legacy-compatible document")
 payload["text"]="PRIVATE";traceObject["storageBeforeWrite"]=payload
 check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject:traceObject)))==nil,"capture rejects unknown storage payload")
-print("PASS \(checks) actual rotation/failures/usage/write time, prior/current state, bounded protected status, recovery and strict collection; no OS keys")
+print("PASS \(checks) legacy status fixture/strict decoding and current shared completion counts; no OS keys")

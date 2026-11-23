@@ -24,10 +24,16 @@ let policy = DiagnosticLogRetentionPolicy(maximumAutomaticFiles: 4, maximumAutom
 var traceOwner:InputIncidentTrace? = InputIncidentTrace(secureInput:{false},destination: directory, persistentOwnership: true, clock: clock.now, retention: policy)
 var trace:InputIncidentTrace {traceOwner!}
 func manifest(_ directory: URL) throws -> [String: Data] {
-    Dictionary(uniqueKeysWithValues: try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).map {
-        ($0.lastPathComponent, Data(SHA256.hash(data: try Data(contentsOf: $0))))
-    })
+    var result:[String:Data]=[:]
+    for case let file as URL in fm.enumerator(at:directory,includingPropertiesForKeys:[.isRegularFileKey])! {
+        if try file.resourceValues(forKeys:[.isRegularFileKey]).isRegularFile==true {
+            result[String(file.path.dropFirst(directory.path.count+1))]=Data(SHA256.hash(data:try Data(contentsOf:file)))
+        }
+    }
+    return result
 }
+func originalPayload(_ name:String)->Bool {name.hasSuffix(".hqdiag") || name.hasPrefix("incident-") || name=="storage-status.json"}
+
 func snapshot(_ trace: InputIncidentTrace, to directory: URL, review: Bool = true) throws {
     let done = DispatchSemaphore(value: 0)
     var result: Result<Void, Error>?
@@ -60,7 +66,7 @@ trace.recordFailure(action:3,site:"safariInputActivation",reason:"source_switch_
 trace.recordFailure(action:3,site:"safariActivationRetry",reason:"source_switch_timeout")
 trace.mark(); trace.flush()
 let pending = try manifest(directory)
-let pendingFiles = pending.keys.filter { $0.hasPrefix("incident-") }.count
+let pendingFiles = pending.keys.filter { $0.hasSuffix(".hqdiag") && (try? DiagnosticSharedStore.readHeader(directory.appendingPathComponent($0)).0.role) != 1 }.count
 check(pendingFiles==1 || pendingFiles==2, "normal capture persists pre before post closure (observed \(pendingFiles), total \(pending.count))")
 print("INFO: review integration starts with \(pendingFiles) capture files (one means the post is pending)")
 DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { trace.finishCaptureWindowsForTest() }
@@ -85,8 +91,8 @@ let original = try manifest(directory)
 let copyURL = root.appendingPathComponent("copy")
 try snapshot(trace, to: copyURL)
 check(try manifest(directory) == original, "review snapshot does not change captures, ownership index or storage status")
-for name in original.keys where name.hasPrefix("incident-") {
-    check(try Data(contentsOf: directory.appendingPathComponent(name)) == Data(contentsOf: copyURL.appendingPathComponent(name)), "real review copy preserves each source payload")
+for name in original.keys where name.hasPrefix("Shared-v1/") && name.hasSuffix(".hqdiag") {
+    check(try Data(contentsOf: directory.appendingPathComponent(name)) == Data(contentsOf: copyURL.appendingPathComponent(URL(fileURLWithPath:name).lastPathComponent)), "real review copy preserves each source payload")
 }
 let frozen = try manifest(firstURL)
 let env = DiagnosticReviewEnvironment(
@@ -98,7 +104,8 @@ let env = DiagnosticReviewEnvironment(
 let lazyURL=root.appendingPathComponent("lazy")
 try snapshot(trace,to:lazyURL)
 let lazyBefore=try manifest(directory)
-let damagedName=(try fm.contentsOfDirectory(atPath:lazyURL.path)).first{$0.hasPrefix("incident-")}!
+let lazyOriginal=try DiagnosticReviewSnapshot(directory:lazyURL)
+let damagedName=lazyOriginal.incidents[0].originals[0]!.filename
 let damagedPath=lazyURL.appendingPathComponent(damagedName)
 var damaged=try Data(contentsOf:damagedPath);damaged[damaged.count-1] ^= 1
 try damaged.write(to:damagedPath)
@@ -108,7 +115,7 @@ do{_=try lazyReview.files(selected:Set(lazyReview.incidents.map(\.id)),environme
 catch{check(true,"selected body is verified before preview or export")}
 check(try manifest(directory)==lazyBefore,"changing a cloned review file cannot change the live original")
 let failureSource=root.appendingPathComponent("failure-source")
-let failureStore=DiagnosticLogStore(directory:failureSource,policy:policy)
+let failureStore=LegacyFixtureStore(directory:failureSource,policy:policy)
 let failureData=try JSONSerialization.data(withJSONObject:["schema":1,"trigger":1,"incident":1,"phase":0,"runID":UUID().uuidString,"frames":[]] as [String:Any])
 check(failureStore.save(failureData,incident:1,phase:0,automatic:false) == .saved,"failure tests own a separate store")
 let failureBefore=try manifest(failureSource),liveBeforeFailures=try manifest(directory)
@@ -133,16 +140,16 @@ catch DiagnosticLogExport.Failure.timedOut{check(true,"expired request reports a
 check(try manifest(failureSource)==failureBefore && manifest(directory)==liveBeforeFailures && trace.enabled,"space, cancellation and timeout failures preserve source and collection")
 let selected = Set(first.incidents.map(\.id))
 let archive = try DiagnosticReviewArchive(files: first.files(selected: selected, environment: env))
-for file in archive.files where file.path.hasPrefix("incident-") || file.path == "storage-status.json" {
+for file in archive.files where originalPayload(file.path) {
     check(try file.data == Data(contentsOf: firstURL.appendingPathComponent(file.path)), "real writer payload is exported byte-for-byte with original name")
 }
 for _ in 0..<3 { complete(trace, automatic: true) }
 let active = root.appendingPathComponent("active")
 try snapshot(trace, to: active)
 let stored = try DiagnosticReviewSnapshot(directory: active)
-check(stored.incidents.filter { !$0.manual }.count == 2, "automatic retention still rotates whole pairs at its own file quota")
-check(stored.incidents.filter(\.manual).count == 1, "automatic rotation preserves the existing manual incident")
-check(try manifest(firstURL) == frozen, "live collection and rotation do not mutate the reviewed snapshot")
+check(stored.incidents.filter { !$0.manual }.count == 3, "current shared writer retains all recent automatic pairs despite the retired file quota")
+check(stored.incidents.filter(\.manual).count == 1, "new automatic captures preserve the existing manual incident")
+check(try manifest(firstURL) == frozen, "live collection do not mutate the reviewed snapshot")
 let exported = root.appendingPathComponent("saved.zip")
 try archive.save(to: exported)
 check(try Data(contentsOf: exported) == Data(contentsOf: archive.url), "selected ZIP remains exact after ongoing live captures")
@@ -151,11 +158,11 @@ let unzip = Process(); unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditt
 unzip.arguments = ["-x", "-k", exported.path, extracted.path]
 try unzip.run(); unzip.waitUntilExit()
 check(unzip.terminationStatus == 0, "real writer ZIP extracts")
-for file in archive.files where file.path.hasPrefix("incident-") || file.path == "storage-status.json" {
-    check(try Data(contentsOf: extracted.appendingPathComponent("HanQ-Diagnostics").appendingPathComponent(file.path)) == Data(contentsOf: firstURL.appendingPathComponent(file.path)), "extracted original remains exact after collection and rotation")
+for file in archive.files where originalPayload(file.path) {
+    check(try Data(contentsOf: extracted.appendingPathComponent("HanQ-Diagnostics").appendingPathComponent(file.path)) == Data(contentsOf: firstURL.appendingPathComponent(file.path)), "extracted original remains exact after collection")
 }
 let decoder = Process(); decoder.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-decoder.arguments = ["summarize-input-incident.py"] + archive.files.filter { $0.path.hasPrefix("incident-") || $0.path == "storage-status.json" }.map {
+decoder.arguments = ["summarize-input-incident.py"] + archive.files.filter { originalPayload($0.path) }.map {
     extracted.appendingPathComponent("HanQ-Diagnostics").appendingPathComponent($0.path).path
 }
 decoder.standardOutput = FileHandle.nullDevice
@@ -179,8 +186,8 @@ check(!trace.enabled && afterOffReview == beforeOffReview, "collection-OFF revie
 let legacy = root.appendingPathComponent("legacy-export")
 try snapshot(trace, to: legacy, review: false)
 check(!fm.fileExists(atPath: legacy.appendingPathComponent("review-dates.json").path), "legacy full export keeps its original file set")
-// A stopped object still owns its writer lock. Model process exit by releasing
-// it and allowing its already scheduled one-second close callback to finish.
+// Model process exit without losing already completed shared captures. Allow
+// the scheduled close callback to finish before opening a successor writer.
 traceOwner=nil;Thread.sleep(forTimeInterval:1.1)
 let restarted = InputIncidentTrace(destination: directory, persistentOwnership: true, clock: clock.now, retention: policy)
 restarted.flush(); complete(restarted)

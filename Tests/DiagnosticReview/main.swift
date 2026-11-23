@@ -11,7 +11,7 @@ let root = fm.temporaryDirectory.appendingPathComponent("hanq-review-tests-" + U
 try fm.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
 defer { try? fm.removeItem(at: root) }
 let live = root.appendingPathComponent("live")
-let store = DiagnosticLogStore(directory: live, policy: .incidentDefault)
+let store = LegacyFixtureStore(directory: live, policy: .incidentDefault)
 let run = UUID().uuidString
 func capture(_ id: Int, _ phase: Int, runID: String? = nil, trigger: Int? = nil) throws -> Data {
     let cause = trigger ?? (id == 6 ? 2 : 1)

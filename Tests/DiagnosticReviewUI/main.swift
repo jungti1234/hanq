@@ -14,7 +14,7 @@ let fm = FileManager.default
 let root = fm.temporaryDirectory.appendingPathComponent("hanq-review-ui-" + UUID().uuidString)
 try fm.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
 defer { try? fm.removeItem(at: root) }
-let store = DiagnosticLogStore(directory: root.appendingPathComponent("store"), policy: .incidentDefault)
+let store = LegacyFixtureStore(directory: root.appendingPathComponent("store"), policy: .incidentDefault,persistentOwnership:true)
 let run = UUID().uuidString
 for incident in 1...12 {
     for phase in 0...1 {
@@ -209,7 +209,7 @@ check(descendants(failed.window!.contentView!).compactMap{$0 as? NSTextField}.co
 failed.close()
 
 let partialURL=root.appendingPathComponent("partial-snapshot")
-let partialStore=DiagnosticLogStore(directory:root.appendingPathComponent("partial-store"),policy:.incidentDefault)
+let partialStore=LegacyFixtureStore(directory:root.appendingPathComponent("partial-store"),policy:.incidentDefault)
 let partialOriginal=try Data(contentsOf:snapshotURL.appendingPathComponent(snapshot.incidents[0].originals[0]!.filename))
 check(partialStore.save(partialOriginal,incident:snapshot.incidents[0].number,phase:0,automatic:false) == .saved,"fixture legitimately stores a pre without post")
 try partialStore.copyExportSnapshot(to:partialURL,reviewMetadata:true)
@@ -269,6 +269,22 @@ check(disclosure.isHidden,"ordinary document hides file-list control")
 hiddenFiles.selectRowIndexes(IndexSet(integer:sharedRows[0]),byExtendingSelection:false)
 check(disclosure.state == .off && !hiddenPreview.string.contains(".hqdiag"),"returning to group starts collapsed without stale filenames")
 hidden.close()
+// The new previous-record route uses the same hidden preview controller while
+// leaving both the old source and the disabled current collector untouched.
+let oldDirectory=URL(fileURLWithPath:InputIncidentPreferences.namespacePath(root.appendingPathComponent("store").path)!),newDirectory=root.appendingPathComponent("migration-off")
+func oldBytes()throws->[String:Data]{try Dictionary(uniqueKeysWithValues:fm.contentsOfDirectory(atPath:oldDirectory.path).map{($0,try Data(contentsOf:oldDirectory.appendingPathComponent($0)))})}
+let oldBefore=try oldBytes()
+let oldTrace=InputIncidentTrace(destination:newDirectory,initiallyEnabled:false,legacyDirectories:[oldDirectory])
+let oldReview=DiagnosticReviewController(environment:environment)
+oldReview.load(from:oldTrace,legacyIndex:0)
+let oldDeadline=Date().addingTimeInterval(5)
+while !oldReview.hasRecords && Date()<oldDeadline{RunLoop.current.run(until:Date().addingTimeInterval(0.02))}
+if !oldReview.hasRecords{print("INFO previous-record load",descendants(oldReview.window!.contentView!).compactMap{$0 as? NSTextField}.map(\.stringValue))}
+check(oldReview.hasRecords && oldReview.window?.title=="한Q - 이전 진단 기록 내보내기","previous-record controller loads legacy data with a distinct title")
+check(!oldTrace.enabled && !fm.fileExists(atPath:newDirectory.path),"previous-record preview does not enable collection or create current storage")
+let oldAfter=try oldBytes()
+check(oldAfter==oldBefore,"previous-record UI preserves all original source bytes")
+oldReview.close()
 let cancelled = DiagnosticReviewController(environment: environment)
 let cancelledTable = descendants(cancelled.window!.contentView!).compactMap { $0 as? NSTableView }.first { $0.numberOfColumns == 1 }!
 var closes = 0

@@ -17,8 +17,8 @@ func files(_ dir:URL)->[URL]{
 }
 let policy=DiagnosticLogRetentionPolicy(maximumAutomaticFiles:64,maximumAutomaticBytes:100,maximumManualBytes:60)
 let dir=root.appendingPathComponent("quotas")
-let store=DiagnosticLogStore(directory:dir,policy:policy,persistentOwnership:true)
-func pair(_ s:DiagnosticLogStore,_ id:Int,_ automatic:Bool,_ size:Int){for phase in 0...1{check(s.save(Data(repeating:32,count:size),incident:id,phase:phase,automatic:automatic) == .saved,"capture pair saves")}}
+let store=LegacyFixtureStore(directory:dir,policy:policy,persistentOwnership:true)
+func pair(_ s:LegacyFixtureStore,_ id:Int,_ automatic:Bool,_ size:Int){for phase in 0...1{check(s.save(Data(repeating:32,count:size),incident:id,phase:phase,automatic:automatic) == .saved,"capture pair saves")}}
 pair(store,1,true,20);pair(store,2,false,15);pair(store,3,false,15);pair(store,4,true,20)
 check(store.usage.bytes==80 && store.manualUsage.bytes==60,"independent budgets tracked")
 pair(store,5,false,15)
@@ -29,18 +29,18 @@ check(!files(dir).contains{$0.lastPathComponent.hasPrefix("incident-1-")},"autom
 check(files(dir).filter{$0.lastPathComponent.hasPrefix("incident-3-")}.count==2,"automatic rotation preserves manual pair")
 check(store.save(Data(repeating:32,count:61),incident:7,phase:0,automatic:false) == .limit,"oversize manual fails without pruning")
 check(store.save(Data([32]),incident:7,phase:1,automatic:false) == .retired,"failed manual pre cannot create orphan post")
-let restarted=DiagnosticLogStore(directory:dir,policy:policy,persistentOwnership:true)
+let restarted=LegacyFixtureStore(directory:dir,policy:policy,persistentOwnership:true)
 restarted.prepareOwnership()
 check(restarted.manualUsage==store.manualUsage && restarted.usage==store.usage,"both budgets resume after restart")
 pair(restarted,8,false,15)
 check(restarted.manualUsage.bytes==60 && restarted.usage.bytes==80,"restart rotates manual independently")
-let reduced=DiagnosticLogStore(directory:dir,policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:40,maximumManualBytes:30),persistentOwnership:true)
+let reduced=LegacyFixtureStore(directory:dir,policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:40,maximumManualBytes:30),persistentOwnership:true)
 reduced.prepareOwnership()
 check(reduced.usage.bytes==40 && reduced.manualUsage.bytes==30,"lowered budgets prune whole owned pairs")
 
 // Upgrade a real legacy index without treating arbitrary old files as logs.
 let legacyDir=root.appendingPathComponent("legacy")
-let legacy=DiagnosticLogStore(directory:legacyDir,policy:.incidentDefault,persistentOwnership:true)
+let legacy=LegacyFixtureStore(directory:legacyDir,policy:.incidentDefault,persistentOwnership:true)
 let run=UUID().uuidString
 func payload(_ id:Int,_ phase:Int)->Data{Data("{\"schema\":1,\"trigger\":1,\"runID\":\"\(run)\",\"incident\":\(id),\"phase\":\(phase)}".utf8)}
 for id in 1...3{for phase in 0...1{check(legacy.save(payload(id,phase),incident:id,phase:phase,automatic:false) == .saved,"legacy fixture")}}
@@ -52,20 +52,20 @@ for key in ["maximumManualBytes","manualFiles","manualBytes"]{status.removeValue
 status["maximumAutomaticBytes"]=64*1024*1024;object["status"]=status
 try JSONSerialization.data(withJSONObject:object).write(to:index)
 let onePair=payload(3,0).count+payload(3,1).count
-let upgrade=DiagnosticLogStore(directory:legacyDir,policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:32*1024*1024,maximumManualBytes:onePair),persistentOwnership:true)
+let upgrade=LegacyFixtureStore(directory:legacyDir,policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:32*1024*1024,maximumManualBytes:onePair),persistentOwnership:true)
 upgrade.prepareOwnership()
 check(upgrade.manualUsage.files==2 && upgrade.manualUsage.bytes==onePair,"verified legacy manuals migrate into bounded retention")
 check(files(legacyDir).allSatisfy{$0.lastPathComponent.hasPrefix("incident-3-")},"legacy migration keeps latest whole manual pair")
-let protected=DiagnosticLogStore(directory:root.appendingPathComponent("protected"),policy:.investigation,persistentOwnership:true)
+let protected=LegacyFixtureStore(directory:root.appendingPathComponent("protected"),policy:.investigation,persistentOwnership:true)
 for id in 1...40{pair(protected,id,false,20)}
-let protectedNext=DiagnosticLogStore(directory:root.appendingPathComponent("protected"),policy:.investigation,persistentOwnership:true)
+let protectedNext=LegacyFixtureStore(directory:root.appendingPathComponent("protected"),policy:.investigation,persistentOwnership:true)
 protectedNext.prepareOwnership();pair(protectedNext,41,true,20)
 check(protectedNext.manualUsage.files==80 && protectedNext.status.evictedFiles==0,"investigation records never rotate across rebuild/restart")
 
 // Opt-in backups preserve evicted evidence before unlinking any source.
 let backedDir=root.appendingPathComponent("backed")
 let archives=root.appendingPathComponent("archives")
-let backed=DiagnosticLogStore(directory:backedDir,policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:40,maximumManualBytes:40),persistentOwnership:true,archiveDirectory:archives)
+let backed=LegacyFixtureStore(directory:backedDir,policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:40,maximumManualBytes:40),persistentOwnership:true,archiveDirectory:archives)
 pair(backed,1,true,20);pair(backed,2,false,20)
 pair(backed,3,true,20);pair(backed,4,false,20)
 let archiveFiles=try fm.contentsOfDirectory(at:archives,includingPropertiesForKeys:nil)
@@ -82,7 +82,7 @@ for manifest in manifests {
 let deniedArchive=root.appendingPathComponent("denied-archive")
 try fm.createDirectory(at:deniedArchive,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
 try fm.setAttributes([.posixPermissions:0o500],ofItemAtPath:deniedArchive.path)
-let refuse=DiagnosticLogStore(directory:root.appendingPathComponent("refuse"),policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:40),archiveDirectory:deniedArchive)
+let refuse=LegacyFixtureStore(directory:root.appendingPathComponent("refuse"),policy:.init(maximumAutomaticFiles:64,maximumAutomaticBytes:40),archiveDirectory:deniedArchive)
 pair(refuse,1,true,20)
 check(refuse.save(Data(repeating:32,count:20),incident:2,phase:0,automatic:true) == .unavailable,"backup failure stops pruning and new growth")
 check(refuse.usage.bytes==40,"failed archive leaves original pair intact")

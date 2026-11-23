@@ -46,11 +46,11 @@ if mode == "errors" {
     precondition(try! FileManager.default.contentsOfDirectory(atPath:url.path).isEmpty)
     precondition(workspace.publish(Data([1,2])))
     precondition(workspace.publishFailure(Data([3])) == .posix(.probePublish,EEXIST))
-    let invalidStore=DiagnosticLogStore(directory:url.appendingPathComponent("result.json"),policy:.init(maximumAutomaticFiles:4,maximumAutomaticBytes:1024))
+    let invalidStore=LegacyFixtureStore(directory:url.appendingPathComponent("result.json"),policy:.init(maximumAutomaticFiles:4,maximumAutomaticBytes:1024))
     errno=EIO // A policy rejection must not reuse an unrelated syscall's errno.
     precondition(invalidStore.save(Data([1]),incident:1,phase:0,automatic:true) == .unavailable)
     precondition(OperationalDiagnostics.shared.snapshot().entries.contains{$0.failure == .policy(.storagePrepare,2)})
-    let missingStore=DiagnosticLogStore(directory:url.appendingPathComponent("missing/sub"),policy:.init(maximumAutomaticFiles:4,maximumAutomaticBytes:1024))
+    let missingStore=LegacyFixtureStore(directory:url.appendingPathComponent("missing/sub"),policy:.init(maximumAutomaticFiles:4,maximumAutomaticBytes:1024))
     precondition(missingStore.save(Data([1]),incident:1,phase:0,automatic:true) == .unavailable)
     precondition(OperationalDiagnostics.shared.snapshot().entries.contains{$0.failure == .posix(.storagePrepare,ENOENT)})
     try! FileManager.default.removeItem(at:url)

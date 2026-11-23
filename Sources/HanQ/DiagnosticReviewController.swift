@@ -76,7 +76,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func load(from trace: InputIncidentTrace) {
+    func load(from trace: InputIncidentTrace,legacyIndex:Int?=nil) {
+        if legacyIndex != nil{window?.title="한Q - 이전 진단 기록 내보내기"}
         guard !closed else { return }
         generation += 1
         let request = generation
@@ -93,7 +94,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         }
         loadRequest=operation
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("HanQ-Review-" + UUID().uuidString)
-        Self.loadSnapshot(from: trace, directory: directory, request:operation) { [weak self] result in
+        Self.loadSnapshot(from: trace, directory: directory, request:operation,legacyIndex:legacyIndex) { [weak self] result in
             guard let self, !self.closed, self.generation == request else { return }
             self.installLoadResult(result)
         }
@@ -104,8 +105,9 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
     static func loadSnapshot(from trace: InputIncidentTrace,
                              directory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("HanQ-Review-" + UUID().uuidString),
                              request: DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),
+                             legacyIndex:Int?=nil,
                              completion: @escaping (Result<DiagnosticReviewSnapshot, Error>) -> Void) {
-        trace.prepareExport(to: directory, reviewMetadata: true, request:request) { result in
+        let finished:(Result<Void,Error>)->Void = { result in
             worker.async {
                 let loaded: Result<DiagnosticReviewSnapshot, Error>
                 do { try result.get(); loaded = .success(try DiagnosticReviewSnapshot(directory: directory,request:request)) }
@@ -113,6 +115,8 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
                 DispatchQueue.main.async { completion(loaded) }
             }
         }
+        if let index=legacyIndex{trace.prepareLegacyExport(index:index,to:directory,request:request,completion:finished)}
+        else{trace.prepareExport(to:directory,reviewMetadata:true,request:request,completion:finished)}
     }
     func installLoadResult(_ result: Result<DiagnosticReviewSnapshot, Error>) {
         guard !closed else { return }

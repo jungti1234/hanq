@@ -112,7 +112,7 @@ for retry in [DiagnosticStorageIssue.Retry.automatic,.stopped,.notScheduled,.unk
  check(!notice.archiveOnly && notice.readableText.contains(retry.message),"pending-copy notice uses actual retry state \(retry)")
  if retry != .automatic {check(!notice.readableText.contains(DiagnosticStorageIssue.Retry.automatic.message),"stopped or unknown retry never promises automatic saving")}
 }
-for code in [Int(EACCES),Int(EPERM),Int(EROFS)]{check(!DiagnosticWriteBudget.transient(.policy(.storageOwnership,code)),"policy numbers cannot become retryable errno \(code)")}
+for code in [Int(EACCES),Int(EPERM),Int(EROFS)]{check(!LegacyFixtureWriteBudget.transient(.policy(.storageOwnership,code)),"policy numbers cannot become retryable errno \(code)")}
 // Another record waiting in memory must not label a saved selection as rescued.
 var selectionFails=false
 let selectionStore=DiagnosticSharedStore(directory:directory("selection-pending"),preserve:true,writer:{fd,p,n in if selectionFails{errno=ENOSPC;return -1};return Darwin.write(fd,p,n)})

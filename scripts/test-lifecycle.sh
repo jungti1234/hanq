@@ -13,6 +13,6 @@ sources=()
 for source in Sources/HanQ/*.swift; do
   [[ "$source" == Sources/HanQ/main.swift ]] || sources+=("$source")
 done
-swiftc "${link[@]}" -module-cache-path .build/hanq/module-cache "${sources[@]}" "$stage/AppDelegate.swift" Tests/Lifecycle/main.swift -o "$stage/lifecycle-tests"
+swiftc "${link[@]}" -module-cache-path .build/hanq/module-cache "${sources[@]}" "$stage/AppDelegate.swift" Tests/Support/LegacyDiagnosticFixture.swift Tests/Lifecycle/main.swift -o "$stage/lifecycle-tests"
 hanq_test_run "$stage/lifecycle-tests"
 hanq_test_run "$stage/lifecycle-tests" --diagnose-input-incidents "$stage/incidents"

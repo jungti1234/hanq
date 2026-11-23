@@ -17,7 +17,7 @@ import json, sys
 sample = json.load(open(sys.argv[1]))['keyboard_origin']
 assert sample['status'] == 'ready' and sample['bursts'][0]['comparison'] == 'quartz_excess'
 PYTEST
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Bounded/main.swift -o "$stage/bounded-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tests/Support/LegacyDiagnosticFixture.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Bounded/main.swift -o "$stage/bounded-tests"
 hanq_test_run "$stage/bounded-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/main.swift -o "$stage/diagnostics-tests"
 hanq_test_run "$stage/diagnostics-tests"
@@ -27,9 +27,9 @@ hanq_test_run "$stage/diagnostics-tests" --expect-disabled --diagnose-input "$st
 hanq_test_run "$stage/diagnostics-tests" --diagnose-input
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Incidents/main.swift -o "$stage/incident-tests"
 hanq_test_run "$stage/incident-tests"
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Retention/main.swift -o "$stage/retention-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tests/Support/LegacyDiagnosticFixture.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Retention/main.swift -o "$stage/retention-tests"
 hanq_test_run "$stage/retention-tests"
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Readiness/main.swift -o "$stage/storage-readiness-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Support/LegacyDiagnosticFixture.swift Tests/Diagnostics/Readiness/main.swift -o "$stage/storage-readiness-tests"
 hanq_test_run "$stage/storage-readiness-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Decisions/main.swift -o "$stage/decision-tests"
 hanq_test_run "$stage/decision-tests"
@@ -39,9 +39,9 @@ swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache So
 hanq_test_run "$stage/observation-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/ObservationTiming/main.swift -o "$stage/observation-timing-tests"
 hanq_test_run "$stage/observation-timing-tests"
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/StorageStatus/main.swift -o "$stage/storage-status-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tests/Support/LegacyDiagnosticFixture.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/StorageStatus/main.swift -o "$stage/storage-status-tests"
 hanq_test_run "$stage/storage-status-tests"
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Persistence/main.swift -o "$stage/persistence-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tests/Support/LegacyDiagnosticFixture.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Persistence/main.swift -o "$stage/persistence-tests"
 hanq_test_run "$stage/persistence-tests"
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Shapes/main.swift -o "$stage/shape-tests"
 hanq_test_run "$stage/shape-tests"
@@ -71,10 +71,10 @@ assert [h['stage'] for h in r['hud']]==['requested','ordered','first_appkit_draw
 print('PASS switch timeline end-to-end summary; selection/drawing are not IME receipt')
 PY
 
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Export/main.swift -o "$stage/export-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tests/Support/LegacyDiagnosticFixture.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Export/main.swift -o "$stage/export-tests"
 hanq_test_run "$stage/export-tests"
 
-swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Reboot/main.swift -o "$stage/reboot-tests"
+swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tests/Support/LegacyDiagnosticFixture.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tests/Diagnostics/Reboot/main.swift -o "$stage/reboot-tests"
 hanq_test_run "$stage/reboot-tests"
 
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/IndirectInfluence/main.swift -o "$stage/indirect-tests"

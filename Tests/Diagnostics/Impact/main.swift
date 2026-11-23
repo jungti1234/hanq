@@ -85,14 +85,14 @@ if profile=="blocked" {
  // Release independently, so no input callback can be hidden behind the hold.
  DispatchQueue.global(qos:.userInitiated).asyncAfter(deadline:.now()+0.06){releaseHeld.signal()}
 }
-// Real independent store rotation runs only with diagnostics ON. It uses the
-// same product store and private test files, never the user's incident folder.
+// Historical rotation pressure uses the frozen legacy fixture, not today's
+// shared writer. Never present this profile as current product storage cost.
 let storageDone=DispatchSemaphore(value:0)
-var pressureStatus:DiagnosticLogStore.Status?
+var pressureStatus:LegacyFixtureStore.Status?
 if profile=="storage",enabled {
  let pressure=output.deletingLastPathComponent().appendingPathComponent("pressure")
  DispatchQueue.global(qos:.utility).async {
-  let store=DiagnosticLogStore(directory:pressure,policy:.init(maximumAutomaticFiles:6,maximumAutomaticBytes:2*1024*1024))
+  let store=LegacyFixtureStore(directory:pressure,policy:.init(maximumAutomaticFiles:6,maximumAutomaticBytes:2*1024*1024))
   let data=Data(repeating:32,count:256*1024)
   for id in 1...24{
    _=store.save(data,incident:id,phase:0,automatic:true);_=store.save(data,incident:id,phase:1,automatic:true)

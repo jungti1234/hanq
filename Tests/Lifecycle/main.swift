@@ -325,7 +325,7 @@ do {
  let root=fm.temporaryDirectory.appendingPathComponent("hanq-interruption-feedback-"+UUID().uuidString)
  try fm.createDirectory(at:root,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
  defer {try? fm.removeItem(at:root)}
- let store=DiagnosticLogStore(directory:root.appendingPathComponent("store"),policy:.incidentDefault)
+ let store=LegacyFixtureStore(directory:root.appendingPathComponent("store"),policy:.incidentDefault)
  let data=try JSONSerialization.data(withJSONObject:["schema":1,"incident":1,"phase":0,"trigger":5,"frames":[]] as [String:Any])
  precondition(store.save(data,incident:1,phase:0,automatic:true) == .saved)
  let directory=root.appendingPathComponent("snapshot")

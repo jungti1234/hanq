@@ -394,7 +394,7 @@ final class DiagnosticCriticalLane {
         Logger(subsystem:"taek.in.hanq",category:"critical-storage").error("criticalStorage policy=\(code,privacy:.public)")
     }
     private func failed(_ code:Int32) {
-        if !DiagnosticWriteBudget.transient(.posix(.storageWrite,code)){blocked=true}
+        if !DiagnosticStorageRecovery.transient(.posix(.storageWrite,code)){blocked=true}
         lock.lock();writeFailures+=1;lastErrno=Int(code)
         currentStorageIssue=DiagnosticStorageIssue(component:.criticalErrors,failure:.posix(.storageWrite,code),retry:blocked ? .stopped:.automatic,milliseconds:Int64(wallClock()*1000))
         lock.unlock()
@@ -706,7 +706,7 @@ struct InputIncidentPreferences {
         FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
             .appendingPathComponent("HanQ Diagnostics",isDirectory:true).appendingPathComponent("InputIncidents",isDirectory:true)
     }
-    typealias Launch=(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool,bounded:Bool,valid:Bool)
+    typealias Launch=(directory:URL,enabled:Bool,persistent:Bool,preserve:Bool,bounded:Bool,valid:Bool,legacy:[URL])
     // Foundation leaves a dangling directory alias unresolved. Walk links even
     // when their target/suffix does not yet exist; this is a read-only preflight,
     // not authority to bypass the writer's ownership/no-follow checks.
@@ -736,38 +736,55 @@ struct InputIncidentPreferences {
         guard let path=namespacePath(directory.path)?.lowercased(),let shared=namespacePath(shared.path)?.lowercased() else{return false}
         return path != shared && !path.hasPrefix(shared+"/") && !shared.hasPrefix(path=="/" ? "/":path+"/")
     }
-    private static func bounded(_ value:String?,enabled:Bool)->Launch {
-        guard let value,value.hasPrefix("/"),!value.contains("\0") else{return (defaultDirectory,false,true,false,true,false)}
-        let directory=URL(fileURLWithPath:value).standardizedFileURL
-        let safe=boundedNamespaceIsSeparate(directory)
-        return (directory,enabled,true,false,true,safe)
+    static let legacyDirectoriesKey="inputIncidentLegacyDirectories"
+    static func legacyDirectories(defaults:UserDefaults)->[URL]? {
+        var values:[String]=[]
+        if let stored=defaults.object(forKey:legacyDirectoriesKey){
+            guard let list=stored as? [String] else{return nil};values=list
+        }
+        if let old=defaults.object(forKey:boundedDirectoryKey){
+            guard let path=old as? String else{return nil};values.append(path)
+        }
+        guard values.count<=32 else{return nil}
+        var seen=Set<String>(),result:[URL]=[]
+        for value in values {
+            guard value.hasPrefix("/"),!value.contains("\0") else{return nil}
+            // Accept the macOS system aliases used by older launch tools,
+            // without accepting arbitrary links into a different namespace.
+            let path=value.hasPrefix("/tmp/") || value.hasPrefix("/var/") ? "/private"+value:value
+            let url=URL(fileURLWithPath:path)
+            guard boundedNamespaceIsSeparate(url),namespacePath(path)==url.path else{return nil}
+            if seen.insert(url.path).inserted{result.append(url)}
+        }
+        return result
+    }
+    @discardableResult static func commitLegacyMigration(defaults:UserDefaults,expected:[URL])->Bool {
+        // Never erase a concurrently changed or malformed preference. Record
+        // the old location durably before retiring its write-mode selector.
+        guard defaults.object(forKey:boundedDirectoryKey) != nil else{return true}
+        guard legacyDirectories(defaults:defaults)?.map(\.path)==expected.map(\.path) else{return false}
+        let paths=expected.map(\.path)
+        defaults.set(paths,forKey:legacyDirectoriesKey)
+        guard defaults.synchronize(),defaults.stringArray(forKey:legacyDirectoriesKey)==paths else{return false}
+        defaults.removeObject(forKey:boundedDirectoryKey)
+        return defaults.synchronize() && defaults.object(forKey:boundedDirectoryKey)==nil
     }
     static func launch(arguments:[String],defaults:UserDefaults)->Launch {
-        let bounded=arguments.indices.filter{arguments[$0].hasPrefix("--bounded-input-incidents")}
-        if !bounded.isEmpty {
-            let modes=arguments.filter{["--bounded-input-incidents","--preserve-input-incidents","--diagnose-input-incidents"].contains($0)}
-            guard bounded.count==1,let i=bounded.first,arguments[i]=="--bounded-input-incidents",modes.count==1,
-                  i+1<arguments.count,arguments[i+1].hasPrefix("/"),!arguments[i+1].contains("\0") else{
-                return (defaultDirectory,false,true,false,true,false)
-            }
-            // The bounded mode must never adopt the shared diagnostic namespace,
-            // including an alias or an ancestor that contains preserved logs.
-            return self.bounded(arguments[i+1],enabled:true)
+        // Retired flags must fail explicitly, never turn a bounded investigation
+        // into an unbounded preserve run or silently choose a different folder.
+        if arguments.contains(where:{$0.hasPrefix("--bounded-input-incidents")}) {
+            return (defaultDirectory,false,true,false,false,false,[])
         }
         if let i=arguments.firstIndex(of:"--preserve-input-incidents"),i+1<arguments.count,arguments[i+1].hasPrefix("/") {
-            return (URL(fileURLWithPath:arguments[i+1]),true,true,true,false,true)
+            return (URL(fileURLWithPath:arguments[i+1]),true,true,true,false,true,[])
         }
         if let i=arguments.firstIndex(of:"--diagnose-input-incidents"),i+1<arguments.count,!arguments[i+1].hasPrefix("--") {
-            return (URL(fileURLWithPath:arguments[i+1]),true,false,true,false,true)
+            return (URL(fileURLWithPath:arguments[i+1]),true,false,true,false,true,[])
         }
-        // An explicitly configured bounded route also applies to login and
-        // permission-recovery launches. Explicit investigation arguments above
-        // retain priority so another session keeps its own destination.
-        if let value=defaults.object(forKey:boundedDirectoryKey) {
-            return self.bounded(value as? String,enabled:defaults.bool(forKey:key))
-        }
-        return (defaultDirectory,defaults.bool(forKey:key),true,false,false,true)
+        guard let previous=legacyDirectories(defaults:defaults) else{return (defaultDirectory,false,true,false,false,false,[])}
+        return (defaultDirectory,defaults.bool(forKey:key),true,false,false,true,previous)
     }
+
 }
 
 // Fixed semantic hints, never proof of an editor's independent document model.
@@ -1607,10 +1624,10 @@ final class InputIncidentTrace {
     }
     static let shared:InputIncidentTrace = {
         let option=InputIncidentPreferences.launch(arguments:ProcessInfo.processInfo.arguments,defaults:.standard)
-        guard option.valid else{fputs("HanQ: invalid isolated bounded diagnostic directory; no shared logs were opened.\n",stderr);_exit(64)}
+        guard option.valid else{fputs("HanQ: retired --bounded-input-incidents option or invalid legacy diagnostic location; no logs were opened. Use --preserve-input-incidents only for explicitly preserved investigations.\n",stderr);_exit(64)}
         let archive = !option.bounded && UserDefaults.standard.bool(forKey:InputIncidentPreferences.archiveBeforePruningKey)
             ? InputIncidentPreferences.defaultDirectory.deletingLastPathComponent().appendingPathComponent("InvestigationArchives"):nil
-        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive,boundedStorage:option.bounded)
+        return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive,legacyDirectories:option.legacy,migration:option.legacy.isEmpty ? nil:{InputIncidentPreferences.commitLegacyMigration(defaults:.standard,expected:option.legacy)})
     }()
     private let runID=UUID().uuidString
     private var recentRecoveryFailures:[RecoveryFailure]=[]
@@ -1670,7 +1687,8 @@ final class InputIncidentTrace {
     private let sharedStore:DiagnosticSharedStore?
     let preservesDiagnostics:Bool
     private var storageRetryTimer:DispatchSourceTimer?
-    private let limitsWrites:Bool
+    // Capture scheduling only; production persistence always uses shared storage.
+    private let eagerPreCapture:Bool
     private let clock:()->Double
     // Default remains the live OS security state; synthetic fixtures inject their state.
     fileprivate let secureInput:()->Bool
@@ -1698,9 +1716,9 @@ final class InputIncidentTrace {
     private var readinessRetryAt=0.0,readinessRetryDelay=1.0
     private var lastJournalIssues:[DiagnosticStorageIssue]=[]
     private var manualCapacityLimited=false // Writer queue; refresh only while admission is blocked.
-    private var lastStorageNotice:Int?
-    private var acceptedPres=Set<Int>() // Serial writer only; bounded by open windows.
-    init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=65536,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,boundedStorage:Bool=false,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,sharedWriter:OperationalIO.Write?=nil,applicationResolver:((pid_t)->DiagnosticApplicationRegistry.Resolved?)?=nil,writer:((Capture)->Void)?=nil){
+    let legacyDirectories:[URL]
+    private var migration:(()->Bool)?
+    init(secureInput:@escaping ()->Bool={IsSecureEventInputEnabled()},destination:URL?,initiallyEnabled:Bool=true,persistentOwnership:Bool=false,capacity:Int=65536,clock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},retention:DiagnosticLogRetentionPolicy = .incidentDefault,archiveDirectory:URL?=nil,legacyDirectories:[URL]=[],migration:(()->Bool)?=nil,decisionCapacity:Int=4096,observationCapacity:Int=4096,readCapacity:Int=128,decisionClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},observationClock:@escaping ()->UInt64={DispatchTime.now().uptimeNanoseconds},callbackCPU:@escaping ()->UInt64?=InputIncidentTrace.callbackThreadCPU,sharedWriter:OperationalIO.Write?=nil,applicationResolver:((pid_t)->DiagnosticApplicationRegistry.Resolved?)?=nil,writer:((Capture)->Void)?=nil){
         self.secureInput=secureInput
         if let applicationResolver{applicationRegistry=DiagnosticApplicationRegistry(resolve:applicationResolver)}
         self.observationCapacity=max(4,min(observationCapacity,16384));self.readCapacity=max(1,min(readCapacity,128))
@@ -1720,11 +1738,10 @@ final class InputIncidentTrace {
         overflowSignals=(destination != nil || writer != nil) ? (0..<310).map{_ in DispatchSemaphore(value:0)}:[]
         self.destinationDirectory=destination
         self.preservesDiagnostics=archiveDirectory != nil || retention.maximumAutomaticBytes==Int.max
-        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership,archiveDirectory:archiveDirectory,requiresBoundedPriorPolicy:boundedStorage,
-            writeBudget:persistentOwnership && archiveDirectory==nil && retention.maximumAutomaticBytes != Int.max ? DiagnosticWriteBudget():nil)}
-        let sharedFormat=retention.maximumAutomaticBytes==Int.max || (retention.maximumAutomaticFiles==64 && retention.maximumAutomaticBytes==32*1024*1024 && retention.maximumManualBytes==16*1024*1024)
-        self.sharedStore=writer==nil && !boundedStorage && sharedFormat ? destination.map{DiagnosticSharedStore(directory:$0,preserve:archiveDirectory != nil || retention.maximumAutomaticBytes==Int.max,writer:sharedWriter ?? {Darwin.write($0,$1,$2)})}:nil
-        self.limitsWrites=persistentOwnership && archiveDirectory==nil && retention.maximumAutomaticBytes != Int.max
+        self.storage=destination.map{DiagnosticLogStore(directory:$0,policy:retention,persistentOwnership:persistentOwnership)}
+        self.legacyDirectories=legacyDirectories;self.migration=migration
+        self.sharedStore=writer==nil ? destination.map{DiagnosticSharedStore(directory:$0,preserve:archiveDirectory != nil || retention.maximumAutomaticBytes==Int.max,writer:sharedWriter ?? {Darwin.write($0,$1,$2)})}:nil
+        self.eagerPreCapture=persistentOwnership && archiveDirectory==nil && retention.maximumAutomaticBytes != Int.max
         self.configured=destination != nil || writer != nil;self.gate=DiagnosticCollectionGate(self.configured && initiallyEnabled)
         self.capacity=max(1,min(capacity,65536));self.clock=clock;self.callbackCPU=callbackCPU;origin=clock();self.writer=writer
         ring=DiagnosticFrameHistory(capacity:self.configured && initiallyEnabled ? self.capacity:0)
@@ -1734,8 +1751,9 @@ final class InputIncidentTrace {
             queue.sync {
                 _ = storage?.verifyReadiness()
                 let sharedReady=sharedStore?.prepare() ?? true
+                if sharedReady,storage?.readiness.ready==true,migration?()==true{self.migration=nil}
                 if sharedReady,let token=DiagnosticStorageStartup.token {
-                    let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID,bounded:boundedStorage))
+                    let receipt=try? JSONEncoder().encode(DiagnosticReadinessReceipt.make(token:token,runID:runID,bounded:false))
                     _ = storage?.verifyReadiness(receipt:receipt,name:DiagnosticReadinessReceipt.name(token))
                 }
                 captures=max(storage?.lastCaptureIncident ?? 0,sharedStore?.lastCaptureIncident ?? 0)
@@ -1754,6 +1772,7 @@ final class InputIncidentTrace {
                 let previous=self.sharedStore?.stats.lastFailure
                 let wasReady=self.storage?.readiness.ready
                 _ = self.sharedStore?.drain()
+                if self.sharedStore?.hasVerifiedWrite==true,self.migration?()==true{self.migration=nil}
                 if self.enabled,let storage=self.storage,!storage.readiness.ready,
                    self.sharedStore?.hasVerifiedWrite != true,ProcessInfo.processInfo.systemUptime>=self.readinessRetryAt {
                     let ready=storage.verifyReadiness().ready
@@ -1824,8 +1843,7 @@ final class InputIncidentTrace {
         // OFF counts cancelled protected requests even if publication was queued.
         decisionQueue.async{[self] in queue.async{[self] in
             guard gate.generation==paused else{DispatchQueue.main.async{completion?()};return}
-            acceptedPres.removeAll()
-            if active,configured{_ = storage?.verifyReadiness();_ = sharedStore?.prepare()}
+            if active,configured{_ = storage?.verifyReadiness();if sharedStore?.prepare()==true,storage?.readiness.ready==true,migration?()==true{migration=nil}}
             else{storage?.withdrawReadiness()}
             let last=max(storage?.lastCaptureIncident ?? 0,sharedStore?.lastCaptureIncident ?? 0)
             decisionQueue.async{[self] in
@@ -1957,7 +1975,7 @@ final class InputIncidentTrace {
     private func backlogSnapshot()->CaptureBacklog {
         CaptureBacklog(automaticCapacity:sharedStore==nil ? 16:128,manualCapacity:4,requestCapacityPerTrigger:16,requestsPerWindow:32,
             pendingAutomatic:windows.values.filter{$0.before.trigger != .manual}.count,pendingManual:windows.values.filter{$0.before.trigger == .manual}.count,
-            requested:captureRequested,merged:captureMerged,deferred:captureDeferred,requestOverflow:captureRequestOverflow,windowOverflow:captureWindowOverflow,postOverflow:capturePostOverflow,discardedOnDisable:captureDiscarded,submittedWindows:submittedWindows,completedWindows:completedWindows,rateSuppressed:limitsWrites ? captureRateSuppressed:nil)
+            requested:captureRequested,merged:captureMerged,deferred:captureDeferred,requestOverflow:captureRequestOverflow,windowOverflow:captureWindowOverflow,postOverflow:capturePostOverflow,discardedOnDisable:captureDiscarded,submittedWindows:submittedWindows,completedWindows:completedWindows,rateSuppressed:eagerPreCapture ? captureRateSuppressed:nil)
     }
     private func collectCaptureOverflow(){
         for (index,signal) in captureOverflowSignals.enumerated(){
@@ -2088,7 +2106,7 @@ final class InputIncidentTrace {
                     OperationalDiagnostics.shared.record(.policy(.captureDisposition,8),context:linked,observation:true)
                     scheduleClose(window);return
                 }
-                if sharedStore==nil,!limitsWrites,reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
+                if sharedStore==nil,!eagerPreCapture,reason != .manual,reason != .recoveryStarted,let window=windows.values.filter({!$0.closed && $0.before.trigger != .manual && $0.requests.count<32 && $0.post.count<capacity && request.milliseconds-($0.requests.last?.milliseconds ?? 0)<1000}).max(by:{$0.before.incident<$1.before.incident}) {
                     window.requests.append(request);captureMerged[reason.rawValue,default:0]+=1
                     let code=reason == window.before.trigger ? reason.rawValue%8:reason.rawValue%8+8
                     observationOmitted[observationCode(.capture,.main,code),default:0]+=1
@@ -2106,7 +2124,7 @@ final class InputIncidentTrace {
                 // immediate pre would retire that older automatic incident.
                 let intervalBlocked=clock()-lastTrigger<10
                 let orderBlocked=windows.values.contains{$0.deferred && !$0.submitted}
-                let deferred = sharedStore==nil && !limitsWrites && reason != .manual && (intervalBlocked || orderBlocked)
+                let deferred = sharedStore==nil && !eagerPreCapture && reason != .manual && (intervalBlocked || orderBlocked)
                 if deferred{
                     captureDeferred[reason.rawValue,default:0]+=1
                     observationOmitted[observationCode(.capture,.main,reason.rawValue%8+8),default:0]+=1
@@ -2191,7 +2209,7 @@ final class InputIncidentTrace {
         queue.async{[self] in
             let attemptedPost=gate.generation==generation
             if !attemptedPost{manual?.finish(.incomplete)}
-            if limitsWrites {
+            if eagerPreCapture {
                 if attemptedPost{write(after,lease:postLease,manual:manual)}
             }else {
                 if writeBefore,attemptedPost{write(before,manual:manual)}
@@ -2218,29 +2236,7 @@ final class InputIncidentTrace {
             storageObserver?()
             return
         }
-        guard let storage else{manual?.finish(.unavailable);return}
-        var result=0
-        defer {
-            if result==DiagnosticLogStore.Result.saved.rawValue{manual?.saved(phase:capture.phase)}else{manual?.finish(.incomplete)}
-            if capture.phase==1{acceptedPres.remove(capture.incident)}
-            let frame=capture.frames.last
-            OperationalDiagnostics.shared.record(.policy(.captureDisposition,result),context:.init(trace:capture.runID,incident:capture.incident,
-                sequence:frame?.sequence ?? 0,lane:frame?.lane.rawValue ?? 0,kind:frame?.kind.rawValue ?? 0,
-                category:capture.phase,count:frame?.count ?? 0,episode:frame?.onsetObservation?.episode ?? 0),observation:true)
-            if result != lastStorageNotice || !storage.readiness.ready || capture.trigger == .manual {
-                lastStorageNotice=result;storageObserver?()
-            }
-        }
-        if limitsWrites,capture.phase==1,!acceptedPres.contains(capture.incident){result=7;return}
-        if let rejection=storage.rejectBeforeEncoding(automatic:capture.trigger != .manual,phase:capture.phase){result=rejection.rawValue;return}
-        var annotated=capture;annotated.storageBeforeWrite=storage.status
-        do {
-            let data=try JSONEncoder().encode(annotated)
-            result=storage.save(data,incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual).rawValue
-            if capture.phase==0,result==DiagnosticLogStore.Result.saved.rawValue{acceptedPres.insert(capture.incident)}
-        } catch {
-            storage.encodingFailed(incident:capture.incident,phase:capture.phase,automatic:capture.trigger != .manual);result=5
-        }
+        manual?.finish(.unavailable)
     }
     // No extra event tag, AX call, event copy, key post or source selection.
     func event(_ lane:Lane,_ type:CGEventType,_ event:CGEvent,consumed:Bool=false,duration:Double=0,started:CallbackStart?=nil){
@@ -2699,6 +2695,16 @@ final class InputIncidentTrace {
     }
     // Freeze the export's event boundary on the decision queue. New incidents
     // do not extend this wait; already requested post-captures finish first.
+    func prepareLegacyExport(index:Int,to directory:URL,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),completion:@escaping(Result<Void,Error>)->Void){
+        queue.async{[self] in
+            do {
+                guard legacyDirectories.indices.contains(index) else{throw DiagnosticLogExport.Failure.unavailable}
+                let previous=DiagnosticLogStore(directory:legacyDirectories[index],policy:.investigation,persistentOwnership:true,readOnly:true)
+                try previous.copyExportSnapshot(to:directory,reviewMetadata:true,request:request)
+                completion(.success(()))
+            }catch{completion(.failure(error))}
+        }
+    }
     func prepareExport(to directory:URL,reviewMetadata:Bool=false,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),completion:@escaping(Result<Void,Error>)->Void){
         decisionQueue.async{[self] in
             let incidents=Set(windows.keys)
@@ -2948,39 +2954,7 @@ struct DiagnosticLogRetentionPolicy {
     }
 }
 
-// Serial-writer accounting, separate from retained size. Reservations are
-// durable BEFORE payload writes, include metadata and are never refunded.
-// Fixed accounting windows start on first use, not at calendar boundaries.
-final class DiagnosticWriteBudget {
-    struct Limits {
-        var automaticHour=64*1024*1024,automaticDay=256*1024*1024
-        var manualHour=32*1024*1024,manualDay=128*1024*1024
-        var automaticEventsHour=48,automaticEventsDay=192
-    }
-    private struct Ledger:Codable {
-        var schema=1
-        var hour:Double,day:Double,last:Double
-        var automaticHour=0,automaticDay=0,manualHour=0,manualDay=0
-        var eventsHour=0,eventsDay=0
-    }
-    private let limits:Limits,clock:()->Double
-    private let writer:OperationalIO.Write
-    private var ledger:Ledger?
-    private var identity:stat?
-    private var failed=false,permanentFailure=false
-    private var retryAt=0.0,retryDelay=1.0
-    private let retryClock:()->Double
-    private let name:String,requiredMarker:String
-    private(set) var lastFailure:OperationalFailure?
-    private(set) var suppressedAutomatic=0,suppressedManual=0,persistenceFailures=0
-    private(set) var actualBytes=0
-    init(limits:Limits=Limits(),clock:@escaping ()->Double={Date().timeIntervalSince1970},
-         retryClock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},
-         name:String=".write-budget-v1.ledger",requiredMarker:String=".automatic-ownership-v1.index",
-         writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}) {
-        self.limits=limits;self.clock=clock;self.retryClock=retryClock;self.writer=writer
-        self.name=name;self.requiredMarker=requiredMarker
-    }
+enum DiagnosticStorageRecovery {
     static func transient(_ error:OperationalFailure)->Bool {
         // A denied or read-only destination can recover without replacing this
         // writer. Every retry still runs its ownership/identity checks. Never
@@ -2990,119 +2964,6 @@ final class DiagnosticWriteBudget {
         let code=Int32(clamping:error.domain == .posix ? error.code:error.underlyingPOSIX)
         if [ENOSPC,EDQUOT,EIO,EAGAIN,EINTR,EMFILE,ENFILE,ENOMEM,EBUSY,EACCES,EPERM,EROFS].contains(code){return true}
         return error.domain == .cocoa && [NSFileReadNoPermissionError,NSFileWriteNoPermissionError,NSFileWriteVolumeReadOnlyError].contains(error.code)
-    }
-    var summary:[String:Int] {
-        let v=ledger
-        return ["automaticHourLimit":limits.automaticHour,"automaticDayLimit":limits.automaticDay,
-                "manualHourLimit":limits.manualHour,"manualDayLimit":limits.manualDay,
-                "automaticHour":v?.automaticHour ?? 0,"automaticDay":v?.automaticDay ?? 0,
-                "manualHour":v?.manualHour ?? 0,"manualDay":v?.manualDay ?? 0,
-                "eventsHour":v?.eventsHour ?? 0,"eventsDay":v?.eventsDay ?? 0,
-                "suppressedAutomatic":suppressedAutomatic,"suppressedManual":suppressedManual,
-                "persistenceFailures":persistenceFailures]
-    }
-    private func fault(_ error:OperationalFailure)->Bool {
-        lastFailure=error
-        failed=true;permanentFailure = !Self.transient(error)
-        retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
-        persistenceFailures=min(persistenceFailures,Int.max-1)+1
-        OperationalDiagnostics.shared.record(error);return false
-    }
-    private func prepare(_ dir:Int32)->Bool {
-        if failed {
-            guard !permanentFailure,retryClock()>=retryAt else{return false}
-            failed=false
-        }
-        lastFailure=nil
-        if ledger != nil{return true}
-        let now=clock();guard now.isFinite,now>=0 else{return fault(.policy(.budgetPersistence,1))}
-        let fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
-        if fd<0 {
-            let code=errno;guard code==ENOENT else{return fault(.posix(.budgetPersistence,code))}
-            // A ledger missing from an upgraded store is damage, not new credit.
-            let index=openat(dir,requiredMarker,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
-            if index>=0 {
-                defer{close(index)}
-                guard let data=try? FileHandle(fileDescriptor:index,closeOnDealloc:false).read(upToCount:8*1024*1024+1),
-                      let object=try? JSONSerialization.jsonObject(with:data) as? [String:Any],
-                      (object["writeBudgetRequired"] as? Bool != true && requiredMarker == ".automatic-ownership-v1.index") else{return fault(.policy(.budgetPersistence,2))}
-            }else if errno != ENOENT{return fault(.posix(.budgetPersistence,errno))}
-            ledger=Ledger(hour:now,day:now,last:now);return true
-        }
-        defer{close(fd)}
-        var info=stat()
-        guard fstat(fd,&info)==0 else{return fault(.posix(.budgetPersistence,errno))}
-        guard info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o7777==0o600,info.st_size>0,info.st_size<=4096,
-              let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:4097),
-              let value=try? JSONDecoder().decode(Ledger.self,from:data),value.schema==1,
-              [value.hour,value.day,value.last].allSatisfy({$0.isFinite && $0>=0}),value.hour<=value.last,value.day<=value.last,
-              [value.automaticHour,value.automaticDay,value.manualHour,value.manualDay,value.eventsHour,value.eventsDay].allSatisfy({$0>=0 && $0<=Int.max/2})
-        else{return fault(.policy(.budgetPersistence,3))}
-        identity=info;ledger=value;return true
-    }
-    private func same(_ left:stat,_ right:stat)->Bool {
-        left.st_dev==right.st_dev && left.st_ino==right.st_ino && left.st_size==right.st_size &&
-        left.st_mtimespec.tv_sec==right.st_mtimespec.tv_sec && left.st_mtimespec.tv_nsec==right.st_mtimespec.tv_nsec &&
-        left.st_ctimespec.tv_sec==right.st_ctimespec.tv_sec && left.st_ctimespec.tv_nsec==right.st_ctimespec.tv_nsec
-    }
-    var waitingForRecovery:Bool{failed && (permanentFailure || retryClock()<retryAt)}
-    func rejectExhaustedEvent()->Bool {
-        guard let value=ledger else{return false}
-        let wall=clock();guard wall.isFinite,wall>=0 else{return false}
-        let now=max(value.last,wall)
-        let blocked=(now-value.hour<3600 && value.eventsHour>=limits.automaticEventsHour) ||
-            (now-value.day<86400 && value.eventsDay>=limits.automaticEventsDay)
-        if blocked{suppressedAutomatic=min(suppressedAutomatic,Int.max-1)+1}
-        return blocked
-    }
-    func reserve(_ bytes:Int,automatic:Bool,event:Bool,dir:Int32)->Bool {
-        guard bytes>=0,bytes<=Int.max-4096,prepare(dir) else{return false}
-        var value=ledger!
-        let wall=clock();guard wall.isFinite,wall>=0 else{return fault(.policy(.budgetPersistence,1))}
-        // Clock rollback never grants another window, including across relaunch.
-        let now=max(value.last,wall);value.last=now
-        if now-value.hour>=3600{value.hour=now;value.automaticHour=0;value.manualHour=0;value.eventsHour=0}
-        if now-value.day>=86400{value.day=now;value.automaticDay=0;value.manualDay=0;value.eventsDay=0}
-        let charge=bytes+4096 // includes this <=4KiB atomic ledger replacement
-        let hour=automatic ? value.automaticHour:value.manualHour,day=automatic ? value.automaticDay:value.manualDay
-        let allowed=charge<=(automatic ? limits.automaticHour:limits.manualHour)-min(hour,automatic ? limits.automaticHour:limits.manualHour) &&
-            charge<=(automatic ? limits.automaticDay:limits.manualDay)-min(day,automatic ? limits.automaticDay:limits.manualDay) &&
-            (!automatic || !event || (value.eventsHour<limits.automaticEventsHour && value.eventsDay<limits.automaticEventsDay))
-        guard allowed else {
-            if automatic{suppressedAutomatic=min(suppressedAutomatic,Int.max-1)+1}else{suppressedManual=min(suppressedManual,Int.max-1)+1}
-            ledger=value;return false
-        }
-        if automatic{value.automaticHour+=charge;value.automaticDay+=charge;if event{value.eventsHour+=1;value.eventsDay+=1}}
-        else{value.manualHour+=charge;value.manualDay+=charge}
-        guard let data=try? JSONEncoder().encode(value),data.count<=4096 else{return fault(.policy(.budgetPersistence,4))}
-        if let identity {
-            var current=stat()
-            guard fstatat(dir,name,&current,AT_SYMLINK_NOFOLLOW)==0,same(identity,current) else{return fault(.policy(.budgetPersistence,5))}
-        }
-        // Charge the attempted transaction in memory BEFORE I/O. A failed or
-        // partially written reservation is never refunded on a later retry.
-        ledger=value
-        let temporary=".budget-"+UUID().uuidString
-        let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{return fault(.posix(.budgetPersistence,errno))}
-        defer{close(fd);unlinkat(dir,temporary,0)}
-        if let failure=OperationalIO.writeAll(data,to:fd,stage:.budgetPersistence,write:{[self] fd,p,n in
-            let count=writer(fd,p,n);if count>0{actualBytes+=count};return count
-        }){return fault(failure)}
-        guard fsync(fd)==0 else{return fault(.posix(.budgetPersistence,errno))}
-        if identity == nil {
-            guard linkat(dir,temporary,dir,name,0)==0 else{return fault(.posix(.budgetPersistence,errno))}
-        }else {
-            guard renameat(dir,temporary,dir,name)==0 else{return fault(.posix(.budgetPersistence,errno))}
-        }
-        // Remember OUR published inode even if the directory sync fails. A
-        // retry must neither mistake our replacement for tampering nor reload
-        // older credit. External replacements still fail the identity check.
-        if identity == nil{guard unlinkat(dir,temporary,0)==0 else{return fault(.posix(.budgetPersistence,errno))}}
-        var info=stat();guard fstat(fd,&info)==0 else{return fault(.posix(.budgetPersistence,errno))}
-        identity=info
-        guard fsync(dir)==0 else{return fault(.posix(.budgetPersistence,errno))}
-        ledger=value;lastFailure=nil;retryDelay=1;return true
     }
 }
 
@@ -3137,27 +2998,18 @@ final class DiagnosticLogStore {
     }
     private struct Group {let incident:Int;var files:[File];var key:String=""}
     private let directory:URL,policy:DiagnosticLogRetentionPolicy
-    private let archiveDirectory:URL?
-    private let requiresBoundedPriorPolicy:Bool
-    private var boundedWriterLock:Int32 = -1
-    private var boundedNamespaceAccepted=false
+    private let readOnly:Bool
     private var directoryIdentity:stat?
     private var groups:[Group]=[]
     private var manualGroups:[Group]=[]
-    private var latestAutomatic=0
-    private var latestManual=0
     private(set) var status:Status
     private var statusName=".storage-"+UUID().uuidString+".status"
     private var statusFile:File?
     private var failureStage=0,failureErrno:Int32=0
-    private let writeBudget:DiagnosticWriteBudget?
     private let payloadWriter:OperationalIO.Write
     private let retryClock:()->Double
-    private var retryAt=0.0,retryDelay=1.0,transientStorageFailure=false,repairOwnership=false
-    private var writeCredit=0,budgetAutomatic=true,reservationActive=false
-    private var reservationFailure:OperationalFailure?
+    private var retryAt=0.0,retryDelay=1.0,transientStorageFailure=false
     private(set) var actualWrittenBytes=0
-    var limitsWrites:Bool{writeBudget != nil}
     private(set) var readiness=DiagnosticStorageReadiness.notChecked
     private(set) var lastStorageFailure:OperationalFailure?
     private(set) var lastStorageFailureMilliseconds:Int64?
@@ -3173,7 +3025,7 @@ final class DiagnosticLogStore {
     private func storageFault(_ stage:OperationalStage,_ code:Int32=0,policy:Int=1)->Bool {
         let failure:OperationalFailure=code == 0 ? .policy(stage,policy):.posix(stage,code)
         lastStorageFailure=failure;lastStorageFailureMilliseconds=Int64(Date().timeIntervalSince1970*1000)
-        if DiagnosticWriteBudget.transient(failure) {
+        if DiagnosticStorageRecovery.transient(failure) {
             transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
         }
         OperationalDiagnostics.shared.record(failure);return false
@@ -3188,34 +3040,22 @@ final class DiagnosticLogStore {
     }
     var usage:Usage {Usage(files:groups.reduce(0){$0+$1.files.count},bytes:groups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
     var manualUsage:Usage {Usage(files:manualGroups.reduce(0){$0+$1.files.count},bytes:manualGroups.reduce(0){$0+$1.files.reduce(0){$0+$1.bytes}})}
-    private(set) var lastResult:Result?
-    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,requiresBoundedPriorPolicy:Bool=false,writeBudget:DiagnosticWriteBudget?=nil,
+    init(directory:URL,policy:DiagnosticLogRetentionPolicy,persistentOwnership:Bool=false,archiveDirectory:URL?=nil,readOnly:Bool=false,
          retryClock:@escaping ()->Double={ProcessInfo.processInfo.systemUptime},
          writer:@escaping OperationalIO.Write={Darwin.write($0,$1,$2)}){
         self.payloadWriter=writer;self.retryClock=retryClock
         self.directory=directory;self.policy=policy;self.persistentOwnership=persistentOwnership
-        self.archiveDirectory=archiveDirectory
-        self.requiresBoundedPriorPolicy=requiresBoundedPriorPolicy
-        self.writeBudget=writeBudget ?? (requiresBoundedPriorPolicy && persistentOwnership && archiveDirectory==nil && policy.maximumAutomaticBytes != Int.max ? DiagnosticWriteBudget():nil)
+        self.readOnly=readOnly
         status=Status(maximumAutomaticFiles:policy.maximumAutomaticFiles,maximumAutomaticBytes:policy.maximumAutomaticBytes)
         status.maximumManualBytes=policy.maximumManualBytes;status.manualFiles=0;status.manualBytes=0
     }
-    deinit {if boundedWriterLock>=0{close(boundedWriterLock)}}
-    private func retainBoundedWriterLock(_ directoryFD:Int32)->Bool {
-        if boundedWriterLock>=0{return true}
-        guard flock(directoryFD,LOCK_EX|LOCK_NB)==0 else{_ = failed(3,errno);return false}
-        let retained=dup(directoryFD)
-        guard retained>=0 else{let code=errno;_ = flock(directoryFD,LOCK_UN);_ = failed(3,code);return false}
-        guard fcntl(retained,F_SETFD,FD_CLOEXEC)==0 else{
-            let code=errno;close(retained);_ = flock(directoryFD,LOCK_UN);_ = failed(3,code);return false
-        }
-        boundedWriterLock=retained;return true
-    }
+
 
     // This is a real filesystem proof using the same ownership guard and byte
     // writer as captures. It neither fabricates an incident nor consumes IDs.
     @discardableResult func verifyReadiness(receipt:Data?=nil,name:String?=nil)->DiagnosticStorageReadiness {
         readiness = .unavailable
+        guard !readOnly else{return readiness}
         prepareOwnership()
         guard ownershipHealthy else {
             if lastStorageFailure==nil{_ = storageFault(.storageOwnership,policy:1)}
@@ -3359,54 +3199,22 @@ final class DiagnosticLogStore {
     func prepareOwnership(){
         if ownershipPrepared,!ownershipHealthy,transientStorageFailure {
             guard retryClock()>=retryAt else{return}
-            transientStorageFailure=false
-            if repairOwnership {
-                // Repair only this still-owned in-memory transaction. Reloading
-                // an older index here would lose a published capture or refund
-                // pruning. Changed/missing evidence is never adopted or erased.
-                guard let dir=openDirectory() else{return};defer{close(dir)}
-                guard groups.allSatisfy({$0.files.allSatisfy{owned($0,dir)}}),
-                      manualGroups.allSatisfy({$0.files.allSatisfy{owned($0,dir)}}),
-                      ownershipFile.map({owned($0,dir)}) ?? true,
-                      statusFile.map({owned($0,dir)}) ?? true else{return}
-                if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
-                guard reserveWrite(metadataAllowance(),automatic:budgetAutomatic,event:false) else{
-                    if let failure=reservationFailure,DiagnosticWriteBudget.transient(failure){transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)}
-                    return
-                }
-                reservationActive=limitsWrites
-                defer{reservationActive=false;writeCredit=0}
-                guard writeStatus(),persistOwnership(dir) else{return}
-                ownershipHealthy=true;repairOwnership=false;retryDelay=1
-                return
-            }
-            ownershipPrepared=false
-        }
-        if requiresBoundedPriorPolicy && !persistentOwnership {
-            ownershipPrepared=true;ownershipHealthy=false;return
+            transientStorageFailure=false;ownershipPrepared=false
         }
         guard persistentOwnership,!ownershipPrepared else{return}
         ownershipPrepared=true;ownershipHealthy=false
-        defer{if requiresBoundedPriorPolicy && !ownershipHealthy{boundedNamespaceAccepted=false}}
-        if requiresBoundedPriorPolicy {
-            guard policy.maximumAutomaticFiles<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticFiles,
-                  policy.maximumAutomaticBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticBytes,
-                  policy.maximumManualBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumManualBytes,
-                  archiveDirectory==nil else{return}
-        }
         guard let dir=openDirectory() else{return};defer{close(dir)}
-        if requiresBoundedPriorPolicy || limitsWrites {guard retainBoundedWriterLock(dir) else{return}}
         guard prepareVolume(dir) else{return}
         var info=stat()
         if fstatat(dir,ownershipName,&info,AT_SYMLINK_NOFOLLOW) != 0 {
-            guard errno==ENOENT else{return}
-            let names=(try? FileManager.default.contentsOfDirectory(atPath:directory.path)) ?? []
+            guard errno==ENOENT else{_ = storageFault(.storageOwnership,errno);return}
+            let names:[String]
+            do{names=try FileManager.default.contentsOfDirectory(atPath:directory.path)}catch{_ = storageFault(.storageOwnership,Int32(clamping:OperationalFailure.capture(error,stage:.storageOwnership).underlyingPOSIX));return}
             guard !names.contains(where:{$0.hasPrefix("incident-") || $0.hasPrefix(".storage-")}) else{return}
-            if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
-            ownershipHealthy=persistOwnership(dir);return
+            ownershipHealthy=true;return
         }
         let fd=openat(dir,ownershipName,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
-        guard fd>=0 else{return};defer{close(fd)}
+        guard fd>=0 else{_ = storageFault(.storageOwnership,errno);return};defer{close(fd)}
         guard fstat(fd,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,
               info.st_size>0,info.st_size<=8*1024*1024,
               let data=try? FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:8*1024*1024+1),
@@ -3415,22 +3223,9 @@ final class DiagnosticLogStore {
               index.status.maximumAutomaticFiles>0,index.status.maximumAutomaticBytes>0,
               index.files.count<=index.status.maximumAutomaticFiles,index.lastIncident>=0,
               validStatusName(index.statusName),validAttemptCounts(index.status) else{return}
-        if requiresBoundedPriorPolicy {
-            // Reject a preserved investigation root before trim, migration or
-            // status/index writes. A new bound is not deletion authority.
-            guard index.schema==3,
-                  index.status.maximumAutomaticFiles<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticFiles,
-                  index.status.maximumAutomaticBytes<=DiagnosticLogRetentionPolicy.incidentDefault.maximumAutomaticBytes,
-                  let manual=index.status.maximumManualBytes,
-                  manual<=DiagnosticLogRetentionPolicy.incidentDefault.maximumManualBytes else{return}
-        }
-        if index.schema<3,index.device != Int64(identity.st_dev) {
-            if preserveLegacyRemount(index,info,dir) {
-                directoryIdentity=nil;volumeUUID=nil;ownershipPrepared=false
-                prepareOwnership()
-            }
-            return
-        }
+        // Reading never adopts, rewrites, prunes or renames an old namespace.
+        // Legacy indexes without persistent identity still fail closed after remount.
+        if index.schema<3,index.device != Int64(identity.st_dev){return}
         let sameBoot=index.bootUUID==Self.bootUUID
         if index.schema==3 {
             guard index.volumeUUID==volumeUUID,let boot=index.bootUUID,UUID(uuidString:boot) != nil,
@@ -3488,69 +3283,9 @@ final class DiagnosticLogStore {
             let l=first(left),r=first(right)
             return l==r ? left.key<right.key:l<r
         }
-        latestAutomatic=index.lastIncident;latestManual=last;lastCaptureIncident=last;status=index.status
-        status.maximumAutomaticFiles=policy.maximumAutomaticFiles;status.maximumAutomaticBytes=policy.maximumAutomaticBytes
-        status.maximumManualBytes=policy.maximumManualBytes
+        lastCaptureIncident=last;status=index.status
         statusName=index.statusName;statusFile=previousStatus;ownershipFile=File(name:ownershipName,phase:0,identity:info)
-        if requiresBoundedPriorPolicy{boundedNamespaceAccepted=true}
-        if limitsWrites,index.schema==3,index.writeBudgetRequired==true,
-           index.status.maximumAutomaticFiles==policy.maximumAutomaticFiles,
-           index.status.maximumAutomaticBytes==policy.maximumAutomaticBytes,
-           index.status.maximumManualBytes==policy.maximumManualBytes {
-            // Reopening an unchanged store is read-only. In particular an
-            // exhausted automatic allowance cannot consume manual credit.
-            updateUsage();ownershipHealthy=true;return
-        }
-        // Lowered limits and legacy manual data rotate before accepting new files.
-        guard trimRestored(dir) else{return}
-        updateUsage()
-        guard writeStatus(),persistOwnership(dir) else{return}
-        ownershipHealthy=true
-    }
-    // Legacy indexes contain neither a volume UUID nor content fingerprints.
-    // After a remount they cannot prove ownership. Preserve the entire private
-    // namespace with an exclusive, same-volume rename; never weaken the checks
-    // used for resuming/deleting managed records. No legacy bytes are rewritten.
-    private func preserveLegacyRemount(_ index:Ownership,_ indexIdentity:stat,_ dir:Int32)->Bool {
-        let records=index.files+(index.manualFiles ?? [])
-        var names=Set<String>(),pairs:[String:[Int]]=[:]
-        for entry in records {
-            guard entry.device==index.device,entry.incident>0,entry.incident<=index.lastIncident,
-                  validCaptureName(entry.name,incident:entry.incident,phase:entry.phase),names.insert(entry.name).inserted else{return false}
-            let manual=entry.manualKey
-            guard manual==nil || (index.schema==2 && !manual!.isEmpty) else{return false}
-            pairs[manual ?? "automatic:\(entry.incident)",default:[]].append(entry.phase)
-            var current=stat()
-            guard fstatat(dir,entry.name,&current,AT_SYMLINK_NOFOLLOW)==0,entry.matchesLegacyRemount(current) else{return false}
-        }
-        guard pairs.values.allSatisfy({$0.count<=2 && $0.contains(0) && Set($0).count==$0.count}) else{return false}
-        if let entry=index.statusFile {
-            var current=stat()
-            guard entry.name==index.statusName,entry.device==index.device,entry.size<=16*1024,
-                  fstatat(dir,entry.name,&current,AT_SYMLINK_NOFOLLOW)==0,entry.matchesLegacyRemount(current) else{return false}
-        }else{
-            var current=stat()
-            guard fstatat(dir,index.statusName,&current,AT_SYMLINK_NOFOLLOW) != 0,errno==ENOENT else{return false}
-        }
-        let parentURL=directory.deletingLastPathComponent(),base=directory.lastPathComponent
-        guard base != "InvestigationArchives",base != ".",base != ".." else{return false}
-        let parent=open(parentURL.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
-        guard parent>=0 else{return false};defer{close(parent)}
-        var info=stat()
-        guard fstat(parent,&info)==0,info.st_uid==getuid(),info.st_mode&0o077==0 else{return false}
-        if mkdirat(parent,"InvestigationArchives",S_IRWXU) != 0,errno != EEXIST{return false}
-        let archive=openat(parent,"InvestigationArchives",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
-        guard archive>=0 else{return false};defer{close(archive)}
-        guard let identity=directoryIdentity,fstat(archive,&info)==0,info.st_uid==getuid(),info.st_mode&0o077==0,
-              info.st_dev==identity.st_dev,info.st_ino != identity.st_ino,
-              fstatat(parent,base,&info,AT_SYMLINK_NOFOLLOW)==0,
-              info.st_dev==identity.st_dev,info.st_ino==identity.st_ino,
-              fstatat(dir,ownershipName,&info,AT_SYMLINK_NOFOLLOW)==0,matches(indexIdentity,info) else{return false}
-        let name="Legacy-"+base+"-"+UUID().uuidString
-        guard renameatx_np(parent,base,archive,name,UInt32(RENAME_EXCL))==0 else{return false}
-        guard fsync(archive)==0,fsync(parent)==0 else{return false}
-        legacyArchive=parentURL.appendingPathComponent("InvestigationArchives").appendingPathComponent(name)
-        return true
+        updateUsage();ownershipHealthy=true
     }
     private func validCaptureName(_ name:String,incident:Int,phase:Int)->Bool {
         let prefix="incident-\(incident)-\(phase)-"
@@ -3578,74 +3313,12 @@ final class DiagnosticLogStore {
         status.automaticFiles=usage.files;status.automaticBytes=usage.bytes
         status.manualFiles=manualUsage.files;status.manualBytes=manualUsage.bytes
     }
-    private func trimRestored(_ dir:Int32)->Bool {
-        while usage.files>policy.maximumAutomaticFiles || usage.bytes>policy.maximumAutomaticBytes {
-            guard let group=groups.first,removeGroup(group,manual:false,dir:dir) else{return false}
-        }
-        while manualUsage.bytes>policy.maximumManualBytes {
-            guard let group=manualGroups.first,removeGroup(group,manual:true,dir:dir) else{return false}
-        }
-        return true
-    }
-    private func removeGroup(_ group:Group,manual:Bool,dir:Int32)->Bool {
-        guard group.files.allSatisfy({owned($0,dir)}) else{_ = failed(3);return false}
-        if let archiveDirectory {
-            do{try archive(group.files,from:dir,to:archiveDirectory)}
-            catch{OperationalDiagnostics.shared.record(.capture(error,stage:.storagePrune));_ = failed(5);return false}
-        }
-        for file in group.files {
-            guard owned(file,dir) else{_ = failed(5);return false}
-            guard unlinkat(dir,file.name,0)==0 else{_ = failed(5,errno);return false}
-            status.evictedFiles+=1;status.evictedBytes+=file.bytes
-            if manual {
-                if let i=manualGroups.firstIndex(where:{$0.key==group.key}){manualGroups[i].files.removeAll{$0.name==file.name}}
-            }else{
-                if let i=groups.firstIndex(where:{$0.incident==group.incident}){groups[i].files.removeAll{$0.name==file.name}}
-            }
-        }
-        groups.removeAll{$0.files.isEmpty};manualGroups.removeAll{$0.files.isEmpty};status.evictedGroups+=1
-        return true
-    }
+
+
     // Investigation opt-in: content-addressed evidence lives outside rotation.
     // Every file and its manifest are durable before any source is unlinked.
-    private func archive(_ files:[File],from source:Int32,to destination:URL)throws {
-        let fm=FileManager.default
-        if !fm.fileExists(atPath:destination.path){try fm.createDirectory(at:destination,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
-        let target=open(destination.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
-        guard target>=0 else{throw DiagnosticLogExport.Failure.unavailable};defer{close(target)}
-        var info=stat()
-        guard fstat(target,&info)==0,info.st_uid==getuid(),info.st_mode&0o077==0,
-              directoryIdentity.map({$0.st_dev != info.st_dev || $0.st_ino != info.st_ino}) ?? false else{throw DiagnosticLogExport.Failure.unavailable}
-        struct Entry:Encodable {let originalName:String,sha256:String,bytes:Int}
-        var entries:[Entry]=[]
-        for file in files {
-            let fd=openat(source,file.name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
-            guard fd>=0 else{throw DiagnosticLogExport.Failure.unavailable};defer{close(fd)}
-            guard fstat(fd,&info)==0,matches(file.identity,info),
-                  let data=try FileHandle(fileDescriptor:fd,closeOnDealloc:false).read(upToCount:file.bytes+1),data.count==file.bytes,
-                  fstat(fd,&info)==0,matches(file.identity,info) else{throw DiagnosticLogExport.Failure.unavailable}
-            let digest=SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()
-            let name=digest+".json"
-            let prior=openat(target,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC)
-            if prior>=0 {
-                defer{close(prior)}
-                guard fstat(prior,&info)==0,info.st_mode&S_IFMT==S_IFREG,info.st_uid==getuid(),info.st_mode&0o077==0,
-                      let existing=try FileHandle(fileDescriptor:prior,closeOnDealloc:false).read(upToCount:data.count+1),existing==data else{throw DiagnosticLogExport.Failure.unavailable}
-            }else{
-                guard errno==ENOENT else{throw DiagnosticLogExport.Failure.unavailable}
-                try publishArchive(data,name:name,dir:target)
-            }
-            entries.append(Entry(originalName:file.name,sha256:digest,bytes:data.count))
-        }
-        try publishArchive(JSONEncoder().encode(entries),name:"manifest-"+UUID().uuidString+".json",dir:target)
-    }
-    private func publishArchive(_ data:Data,name:String,dir:Int32)throws {
-        let temporary=".partial-"+UUID().uuidString
-        let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{throw DiagnosticLogExport.Failure.unavailable}
-        defer{close(fd);unlinkat(dir,temporary,0)}
-        guard writeAll(data,fd),fsync(fd)==0,linkat(dir,temporary,dir,name,0)==0,fsync(dir)==0 else{throw DiagnosticLogExport.Failure.unavailable}
-    }
+
+
     private func validAttemptCounts(_ status:Status)->Bool {
         var remaining=status.attempts
         for count in [status.saved,status.limited,status.retired,status.unavailable,status.encodingFailures] {
@@ -3656,205 +3329,11 @@ final class DiagnosticLogStore {
     private func validStatusName(_ name:String)->Bool {
         name.hasPrefix(".storage-") && name.hasSuffix(".status") && UUID(uuidString:String(name.dropFirst(9).dropLast(7))) != nil
     }
-    private func persistOwnership(_ dir:Int32)->Bool {
-        guard let identity=directoryIdentity,prepareVolume(dir) else{return storageFault(.storageOwnership)}
-        let index=Ownership(schema:3,device:Int64(identity.st_dev),inode:identity.st_ino,lastIncident:lastCaptureIncident,
-            statusName:statusName,status:status,files:groups.flatMap{group in group.files.map{Record($0,incident:group.incident)}},
-            statusFile:statusFile.map{Record($0,incident:0)},manualFiles:manualGroups.flatMap{group in group.files.map{Record($0,incident:group.incident,manualKey:group.key)}},
-            volumeUUID:volumeUUID,bootUUID:Self.bootUUID,birth:Int64(identity.st_birthtimespec.tv_sec),birthNanos:Int64(identity.st_birthtimespec.tv_nsec),writeBudgetRequired:limitsWrites ? true:nil)
-        let data:Data
-        do{data=try JSONEncoder().encode(index)}catch{OperationalDiagnostics.shared.record(.capture(error,stage:.storageEncode));return false}
-        guard data.count<=8*1024*1024 else{return storageFault(.storageOwnership,policy:2)}
-        if let old=ownershipFile, !owned(old,dir){return storageFault(.storageOwnership,policy:3)}
-        let temporary=".partial-"+UUID().uuidString
-        let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{return storageFault(.storageOwnership,errno)};defer{close(fd);unlinkat(dir,temporary,0)}
-        guard writeAll(data,fd) else{return false}
-        guard fsync(fd)==0 else{return storageFault(.storageOwnership,errno)}
-        if let old=ownershipFile {
-            guard owned(old,dir) else{return storageFault(.storageOwnership,policy:3)}
-            guard renameat(dir,temporary,dir,ownershipName)==0 else{return storageFault(.storageOwnership,errno)}
-        }else{guard linkat(dir,temporary,dir,ownershipName,0)==0,unlinkat(dir,temporary,0)==0 else{return storageFault(.storageOwnership,errno)}}
-        var info=stat();guard fstat(fd,&info)==0 else{return storageFault(.storageOwnership,errno)}
-        ownershipFile=File(name:ownershipName,phase:0,identity:info)
-        guard fsync(dir)==0 else{return storageFault(.storageOwnership,errno)}
-        return true
-    }
 
-    func rejectBeforeEncoding(automatic:Bool,phase:Int)->Result? {
-        if transientStorageFailure,retryClock()<retryAt{return .unavailable}
-        if writeBudget?.waitingForRecovery==true{return .unavailable}
-        if automatic,phase==0,writeBudget?.rejectExhaustedEvent()==true {
-            status.writeBudget=writeBudget?.summary;lastResult = .limit;return .limit
-        }
-        return nil
-    }
-    @discardableResult func save(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
-        if transientStorageFailure,retryClock()<retryAt{return rejectedRecoveryDelay(incident:incident,phase:phase,automatic:automatic)}
-        budgetAutomatic=automatic
-        if limitsWrites,!reservationActive {
-            prepareOwnership()
-            if !ownershipHealthy{return saveReserved(data,incident:incident,phase:phase,automatic:automatic)}
-            guard reserveWrite(data.count+metadataAllowance(),automatic:automatic,event:phase==0) else{return rejectedReservation(incident:incident,phase:phase,automatic:automatic)}
-            reservationActive=true
-            defer{writeCredit=0;reservationActive=false}
-            return saveReserved(data,incident:incident,phase:phase,automatic:automatic)
-        }
-        return saveReserved(data,incident:incident,phase:phase,automatic:automatic)
-    }
     // Reserve both encoded phases before either becomes visible. Reservation
     // failures update memory only; there is no deferred catch-up write queue.
-    @discardableResult func savePair(_ before:Data,_ after:Data,incident:Int,automatic:Bool)->Result {
-        if transientStorageFailure,retryClock()<retryAt{return rejectedRecoveryDelay(incident:incident,phase:0,automatic:automatic)}
-        prepareOwnership();budgetAutomatic=automatic
-        guard ownershipHealthy else{lastResult = .unavailable;return .unavailable}
-        let retainedLimit=automatic ? policy.maximumAutomaticBytes:policy.maximumManualBytes
-        guard before.count<=retainedLimit,after.count<=retainedLimit-before.count,
-              !automatic || policy.maximumAutomaticFiles>=2 else{lastResult = .limit;return .limit}
-        guard before.count<=Int.max-after.count-2*metadataAllowance() else{return .limit}
-        if limitsWrites {
-            guard reserveWrite(before.count+after.count+2*metadataAllowance(),automatic:automatic,event:true) else{return rejectedReservation(incident:incident,phase:0,automatic:automatic)}
-        }
-        reservationActive=limitsWrites
-        defer{writeCredit=0;reservationActive=false}
-        let pre=saveReserved(before,incident:incident,phase:0,automatic:automatic)
-        guard pre == .saved else{return pre}
-        return saveReserved(after,incident:incident,phase:1,automatic:automatic)
-    }
-    private func metadataAllowance()->Int {
-        // Each ownership record is <1KiB (fixed names/hashes/numeric fields).
-        // Allow new pair records and a complete <=16KiB status replacement.
-        32*1024+(groups.reduce(0){$0+$1.files.count}+manualGroups.reduce(0){$0+$1.files.count}+2)*1024
-    }
-    private func reserveWrite(_ bytes:Int,automatic:Bool,event:Bool)->Bool {
-        reservationFailure=nil
-        guard let writeBudget else{return true}
-        guard let dir=openDirectory() else{reservationFailure = .posix(.budgetPersistence,failureErrno);return false};defer{close(dir)}
-        guard retainBoundedWriterLock(dir) else{reservationFailure = .posix(.budgetPersistence,failureErrno);return false}
-        let accepted=writeBudget.reserve(bytes,automatic:automatic,event:event,dir:dir)
-        reservationFailure=writeBudget.lastFailure
-        status.writeBudget=writeBudget.summary
-        if accepted{writeCredit=bytes}
-        return accepted
-    }
-    private func rejectedReservation(incident:Int,phase:Int,automatic:Bool)->Result {
-        guard let failure=reservationFailure else{lastResult = .limit;return .limit}
-        OperationalDiagnostics.shared.record(failure)
-        failureStage=4;failureErrno=Int32(clamping:failure.underlyingPOSIX);lastResult = .unavailable
-        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:4,began:DispatchTime.now().uptimeNanoseconds,persist:false)
-        invalidateReadiness();return .unavailable
-    }
-    private func rejectedRecoveryDelay(incident:Int,phase:Int,automatic:Bool)->Result {
-        // Keep the actual failure from readiness/publishing visible during
-        // backoff. This rejected request must not write status or reset errno.
-        lastResult = .unavailable
-        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:4,began:DispatchTime.now().uptimeNanoseconds,persist:false)
-        return .unavailable
-    }
-    private func saveReserved(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
-        let began=DispatchTime.now().uptimeNanoseconds
-        let previousStatusFailures=status.statusWriteFailures
-        failureStage=0;failureErrno=0
-        let result=publish(data,incident:incident,phase:phase,automatic:automatic)
-        lastResult=result
-        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:result.rawValue,began:began)
-        if result != .saved || !ownershipHealthy || status.statusWriteFailures>previousStatusFailures{
-            invalidateReadiness()
-            if result == .saved{lastResult = .unavailable;return .unavailable}
-        }else{readiness = .ready;retryDelay=1;transientStorageFailure=false}
-        return result
-    }
-    func encodingFailed(incident:Int,phase:Int,automatic:Bool){
-        prepareOwnership()
-        failureStage=6;failureErrno=0
-        let persist = !limitsWrites || reserveWrite(metadataAllowance(),automatic:automatic,event:true)
-        reservationActive=limitsWrites && persist
-        defer{writeCredit=0;reservationActive=false}
-        finishAttempt(incident:incident,phase:phase,automatic:automatic,result:5,began:DispatchTime.now().uptimeNanoseconds,persist:persist)
-        invalidateReadiness()
-    }
-    private func finishAttempt(incident:Int,phase:Int,automatic:Bool,result:Int,began:UInt64,persist:Bool=true){
-        status.writeBudget=writeBudget?.summary
-        lastCaptureIncident=max(lastCaptureIncident,incident)
-        status.attempts+=1
-        switch result {
-        case 1:status.saved+=1
-        case 2:status.limited+=1
-        case 3:status.retired+=1
-        case 4:status.unavailable+=1
-        default:status.encodingFailures+=1
-        }
-        updateUsage()
-        status.lastIncident=incident;status.lastPhase=phase;status.lastAutomatic=automatic
-        status.lastResult=result;status.lastFailureStage=failureStage;status.lastErrno=Int(failureErrno)
-        let ended=DispatchTime.now().uptimeNanoseconds,elapsed=ended>=began ? ended-began:0
-        status.lastWriteMicros=Int(min(elapsed/1000,60_000_000))
-        status.maxWriteMicros=max(status.maxWriteMicros,status.lastWriteMicros)
-        if elapsed>60_000_000_000{status.writeTimingClipped+=1}
-        guard persist else{return}
-        let statusFailed = !writeStatus()
-        if statusFailed{status.statusWriteFailures+=1}
-        if persistentOwnership,ownershipHealthy {
-            var ownershipFailed=false
-            if let dir=openDirectory(){
-                ownershipFailed = !persistOwnership(dir);close(dir)
-            }else{ownershipFailed=true}
-            if ownershipFailed {
-                ownershipHealthy=false;repairOwnership=true
-                if let failure=writeBudget?.lastFailure,DiagnosticWriteBudget.transient(failure){
-                    transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
-                }
-                if !statusFailed{status.statusWriteFailures+=1}
-            }
-        }
-    }
-    // One <=16KiB owner-only companion per store, excluded from the automatic
-    // retention cap. Its bytes are included in the cumulative write budget.
-    // Atomically replaces only this instance's own status file.
-    // A wholly unwritable disk cannot persist its failure: keep the last good
-    // status and report the accumulated failure on the next successful write.
-    private func writeStatus()->Bool {
-        if requiresBoundedPriorPolicy {
-            guard boundedWriterLock>=0,boundedNamespaceAccepted else{return storageFault(.storageStatus)}
-        }
-        let previousStage=failureStage,previousErrno=failureErrno
-        defer{failureStage=previousStage;failureErrno=previousErrno}
-        let data:Data
-        do{data=try JSONEncoder().encode(StatusDocument(status:status))}catch{OperationalDiagnostics.shared.record(.capture(error,stage:.storageEncode));return false}
-        guard data.count<=16*1024 else{return storageFault(.storageStatus,policy:2)}
-        guard let dir=openDirectory() else{return false}
-        defer{close(dir)}
-        if let old=statusFile {guard owned(old,dir) else{return storageFault(.storageStatus,policy:3)}}
-        let temporary=".partial-"+UUID().uuidString
-        let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{return storageFault(.storageStatus,errno)}
-        defer{close(fd);unlinkat(dir,temporary,0)}
-        guard writeAll(data,fd) else{return false}
-        guard fsync(fd)==0 else{return storageFault(.storageStatus,errno)}
-        if let old=statusFile {
-            guard owned(old,dir) else{return storageFault(.storageStatus,policy:3)}
-            guard renameat(dir,temporary,dir,statusName)==0 else{return storageFault(.storageStatus,errno)}
-        } else {
-            guard linkat(dir,temporary,dir,statusName,0)==0,unlinkat(dir,temporary,0)==0 else{return storageFault(.storageStatus,errno)}
-        }
-        var info=stat();guard fstat(fd,&info)==0 else{return storageFault(.storageStatus,errno)}
-        statusFile=File(name:statusName,phase:0,identity:info,digest:Self.digest(data))
-        guard fsync(dir)==0 else{return storageFault(.storageStatus,errno)}
-        return true
-    }
+
     private func writeAll(_ data:Data,_ fd:Int32)->Bool {
-        let standalone=limitsWrites && !reservationActive
-        defer{if standalone{writeCredit=0}}
-        if limitsWrites {
-            if standalone {guard reserveWrite(data.count,automatic:budgetAutomatic,event:false) else{
-                if let failure=reservationFailure,DiagnosticWriteBudget.transient(failure){
-                    transientStorageFailure=true;retryAt=retryClock()+retryDelay;retryDelay=min(60,retryDelay*2)
-                }
-                return false
-            }}
-            guard data.count<=writeCredit else{OperationalDiagnostics.shared.record(.policy(.storageWrite,1));return false}
-            writeCredit-=data.count
-        }
         if let failure=OperationalIO.writeAll(data,to:fd,stage:.storageWrite,write:{[self] fd,p,n in
             let count=payloadWriter(fd,p,n);if count>0{actualWrittenBytes+=count};return count
         }) {
@@ -3865,10 +3344,11 @@ final class DiagnosticLogStore {
         return true
     }
     private func openDirectory()->Int32? {
+        guard !readOnly || InputIncidentPreferences.namespacePath(directory.path)==directory.path else{_ = failed(2);return nil}
         if persistentOwnership {
             let parent=directory.deletingLastPathComponent().path;var p=stat()
             if lstat(parent,&p) != 0 {
-                guard errno==ENOENT else{_ = failed(2,errno);return nil}
+                guard !readOnly,errno==ENOENT else{_ = failed(2,errno);return nil}
                 if mkdir(parent,S_IRWXU) != 0 && errno != EEXIST{_ = failed(2,errno);return nil}
             }
             guard lstat(parent,&p)==0 else{_ = failed(2,errno);return nil}
@@ -3876,7 +3356,7 @@ final class DiagnosticLogStore {
         }
         var info=stat()
         if lstat(directory.path,&info) != 0 {
-            guard errno==ENOENT,directoryIdentity==nil else{_ = failed(2,errno);return nil}
+            guard !readOnly,errno==ENOENT,directoryIdentity==nil else{_ = failed(2,errno);return nil}
             if mkdir(directory.path,S_IRWXU) != 0 && errno != EEXIST{_ = failed(2,errno);return nil}
         } else {guard (info.st_mode & S_IFMT)==S_IFDIR,info.st_uid==getuid(),(info.st_mode & 0o077)==0 else{_ = failed(2);return nil}}
         let dir=open(directory.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
@@ -3976,61 +3456,7 @@ final class DiagnosticLogStore {
         }
         try request.check();completed=true
     }
-    private func publish(_ data:Data,incident:Int,phase:Int,automatic:Bool)->Result {
-        prepareOwnership()
-        guard ownershipHealthy else{return failed(3)}
-        guard incident>0,(0...1).contains(phase) else{return failed(1)}
-        struct Header:Decodable {let runID:String}
-        let run=(try? JSONDecoder().decode(Header.self,from:data).runID) ?? "current"
-        let key=run+":\(incident)"
-        let existing=automatic ? groups:manualGroups
-        if phase==0 {
-            guard incident>(automatic ? latestAutomatic:latestManual) else{return .retired}
-            if automatic{latestAutomatic=incident}else{latestManual=incident}
-        }else{
-            guard existing.contains(where:{(automatic ? $0.incident==incident:$0.key==key) && $0.files.count==1 && $0.files[0].phase==0}) else{return .retired}
-        }
-        let current=existing.first(where:{automatic ? $0.incident==incident:$0.key==key})
-        let limit=automatic ? policy.maximumAutomaticBytes:policy.maximumManualBytes
-        let fileLimit=automatic ? policy.maximumAutomaticFiles:Int.max
-        guard data.count<=limit,(current?.files.count ?? 0)<fileLimit,
-              (current?.files.reduce(0){$0+$1.bytes} ?? 0)<=limit-data.count else{return .limit}
-        let used=automatic ? usage:manualUsage
-        var count=used.files+1,bytes=used.bytes+data.count,evictions:[Group]=[]
-        for group in existing {
-            if count<=fileLimit && bytes<=limit{break}
-            // A delayed post never evicts a newer pre-capture.
-            if group.incident>=incident{continue}
-            evictions.append(group);count-=group.files.count;bytes-=group.files.reduce(0){$0+$1.bytes}
-        }
-        guard count<=fileLimit,bytes<=limit else{return .limit}
-        guard let dir=openDirectory() else{return .unavailable};defer{close(dir)}
-        guard existing.allSatisfy({$0.files.allSatisfy{owned($0,dir)}}) else{return failed(3)}
-        let filename="incident-\(incident)-\(phase)-\(UUID().uuidString).json"
-        let temporary=".partial-"+UUID().uuidString
-        let fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,S_IRUSR|S_IWUSR)
-        guard fd>=0 else{return failed(4,errno)}
-        defer{close(fd);unlinkat(dir,temporary,0)}
-        guard writeAll(data,fd),fsync(fd)==0,linkat(dir,temporary,dir,filename,0)==0 else{return failed(4,errno)}
-        var info=stat()
-        guard unlinkat(dir,temporary,0)==0,fstat(fd,&info)==0 else{let code=errno;unlinkat(dir,filename,0);return failed(4,code)}
-        let published=File(name:filename,phase:phase,identity:info,digest:Self.digest(data),header:DiagnosticReviewCaptureHeader.read(data))
-        for group in evictions {
-            guard removeGroup(group,manual:!automatic,dir:dir) else{
-                let code=failureErrno
-                if owned(published,dir){unlinkat(dir,filename,0)}
-                return failed(5,code)
-            }
-        }
-        if automatic {
-            if let i=groups.firstIndex(where:{$0.incident==incident}){groups[i].files.append(published)}
-            else{groups.append(Group(incident:incident,files:[published]))}
-        }else{
-            if let i=manualGroups.firstIndex(where:{$0.key==key}){manualGroups[i].files.append(published)}
-            else{manualGroups.append(Group(incident:incident,files:[published],key:key))}
-        }
-        return .saved
-    }
+
 
 }
 

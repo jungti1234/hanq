@@ -37,7 +37,7 @@ if CommandLine.arguments.contains("--exit-child") {
 // checked, with no reset/refund on eventual success or subsequent relaunch.
 var tick=100.0,fail=true,calls=0
 let ledgerDir=dir("ledger"),fd=open(ledgerDir.path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW)
-let budget=DiagnosticWriteBudget(clock:{100000},retryClock:{tick},writer:{fd,p,n in
+let budget=LegacyFixtureWriteBudget(clock:{100000},retryClock:{tick},writer:{fd,p,n in
     calls+=1
     if fail {if calls==1{return Darwin.write(fd,p,min(7,n))};errno=ENOSPC;return -1}
     return Darwin.write(fd,p,n)
@@ -49,17 +49,17 @@ check(calls==attempts && budget.persistenceFailures==1,"10k requests do not retr
 fail=false;tick+=1
 check(budget.reserve(500,automatic:true,event:true,dir:fd),"ledger automatically recovers")
 check(budget.summary["automaticHour"]==charged*2 && budget.lastFailure==nil,"failed reservation remains charged and error clears")
-let reopened=DiagnosticWriteBudget(clock:{100000})
+let reopened=LegacyFixtureWriteBudget(clock:{100000})
 check(reopened.reserve(500,automatic:true,event:true,dir:fd) && reopened.summary["automaticHour"]==charged*3,"relaunch keeps all committed credits")
 close(fd)
 // Payload and ownership-index failures recover using the still-owned objects.
 for mode in ["payload","index","initial-ledger"] {
     tick=100;var broken=false,writeCalls=0
     let d=dir(mode)
-    let accounting=DiagnosticWriteBudget(retryClock:{tick},writer:{fd,p,n in
+    let accounting=LegacyFixtureWriteBudget(retryClock:{tick},writer:{fd,p,n in
         if mode=="initial-ledger" && broken{errno=ENOSPC;return -1};return Darwin.write(fd,p,n)
     })
-    let store=DiagnosticLogStore(directory:d,policy:.incidentDefault,persistentOwnership:true,writeBudget:accounting,retryClock:{tick},writer:{fd,p,n in
+    let store=LegacyFixtureStore(directory:d,policy:.incidentDefault,persistentOwnership:true,writeBudget:accounting,retryClock:{tick},writer:{fd,p,n in
         writeCalls+=1
         let text=String(data:Data(bytes:p!,count:n),encoding:.utf8) ?? ""
         if broken && ((mode=="payload" && text=="payload") || (mode=="index" && text.contains("writeBudgetRequired"))) {errno=ENOSPC;return -1}
@@ -81,8 +81,8 @@ for mode in ["payload","index","initial-ledger"] {
 // Ordinary detail quotas cannot stop new minimal occurrences. Repeated
 // failures are different events, not a 30-second/10-second aggregate.
 let emergency=dir("critical")
-var small=DiagnosticWriteBudget.Limits();small.automaticHour=5000;small.automaticDay=5000
-let ordinary=DiagnosticLogStore(directory:emergency,policy:.incidentDefault,persistentOwnership:true,writeBudget:DiagnosticWriteBudget(limits:small))
+var small=LegacyFixtureWriteBudget.Limits();small.automaticHour=5000;small.automaticDay=5000
+let ordinary=LegacyFixtureStore(directory:emergency,policy:.incidentDefault,persistentOwnership:true,writeBudget:LegacyFixtureWriteBudget(limits:small))
 _ = ordinary.verifyReadiness()
 check(ordinary.save(Data(repeating:32,count:4096),incident:1,phase:0,automatic:true) != .saved,"ordinary budget exhausted")
 let journal=DiagnosticCriticalJournal(directory:emergency)
@@ -138,7 +138,7 @@ check((try! records(reserveDir)).filter{$0.failure==cause}.count==20,"all real e
 // Minimum-only records are reviewable and included unchanged in the archive.
 let reviewDir=dir("review-source"),reviewJournal=DiagnosticCriticalJournal(directory:reviewDir)
 reviewJournal.record(cause);check(reviewJournal.flush(timeout:3),"minimum-only fixture saved")
-let reviewStore=DiagnosticLogStore(directory:reviewDir,policy:.incidentDefault,persistentOwnership:true)
+let reviewStore=LegacyFixtureStore(directory:reviewDir,policy:.incidentDefault,persistentOwnership:true)
 check(reviewStore.verifyReadiness().ready,"minimum-only store ownership")
 let export=root.appendingPathComponent("export")
 try! reviewStore.copyExportSnapshot(to:export,reviewMetadata:true)
@@ -203,7 +203,7 @@ quotaTrace.stopAndFlush()
 for i in 0..<40 {
     let directory=root.appendingPathComponent("first-use-\(i)")
     let j=DiagnosticCriticalJournal(directory:directory)
-    let store=DiagnosticLogStore(directory:directory,policy:.incidentDefault,persistentOwnership:true,writeBudget:DiagnosticWriteBudget())
+    let store=LegacyFixtureStore(directory:directory,policy:.incidentDefault,persistentOwnership:true,writeBudget:LegacyFixtureWriteBudget())
     j.record(cause)
     check(store.verifyReadiness().ready,"concurrent first-use detail writer \(i)")
     check(j.flush(timeout:3),"concurrent first-use minimum writer \(i)")

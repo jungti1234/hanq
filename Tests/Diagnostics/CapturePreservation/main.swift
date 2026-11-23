@@ -154,7 +154,8 @@ check(stalledCaptures.count==4,"writer resumes and receives both complete groups
 check(stalledCaptures.contains{$0.phase==0 && $0.frames.contains{$0.kind == .sourceBoundary && $0.category==31 && $0.count==29}},"deferred pre was frozen before writer and ring overwrite")
 check(stalledCaptures.allSatisfy{strict($0)},"stalled writer snapshots remain strict and bounded")
 
-// The legacy custom-retention writer still orders deferred and immediate pres.
+// A finite historical retention value no longer selects an ordered JSON writer.
+// Shared captures preserve overlapping automatic pre/post windows immediately.
 let folder=URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("hanq-capture-order-"+UUID().uuidString)
 defer{try? FileManager.default.removeItem(at:folder)}
 var orderTime=800.0
@@ -162,13 +163,15 @@ let ordered=InputIncidentTrace(secureInput:{false},destination:folder,clock:{ord
 ordered.captureForTest(.axDelay);ordered.flush();ordered.finishCaptureWindowsForTest();ordered.flush()
 orderTime=802;ordered.sourceBoundary(.manualEditUnverified,queued:31,awaitingOnset:1);ordered.flush()
 orderTime=811;ordered.captureForTest(.callbackDelay);ordered.flush()
-func stored()->[URL]{((try? FileManager.default.contentsOfDirectory(at:folder,includingPropertiesForKeys:nil)) ?? []).filter{$0.pathExtension=="json"}}
-check(stored().count==2,"new automatic pre waits behind older unfinished deferred pre")
+let shared=folder.appendingPathComponent(DiagnosticSharedStore.directoryName)
+func stored()->[URL]{((try? FileManager.default.contentsOfDirectory(at:shared,includingPropertiesForKeys:nil)) ?? []).filter{DiagnosticSharedStore.validName($0.lastPathComponent) && (try? DiagnosticSharedStore.readHeader($0).0.role) != 1}}
+check(stored().count==4,"new shared writer persists both overlapping pres without the retired interval gate")
 ordered.finishCaptureWindowsForTest();ordered.flush();orderTime=822;ordered.drainCapturesForTest();ordered.flush()
-check(stored().count==6,"chronological store receives all three pre/post groups")
-let orderedDocs=stored().compactMap{try? RecorderTrace.decode(Data(contentsOf:$0))}
-check(orderedDocs.count==6 && Set(orderedDocs.map{$0.incident})==Set([1,2,3]),"strict saved incidents have no retired deferred group")
-check(orderedDocs.compactMap{$0.storageBeforeWrite?.retired}.allSatisfy{$0==0},"ordered automatic publication has zero retirement")
+check(stored().count==6,"shared store receives all three pre/post groups")
+let orderedDocs=stored().compactMap{try? DiagnosticSharedStore.expand($0.lastPathComponent,in:shared)}
+check(orderedDocs.count==6 && Set(orderedDocs.map{$0.header.incident})==Set([1,2,3]),"all shared references expand without losing an incident")
+check(orderedDocs.contains{$0.frames.contains{$0.kind == .sourceBoundary && $0.count==31}},"overlapping boundary evidence remains in shared capture")
+check(ordered.sharedStatsForTest()?.saved==6,"all pre/post writes complete")
 
 // OFF also accounts for a protected post already queued behind a stalled writer.
 let cancelHeld=DispatchSemaphore(value:0),cancelRelease=DispatchSemaphore(value:0)
