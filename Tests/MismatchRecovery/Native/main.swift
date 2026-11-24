@@ -11,7 +11,9 @@ final class Fixture:NSObject,NSApplicationDelegate {
     var previousApp:NSRunningApplication?
     var added:[TISInputSource]=[]
     struct Case { let id:String; let mixed:Bool; var word=false;var action="";var flags:CGEventFlags=[];var suffix="ab";var replacement=false;var wholeSelection=false }
-    var cases:[Case] = CommandLine.arguments.contains("--selected-replacement-history")
+    var cases:[Case] = CommandLine.arguments.contains("--mixed-return")
+        ? KoreanKeyboardLayout.supportedIDs.flatMap { [Case(id:$0,mixed:false),Case(id:$0,mixed:true)] }
+        : CommandLine.arguments.contains("--selected-replacement-history")
         ? KoreanKeyboardLayout.supportedIDs.flatMap{id in [Case(id:id,mixed:false,replacement:true),Case(id:id,mixed:false,replacement:true,wholeSelection:true)]}
         : CommandLine.arguments.contains("--english-case")
         ? KoreanKeyboardLayout.supportedIDs.flatMap{id in [Case(id:id,mixed:false,action:"caps-on",flags:[],suffix:"ab"),Case(id:id,mixed:false,action:"caps-on",flags:.maskShift,suffix:"AB"),Case(id:id,mixed:false,action:"caps-on",flags:.maskAlphaShift,suffix:"AB"),Case(id:id,mixed:false,action:"caps-on",flags:[.maskShift,.maskAlphaShift],suffix:"AB")]}
@@ -57,7 +59,13 @@ final class Fixture:NSObject,NSApplicationDelegate {
         print(ok && restored ? "PASS: \(message)":"FAIL: \(message); restoration=\(restored)");fflush(stdout);exit(ok && restored ? 0:1)
     }
     func next(){
-        guard !cases.isEmpty else{finish(true,"all five native IMEs repaired original key + queued vowel/final without source substitution");return}
+        guard !cases.isEmpty else {
+            let message = CommandLine.arguments.contains("--mixed-return")
+                ? "all five native IMEs preserved the mixed prefix, final consonant and next syllable"
+                : "all five native IMEs repaired original key + queued vowel/final without source substitution"
+            finish(true,message)
+            return
+        }
         guard NSApp.isActive,window.firstResponder === view else{finish(false,"fixture lost focus");return}
         view.inputContext?.discardMarkedText()
         view=NSTextView(frame:NSRect(x:0,y:0,width:640,height:220));view.isRichText=false
@@ -69,7 +77,10 @@ final class Fixture:NSObject,NSApplicationDelegate {
             guard TISEnableInputSource(source)==noErr else{finish(false,"enable failed");return};added.append(source)
         }
         guard InputSourceAccess.select("com.apple.keylayout.ABC")==noErr, TISSelectInputSource(source)==noErr else{finish(false,"select failed");return}
-        DispatchQueue.main.asyncAfter(deadline:.now()+0.2){self.repair(item)}
+        DispatchQueue.main.asyncAfter(deadline:.now()+0.2){
+            if CommandLine.arguments.contains("--mixed-return") { self.checkMixedReturn(item) }
+            else { self.repair(item) }
+        }
     }
     func repair(_ item:Case){
         let id=item.id

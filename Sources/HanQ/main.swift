@@ -260,10 +260,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var sourceSwitchBarrier: SourceSwitchBarrier = {
         let barrier=SourceSwitchBarrier()
         barrier.sourceEvidence=self.inputSourceEvidence
-        barrier.initialLayout = {
+        barrier.initialLayout = { target in
             let first=InputSourceAccess.currentID(),layout=InputSourceAccess.currentLayoutID()
             let override=InputSourceAccess.currentOverrideID(),last=InputSourceAccess.currentID()
-            return SourceSwitchBarrier.classifyInitialLayout(first:first,layout:layout,override:override,last:last)
+            return SourceSwitchBarrier.classifyInitialLayout(first:first,layout:layout,override:override,last:last,target:target)
         }
         barrier.didConfirmSource = { [weak self] id,timestamp in
             guard let self else{return}

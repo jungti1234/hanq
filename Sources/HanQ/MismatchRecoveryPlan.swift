@@ -152,6 +152,13 @@ struct MismatchRecoveryPlan {
             }
             start -= 1
         }
+        // A standalone jamo followed by a capital can equally be a deliberate
+        // source switch. Preserve it even if observation resumed inside the token.
+        if start > 0, start < caret, (!crossedSpace || lettersInFirstWord),
+           Self.isJamo(base.character(at: start - 1)), (65...90).contains(base.character(at: start)) {
+            return true
+        }
+        var previous: UInt16 = caret > 0 ? base.character(at: caret - 1) : 0
         var sawSyllable = start > 0 && (0xAC00...0xD7A3).contains(base.character(at: start - 1)) &&
             (!crossedSpace || lettersInFirstWord)
         // A plan born in the middle of a run longer than our evidence window
@@ -160,8 +167,14 @@ struct MismatchRecoveryPlan {
         for unit in insertion.utf16 {
             if (0xAC00...0xD7A3).contains(unit) { sawSyllable = true }
             if sawSyllable && Self.isLatinLetter(unit) { return true }
+            if Self.isJamo(previous) && (65...90).contains(unit) { return true }
+            previous = unit
         }
         return false
+    }
+
+    private static func isJamo(_ unit: UInt16) -> Bool {
+        (0x1100...0x11FF).contains(unit) || (0x3130...0x318F).contains(unit)
     }
 
     private static func isLatinLetter(_ unit: UInt16) -> Bool {
@@ -172,7 +185,7 @@ struct MismatchRecoveryPlan {
     // as a normally rendered prefix and literal Latin suffix. This proves
     // delivery only. Never use it to select or replay the visible text.
     func matchesMixedInputBeforeSwitch(text: String, selection: NSRange) -> Bool {
-        guard let insertion = twoSetInsertion(text: text, selection: selection, maximumKeys: 128) else { return false }
+        guard MismatchKeyboardLayout.supports(sourceID), let insertion = observedInsertion(text: text, selection: selection, maximumKeys: 128) else { return false }
         let suffix = insertion.utf16.reversed().prefix { (32...126).contains($0) }
         guard suffix.contains(where: Self.isLatinLetter), hasAmbiguousLatinInput(insertion) else { return false }
         let suffixCount = suffix.count
@@ -323,8 +336,12 @@ extension MismatchRecoveryPlan {
 // failure; never normalize arbitrary document jamo or unobserved input.
 extension MismatchRecoveryPlan {
     private func twoSetInsertion(text:String,selection:NSRange,maximumKeys:Int=64)->String? {
+        guard sourceID == KoreanKeyboardLayout.twoSetID else { return nil }
+        return observedInsertion(text: text, selection: selection, maximumKeys: maximumKeys)
+    }
+    private func observedInsertion(text: String, selection: NSRange, maximumKeys: Int) -> String? {
         let ns=text as NSString,length=selection.location-caret
-        guard sourceID==KoreanKeyboardLayout.twoSetID,verifiedReplacement==nil,
+        guard verifiedReplacement==nil,
               !codes.isEmpty,codes.count<=maximumKeys,selection.length==0,caret>=0,length>0,
               selection.location<=ns.length else{return nil}
         let range=NSRange(location:caret,length:length)

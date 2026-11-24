@@ -13,8 +13,8 @@ private final class ReturnEditor {
     let field = AXUIElementCreateApplication(89001)
     var window = AXUIElementCreateApplication(89002)
     let english = "com.apple.keylayout.ABC"
-    let korean = KoreanKeyboardLayout.twoSetID
-    var selected = KoreanKeyboardLayout.twoSetID
+    let korean: String
+    var selected: String
     var latin = false
     var conflict = false
     var prefix: String
@@ -31,7 +31,9 @@ private final class ReturnEditor {
     var range: NSRange { NSRange(location: (prefix + composition).utf16.count, length: highlighted.utf16.count) }
     var stamp: UInt64 { UInt64(time * 1_000_000_000) }
 
-    init(left: String, right: String) {
+    init(left: String, right: String, sourceID: String = KoreanKeyboardLayout.twoSetID) {
+        korean = sourceID
+        selected = sourceID
         prefix = left
         self.right = right
         let b = barrier, e = engine
@@ -68,7 +70,7 @@ private final class ReturnEditor {
         e.testPostAtTap = { [unowned self] ev, _ in insert(ev) }
         b.now = { [unowned self] in time }
         b.source = { [unowned self] in selected }
-        b.initialLayout = { [unowned self] in selected != korean ? .sourceChanged : (conflict ? .conflicting : .ready) }
+        b.initialLayout = { [unowned self] target in selected != target ? .sourceChanged : (conflict ? .conflicting : .ready) }
         b.read = { [unowned self] in .init(field: field, text: body, selection: range) }
         b.readFocus = { [unowned self] in field }
         b.fieldWindow = { [unowned self] _ in window }
@@ -266,4 +268,183 @@ func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔
         }
     }
     print("PASS exact body, caret, selection boundary and queues: repairs=\(verified) untouched=\(untouched) seed=7265")
+}
+
+
+func checkLayoutReturn(_ id: String) -> Bool {
+    let word: String
+    switch id {
+    case KoreanKeyboardLayout.twoSetID: word = "rks"
+    case KoreanKeyboardLayout.threeSetID, KoreanKeyboardLayout.threeSet390ID: word = "kfs"
+    default: word = "gan"
+    }
+    let next = String(word.prefix(2))
+    var passed = true
+    func record(_ name: String, _ ok: Bool) {
+        print("MATRIX \(id) \(name) \(ok ? "PASS" : "FAIL")")
+        passed = passed && ok
+    }
+    var mixed = MismatchRecoveryPlan(before: "앞뒤", caret: 1, sourceID: id)
+    for ch in word + "Q" {
+        let key = ReturnEditor.positions[ch]!
+        _ = mixed.append(code: key.0, shift: key.1)
+    }
+    record("mixed-spelling", mixed.matchesMixedInputBeforeSwitch(text: "앞간Q뒤", selection: NSRange(location: 3, length: 0)))
+    let e = MismatchRecoveryEngine()
+    e.recoverySourceID = id; e.testSource = { id }
+    e.testActivationNeeded = { true }
+    e.activationShortcut.configuration = { (49, .maskControl) }
+    record("configured-activation", e.activationShortcutSupported())
+    for mode in ["native", "conflict-but-correct", "wrong-ascii"] {
+        let r = ReturnEditor(left: "🙂", right: "뒤", sourceID: id)
+        r.type(word); r.change(r.english); r.type("Q")
+        r.conflict = mode != "native"; r.change(id); r.latin = mode == "wrong-ascii"
+        let keys = Array(word)
+        r.key(keys[0], down:true); r.key(keys[0], down:false); r.key(keys[1], down:true)
+        r.time += 0.09
+        for _ in 0..<8 { r.barrier.step() }
+        r.key(keys[1], down:false); r.type(String(keys.dropFirst(2)))
+        if !r.engine.recovering { r.engine.consumeIdleSnapshot(r.snapshot()) }
+        r.waitForReceipt()
+        r.type(next); r.waitForReceipt()
+        let repaired = r.confirmedRanges.count == 1 && r.writes.count == 1 && r.writes[0].location == 4
+        let ok = r.body == "🙂간Q간가뒤" && r.range == NSRange(location: 6, length: 0)
+            && (mode == "wrong-ascii" ? repaired : r.writes.isEmpty && r.confirmedRanges.isEmpty)
+            && r.engine.retained.isEmpty && r.engine.pending.isEmpty && !r.engine.suspended
+        record(mode, ok)
+        if !ok { print("FIXTURE", r.body, r.range, r.writes, r.stages.suffix(6)) }
+    }
+    // Each target owns its receipt, even when the next source is also Korean.
+    let guarded = ReturnEditor(left: "간", right: "뒤", sourceID: id)
+    guarded.engine.canBeginRepair = { false }
+    guarded.change(guarded.english); guarded.type("Q")
+    guarded.conflict = true; guarded.change(id); guarded.latin = true
+    let first = word.first!
+    guarded.type(String(first)); guarded.time += 0.09
+    for _ in 0..<6 { guarded.barrier.step() }
+    var evidence = MismatchRecoveryPlan(before: "간Q뒤", caret: 2, sourceID: id)
+    let firstKey = ReturnEditor.positions[first]!
+    _ = evidence.append(code: firstKey.0, shift: firstKey.1)
+    let snap = guarded.snapshot()
+    record("original-receipt", guarded.barrier.confirmsReturnedASCII(evidence, snapshot: snap, beforeKey: false))
+    for other in KoreanKeyboardLayout.supportedIDs where other != id {
+        var foreign = evidence
+        foreign.sourceID = other
+        guarded.selected = id
+        let rejectedPlan = !guarded.barrier.confirmsReturnedASCII(foreign, snapshot: snap, beforeKey: false)
+        guarded.selected = other
+        record("different-layout-"+other, rejectedPlan && !guarded.barrier.confirmsReturnedASCII(evidence, snapshot: snap, beforeKey: false))
+    }
+
+    var history = MismatchReplayLedger(before: "🙂뒤", caret: 2)
+    let pair = next.map { ReturnEditor.positions[$0]! }
+    for _ in 0..<64 { history.append(source: id, keys: pair) }
+    var compacted = history.compactedForObservation()
+    compacted?.append(source: id, keys: pair)
+    record("long-history", compacted?.text == "🙂" + String(repeating: "가", count: 65) + "뒤"
+        && compacted?.selection == NSRange(location: 67, length: 0))
+
+    // Check native ASCII (including Roman-layout letters) while the TIS layout is
+    // reporting ABC. A literal that this IME normally produces must pass through.
+    let literals = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*1234567890.,;"
+    var literalCount = 0
+    for ch in literals {
+        guard let key = ReturnEditor.positions[ch],
+              MismatchKeyboardLayout.output(code:key.0,shift:key.1,sourceID:id) == ch else { continue }
+        let r = ReturnEditor(left:"한",right:"",sourceID:id)
+        r.change(r.english); r.type("Q"); r.conflict = true; r.change(id)
+        r.type(String(ch))
+        r.engine.consumeIdleSnapshot(r.snapshot())
+        record("native-literal-\(ch)", r.body == "한Q" + String(ch) && r.writes.isEmpty
+            && !r.engine.recovering && !r.stages.contains("initial_layout_wait"))
+        literalCount += 1
+    }
+    record("native-literal-coverage",literalCount > 0)
+
+    // Sample a reproducible range of mixed prefixes and verified Korean input,
+    // without relying on the product renderer for the expected Hangul.
+    var samples = [("가",String(word.prefix(2))), ("간",word)]
+    switch id {
+    case KoreanKeyboardLayout.twoSetID: samples += [("한글","gksrmf"),("가나다","rkskek")]
+    case KoreanKeyboardLayout.threeSetID: samples += [("안","jfs"),("2ᆱᆭ","KFS"),("ᇂᆻᆸ","123")]
+    case KoreanKeyboardLayout.threeSet390ID: samples += [("안","jfs"),("5ᆩᆭ","KFS"),("ᇂᆻᆸ","123")]
+    case KoreanKeyboardLayout.gongjinID: samples += [("ㅐ","ae"),("하늘","haneul"),("한국","hangug")]
+    default: samples += [("ㅏㅓ","ae"),("하너ㅜㄹ","haneul"),("한국","hangug")]
+    }
+    let englishTokens = ["API","Q","v1.2","AbC","Wi-Fi","7bit"]
+    var seed: UInt64 = 447
+    for trial in 0..<24 {
+        func index(_ count: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1
+            return Int((seed >> 32) % UInt64(count))
+        }
+        let first = samples[index(samples.count)], token = englishTokens[index(englishTokens.count)]
+        let last = samples[index(samples.count)], left = ["🙂","첫 ",""][index(3)]
+        let r = ReturnEditor(left:left,right:" 끝",sourceID:id)
+        r.type(first.1); r.change(r.english); r.type(token); r.change(id); r.type(last.1)
+        r.engine.consumeIdleSnapshot(r.snapshot()); r.waitForReceipt()
+        let target = left + first.0 + token + last.0
+        record("mixed-\(trial)",r.body == target + " 끝" && r.range == NSRange(location: target.utf16.count,length:0) && r.writes.isEmpty && r.engine.retained.isEmpty)
+    }
+
+
+    let preserved = returnedQueueChecks(id, word: word)
+    return passed && preserved
+}
+
+private func returnedQueueChecks(_ id: String, word: String) -> Bool {
+    var passed = true
+    let keys = Array(word)
+    for mode in ["recover", "retain", "english-only", "mixed-queue"] {
+        let r = ReturnEditor(left: "간", right: "뒤", sourceID: id)
+        let engine = r.engine
+        var attempts = 0
+        var shortcutRequests = 0
+        engine.testActivationNeeded = { true }
+        engine.activationShortcut.canPost = { true }
+        engine.activationShortcut.modifiersClear = { true }
+        engine.activationShortcut.configuration = { mode == "recover" ? (49, .maskControl) : nil }
+        engine.activationShortcut.releasePosted = { _,_ in }
+        engine.activationShortcut.post = { ev in
+            if ev.type == .keyDown {
+                shortcutRequests += 1
+                r.commit(); r.selected = id; r.latin = false
+            }
+        }
+        engine.testSelectSource = { requested in
+            r.commit(); r.selected = requested; r.latin = true
+            if requested == id { attempts += 1 }
+            return noErr
+        }
+        r.change(r.english); r.type("Q")
+        r.conflict = true; r.change(id); r.latin = true; r.time += 0.22
+        r.type(String(keys[0])); r.key(keys[1],down:true)
+        r.time += 0.087
+        for _ in 0..<8 { r.barrier.step() }
+        r.key(keys[1],down:false)
+        if !engine.recovering { engine.consumeIdleSnapshot(r.snapshot()) }
+        guard engine.recovering else { print("MATRIX \(id) \(mode) FAIL no recovery"); passed=false; continue }
+        let koreanTail = String(keys[2]) + String(keys.prefix(2))
+        if mode != "english-only" { r.type(koreanTail) }
+        let switchToEnglish = mode == "english-only" || mode == "mixed-queue"
+        if switchToEnglish { engine.userToggleDuringRecovery(at:r.stamp); r.type("AbC") }
+        func edges(_ events: [CGEvent]) -> [[Int]] {
+            events.map { [$0.type == .keyDown ? 1 : 0, Int($0.getIntegerValueField(.keyboardEventKeycode)), $0.flags.contains(.maskShift) ? 1 : 0] }
+        }
+        let original = edges(engine.pending)
+        let raw = String(keys.prefix(2))
+        r.waitForReceipt()
+        let expectPark = mode == "retain" || mode == "mixed-queue"
+        let body = mode == "recover" ? "간Q간가뒤" : "간Q" + raw + (mode == "english-only" ? "AbC" : "") + "뒤"
+        let ok = r.body == body && r.range == NSRange(location: body.utf16.count - 1, length: 0)
+            && !engine.recovering && engine.pending.isEmpty && engine.suspended == expectPark
+            && r.selected == (switchToEnglish ? r.english : id)
+            && shortcutRequests == (mode == "recover" ? 1 : 0)
+            && (mode != "recover" || attempts == 1)
+            && (expectPark ? !original.isEmpty && edges(engine.retained) == original : engine.retained.isEmpty)
+        print("MATRIX \(id) \(mode) \(ok ? "PASS" : "FAIL")")
+        if !ok { print("QUEUE",body,r.body,attempts,shortcutRequests,engine.rollbackReason,original.count,engine.retained.count,r.range) }
+        passed = passed && ok
+    }
+    return passed
 }

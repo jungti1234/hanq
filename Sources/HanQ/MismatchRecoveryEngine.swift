@@ -1076,8 +1076,9 @@ final class MismatchRecoveryEngine:NSObject {
         // exact failed result is stronger evidence than a process-local TIS
         // layout snapshot. Spend the one activation fallback here if unused;
         // never extend the progress deadline or loop after that fallback fails.
-        if !activationFallbackTried, koreanRetries == 2 || romanReplayConfirmed,
-           activationShortcutSupported(), koreanRetries == 2 || permitsEarlyActivation {
+        let lastTwoSetAttempt = koreanRetries == 2 && recoverySourceID == mismatchKoreanID
+        if !activationFallbackTried, activationShortcutSupported(),
+           lastTwoSetAttempt || (romanReplayConfirmed && permitsEarlyActivation) {
             prepareFinalActivation(retry,fresh,confirmedReplayFailure:true);return
         }
         let activationBudget=(testActivationNeeded != nil || (testSelectSource==nil && recoverySourceID==mismatchKoreanID && activationShortcut.configured)) ? 0.6:0

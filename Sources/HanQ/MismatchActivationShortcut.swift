@@ -74,7 +74,7 @@ extension MismatchRecoveryEngine {
         if testSnapshot != nil || testSource != nil || testSelectSource != nil {
             guard testActivationNeeded != nil else{return false}
         }
-        return recoverySourceID==mismatchKoreanID && currentSource()==recoverySourceID && activationShortcut.configured
+        return MismatchKeyboardLayout.supports(recoverySourceID) && currentSource()==recoverySourceID && activationShortcut.configured
     }
     func needsActivationShortcut()->Bool {
         if let testActivationNeeded{return testActivationNeeded()}
@@ -107,6 +107,16 @@ extension MismatchRecoveryEngine {
         guard recovering,!rollingBack else{return}
         // The direct Korean selection itself can lose the override. Inspect
         // after that phase settles, immediately before the final HID edit.
+        // Other IMEs may legitimately use ASCII keys. Only a verified failed
+        // replay and an unchanged user source permit this optional fallback.
+        if recoverySourceID != mismatchKoreanID && !confirmedReplayFailure {
+            replaceAndReplay(candidate,before)
+            return
+        }
+        if recoverySourceID != mismatchKoreanID && !permitsEarlyActivation {
+            if koreanRetries < 2 { retryKorean(candidate,before) } else { abort("korean_retry_exhausted") }
+            return
+        }
         let early = confirmedReplayFailure && koreanRetries < 2
         if early {
             guard !activationFallbackTried, activationShortcutSupported(), permitsEarlyActivation else {

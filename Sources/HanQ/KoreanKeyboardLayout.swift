@@ -18,6 +18,15 @@ struct KoreanKeyboardLayout {
     static let hncID = "com.apple.inputmethod.Korean.HNCRomaja"
     static let supportedIDs = [twoSetID, threeSetID, threeSet390ID, gongjinID, hncID]
 
+    // TIS reports the input method and its active translation table separately.
+    static let translationIDs = [
+        twoSetID: "com.apple.keylayout.2SetHangul",
+        threeSetID: "com.apple.keylayout.3SetHangul",
+        threeSet390ID: "com.apple.keylayout.390Hangul",
+        gongjinID: "com.apple.keylayout.GJCRomaja",
+        hncID: "com.apple.keylayout.HNCRomaja"
+    ]
+
     static func load(sourceID: String?) -> KoreanKeyboardLayout? {
         switch sourceID {
         case twoSetID: return twoSet

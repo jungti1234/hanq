@@ -4,11 +4,23 @@ import Carbon
 func runInitialLayoutTests(){
     typealias B=SourceSwitchBarrier
     let ko=KoreanKeyboardLayout.twoSetID,abc="com.apple.keylayout.ABC",layout="com.apple.keylayout.2SetHangul"
-    check(B.classifyInitialLayout(first:ko,layout:abc,override:nil,last:ko) == .conflicting,"coherent ABC without override")
-    check(B.classifyInitialLayout(first:ko,layout:abc,override:layout,last:ko) == .unknown,"overridden ABC cannot trigger guard")
-    check(B.classifyInitialLayout(first:ko,layout:layout,override:layout,last:ko) == .ready,"actual Korean layout")
-    check(B.classifyInitialLayout(first:ko,layout:abc,override:nil,last:abc) == .unknown,"torn read")
-    check(B.classifyInitialLayout(first:abc,layout:abc,override:nil,last:abc) == .sourceChanged,"explicit switch away")
+    let targets = [(ko,layout), (KoreanKeyboardLayout.threeSetID,"com.apple.keylayout.3SetHangul"),
+                   (KoreanKeyboardLayout.threeSet390ID,"com.apple.keylayout.390Hangul"),
+                   (KoreanKeyboardLayout.gongjinID,"com.apple.keylayout.GJCRomaja"),
+                   (KoreanKeyboardLayout.hncID,"com.apple.keylayout.HNCRomaja")]
+    for (id, nativeLayout) in targets {
+        func classify(_ first: String, _ layout: String, _ override: String?, _ last: String) -> B.InitialLayout {
+            B.classifyInitialLayout(first:first,layout:layout,override:override,last:last,target:id)
+        }
+        check(classify(id,abc,nil,id) == .conflicting,"coherent ABC without override")
+        check(classify(id,abc,nativeLayout,id) == .unknown,"overridden ABC cannot trigger guard")
+        check(classify(id,nativeLayout,nativeLayout,id) == .ready,"actual Korean layout")
+        check(classify(id,abc,nil,abc) == .unknown,"torn read")
+        check(classify(abc,abc,nil,abc) == .sourceChanged,"explicit switch away")
+        for (other, otherLayout) in targets where other != id {
+            check(classify(id,otherLayout,nil,id) == .unknown,"different Korean layout cannot acknowledge this target")
+        }
+    }
     // A direct switch with no editor never captures originals. The two taps
     // must agree on the first event before any later editor may use its history.
     do {
@@ -20,9 +32,9 @@ func runInitialLayoutTests(){
         check(!b.request(ko,at:900),"outside switch uses direct selection")
         b.didSwitchWithoutField(ko,at:900);t=0.123
         check(!b.receive(.keyDown,first) && b.unfocusedKeyCheck(1000) == .matched,"first outside key stays native and has a matching identity")
-        b.initialLayout={.conflicting}
+        b.initialLayout={_ in .conflicting}
         check(b.unfocusedKeyCheck(1000,needsReadyLayout:true) == .layoutNotReady,"entirely ASCII output waits without owning input")
-        b.initialLayout={.ready}
+        b.initialLayout={_ in .ready}
         check(b.unfocusedKeyCheck(1000,needsReadyLayout:true) == .matched,"two-set layout allows the verified native replay")
         t=0.211
         check(!b.receive(.keyDown,second) && b.unfocusedKeyCheck(2000) == .firstDiffers,"later keys cannot claim the first identity")
@@ -52,7 +64,7 @@ func runInitialLayoutTests(){
         for mode in ["prior","direct","direct_slow","conflict","foreign","expired","wrong_request","first_missing","first_moved","last_missing","last_moved","missing_both","other_source","unknown_timestamp","busy_recovery"] {
             let b=B();var time=10.0,pid:pid_t=91,reads=0,posts=0
             var window:AXUIElement?=["direct","direct_slow"].contains(mode) ? root:mode=="conflict" ? other:nil
-            b.now={time};b.frontPID={pid};b.frontWindow={_ in window};b.read={nil};b.initialLayout={.ready};b.ready={mode != "busy_recovery"}
+            b.now={time};b.frontPID={pid};b.frontWindow={_ in window};b.read={nil};b.initialLayout={_ in .ready};b.ready={mode != "busy_recovery"}
             b.readForOutsideSwitch={reads+=1;return(nil,mode=="missing_both" ? nil:(pid,root))}
             b.send={_ in posts+=1}
             let id=mode=="other_source" ? abc:ko, stamp:UInt64=mode=="unknown_timestamp" ? 0:900
@@ -69,7 +81,7 @@ func runInitialLayoutTests(){
             let result=b.unfocusedKeyCheck(first.timestamp,needsReadyLayout:true)
             if mode=="prior" {
                 check(result == .matchedPreSwitchWindow && result.allowsReplay,"same original window required at first key and before repair")
-                b.initialLayout={.conflicting}
+                b.initialLayout={_ in .conflicting}
                 check(!b.unfocusedKeyCheck(first.timestamp,needsReadyLayout:true).allowsReplay,"an unready native layout prevents replay")
             }else if ["direct","direct_slow"].contains(mode){check(result == .matched,"original direct path retained")}
             else{check(!result.allowsReplay,"moved, absent or stale evidence never allows editing: \(mode)")}
@@ -89,7 +101,7 @@ func runInitialLayoutTests(){
             b.source={self.src};b.select={self.src=$0;return noErr}
             b.read={guard let f=self.focus else{return nil};return .init(field:f,text:self.body,selection:self.selection)}
             b.readFocus={self.focus};b.fieldWindow={_ in self.window}
-            b.initialLayout={self.probes+=1;return self.phase}
+            b.initialLayout={_ in self.probes+=1;return self.phase}
             b.applySelection={_,_ in self.writes+=1;return false}
             b.retained={self.saved += $0.map(Self.edge)}
             b.trace={ self.stages.append($0) }

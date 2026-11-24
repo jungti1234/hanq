@@ -4,7 +4,8 @@ import Carbon
 func runMixedInputTests() {
     // Run the product's normal key observation, detection and source barrier
     // against a separate editor model. No key is posted to macOS.
-    for missedFirstSwitch in [false, true] {
+    func verifySwitch(_ ko: String, prefix: (String, String), suffix: (String, String), missedFirstSwitch: Bool) {
+        print("SWITCH", ko, prefix.1, missedFirstSwitch ? "first unobserved" : "first observed"); fflush(stdout)
         let engine = MismatchRecoveryEngine(), barrier = SourceSwitchBarrier()
         let sourceEvidence = MismatchSourceEvidence()
         var selected = ko, editorSource = ko, stamp: UInt64 = 100
@@ -15,7 +16,7 @@ func runMixedInputTests() {
         func snapshot() -> MismatchSnapshot {
             .init(element: field, text: editor.text, selection: editor.selection)
         }
-        func unexpectedEdit() { check(false, "ordinary bilingual text must not trigger selection, source cycling, buffering or replay") }
+        func unexpectedEdit(_ operation: String) { check(false, "unexpected \(operation) for \(ko) at \(editor.text)") }
         engine.enabled = true
         engine.testFastContext = { true }
         engine.locked = field
@@ -23,17 +24,17 @@ func runMixedInputTests() {
         engine.testSource = { selected }
         engine.testSnapshot = { snapshot() }
         engine.testSelectionWritable = { _ in true }
-        engine.testSelectSource = { _ in unexpectedEdit(); return -50 }
-        engine.testSetRange = { _,_ in unexpectedEdit(); return .cannotComplete }
-        engine.testPost = { _ in unexpectedEdit() }
-        engine.testPostAtTap = { _,_ in unexpectedEdit() }
+        engine.testSelectSource = { _ in unexpectedEdit("source edit"); return -50 }
+        engine.testSetRange = { _,_ in unexpectedEdit("selection edit"); return .cannotComplete }
+        engine.testPost = { _ in unexpectedEdit("post") }
+        engine.testPostAtTap = { _,_ in unexpectedEdit("post at tap") }
         engine.sourceEvidence = sourceEvidence
         barrier.sourceEvidence = sourceEvidence
         barrier.read = { .init(field: field, text: editor.text, selection: editor.selection) }
         barrier.readFocus = { field }
         barrier.source = { selected }
-        barrier.send = { _ in unexpectedEdit() }
-        barrier.retained = { _ in unexpectedEdit() }
+        barrier.send = { _ in unexpectedEdit("barrier replay") }
+        barrier.retained = { _ in unexpectedEdit("barrier retain") }
         barrier.select = { id in
             selected = id
             editorSource = id
@@ -76,7 +77,7 @@ func runMixedInputTests() {
                 send(code, shifted: letter.isUppercase, down: false)
             }
         }
-        typeLetters("gks")
+        typeLetters(prefix.0)
         if missedFirstSwitch {
             // The editor accepted English but the observer still saw Korean.
             editorSource = en
@@ -84,7 +85,7 @@ func runMixedInputTests() {
             switchTo(en)
         }
         send(12, shifted: true, down: true)
-        check(editor.text == "앞🙂한Q뒤", "editor has correct uppercase Q")
+        check(editor.text == "앞🙂" + prefix.1 + "Q뒤", "editor has correct uppercase Q")
         if missedFirstSwitch {
             send(12, shifted: true, down: false)
             RunLoop.current.run(until: Date().addingTimeInterval(0.03))
@@ -94,12 +95,29 @@ func runMixedInputTests() {
         }
         switchTo(ko)
         if !missedFirstSwitch { send(12, shifted: true, down: false) }
-        typeLetters("answpdlsrk")
+        typeLetters(suffix.0)
         let physical = received.compactMap { MismatchRecoveryPlan.character($0.0, $0.1) }.joined()
-        check(physical == "gksQanswpdlsrk" && originalEvents == received.count * 2, "each original key and release passed once")
+        check(physical == prefix.0 + "Q" + suffix.0 && originalEvents == received.count * 2, "each original key and release passed once")
         check(requested == (missedFirstSwitch ? [ko] : [en, ko]), "only explicit requests changed the source")
-        check(editor.text == "앞🙂한Q문제인가뒤" && editor.selection == NSRange(location: 9, length: 0), "complete text and UTF-16 caret match")
+        let expected = "앞🙂" + prefix.1 + "Q" + suffix.1
+        check(editor.text == expected + "뒤" && editor.selection == NSRange(location: expected.utf16.count, length: 0), "complete text and UTF-16 caret match")
         check(engine.pending.isEmpty && engine.retained.isEmpty && !barrier.busy, "no pending transaction or lost input")
+    }
+
+    let mixedCases = [
+        (KoreanKeyboardLayout.twoSetID, ("gks","한"), ("answpdlsrk","문제인가")),
+        (KoreanKeyboardLayout.threeSetID, ("kfs","간"), ("jf","아")),
+        (KoreanKeyboardLayout.threeSet390ID, ("kfs","간"), ("jf","아")),
+        (KoreanKeyboardLayout.gongjinID, ("gan","간"), ("haneul","하늘")),
+        (KoreanKeyboardLayout.hncID, ("gan","간"), ("haneul","하너ㅜㄹ")),
+        (KoreanKeyboardLayout.twoSetID, ("r","ㄱ"), ("rk","가")),
+        (KoreanKeyboardLayout.threeSetID, ("KFS","2ᆱᆭ"), ("kf","가")),
+        (KoreanKeyboardLayout.threeSet390ID, ("KFS","5ᆩᆭ"), ("kf","가")),
+        (KoreanKeyboardLayout.gongjinID, ("ae","ㅐ"), ("ga","가")),
+        (KoreanKeyboardLayout.hncID, ("ae","ㅏㅓ"), ("ga","가"))
+    ]
+    for (id,prefix,suffix) in mixedCases {
+        for missed in [false, true] { verifySwitch(id, prefix: prefix, suffix: suffix, missedFirstSwitch: missed) }
     }
 
     // Exercise a long elapsed candidate and the fragmented matcher after more
@@ -144,6 +162,8 @@ func runMixedInputTests() {
         check(plan.matchesMixedInputBeforeSwitch(text: text, selection: caret), "complete literal token permits requested switch")
         check(!plan.matchesMixedInputBeforeSwitch(text: text.lowercased(), selection: caret), "case change cannot authorize a switch")
     }
+    check(mixedPlan("b", before: "ㄱQa").hasAmbiguousLatinInput("b"), "jamo mixed token remains protected after the capital")
+    check(!mixedPlan("k", before: "ㄱ").hasAmbiguousLatinInput("k"), "plain failed vowel remains eligible for existing jamo repairs")
     check(mixedPlan("i", before: "값ap").hasAmbiguousLatinInput("i"), "tracking within api cannot replace its final letter")
     check(mixedPlan("F", before: "한q" + String(repeating: "0", count: 385)).hasAmbiguousLatinInput("F"), "a long numeric interval cannot authorize rewriting only its tail")
     check(mixedPlan("W", before: "한Wi-Fi A1 ").hasAmbiguousLatinInput("W"), "continued mixed phrase survives a space")

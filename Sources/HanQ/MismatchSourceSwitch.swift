@@ -76,7 +76,11 @@ struct MismatchReplayLedger {
     // Prove the entire latest Korean interval, including keys whose first
     // consonant was already acknowledged before the buffered batch arrived.
     func lastTwoSetPlan(maximumKeys:Int=64)->MismatchRecoveryPlan? {
-        guard let segment=segments.last,segment.source==KoreanKeyboardLayout.twoSetID,
+        guard segments.last?.source == KoreanKeyboardLayout.twoSetID else { return nil }
+        return lastKoreanPlan(maximumKeys: maximumKeys)
+    }
+    func lastKoreanPlan(maximumKeys: Int) -> MismatchRecoveryPlan? {
+        guard let segment=segments.last, MismatchKeyboardLayout.supports(segment.source),
               caret>=0,caret<=before.utf16.count else{return nil}
         let committed=segments.dropLast().map{Self.render($0)}.joined()
         let base=(before as NSString).replacingCharacters(in:NSRange(location:caret,length:0),with:committed)
@@ -87,16 +91,16 @@ struct MismatchReplayLedger {
         return candidate
     }
     // Fold only the committed prefix. Keeping many keys from the current
-    // two-set composition lets a future vowel still move its final consonant.
+    // composition preserves context for the selected layout's next key.
     func compactedForObservation() -> Self? {
         guard postDeletionPrefixCount == nil, let last = segments.last,
-              last.source == KoreanKeyboardLayout.twoSetID || last.source.hasPrefix("com.apple.keylayout."),
+              MismatchKeyboardLayout.supports(last.source) || last.source.hasPrefix("com.apple.keylayout."),
               caret >= 0, caret <= before.utf16.count else { return nil }
         var prefix = segments.dropLast().map(Self.render).joined()
         var tail = last.keys
         if tail.count > 64 {
             let rendered = Self.render(last)
-            // At most a handful of two-set strokes belong to one syllable.
+            // Fold only at a split whose independently rendered parts match.
             // Verify the split against the entire prior rendering before folding.
             let middle = tail.count - 48
             var found = false

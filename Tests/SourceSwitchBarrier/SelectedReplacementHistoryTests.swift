@@ -18,7 +18,7 @@ func runSelectedReplacementBarrierTests(){
         let b=SourceSwitchBarrier(),e=MismatchRecoveryEngine()
         b.now={time};b.source={source};b.select={source=$0;return noErr}
         b.read={.init(field:field,text:body,selection:selection)};b.readFocus={field};b.fieldWindow={_ in window}
-        b.initialLayout={conflict ? .conflicting:.ready}
+        b.initialLayout={_ in conflict ? .conflicting:.ready}
         b.applySelection={_,_ in check(false,"unexpected barrier selection write");return false}
         b.retained={_ in check(false,"unexpected barrier retained input")};b.trace={stages.append($0)}
         e.enabled=true;e.lastSource=ko;e.locked=field

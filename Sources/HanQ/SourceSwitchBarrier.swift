@@ -22,7 +22,7 @@ final class SourceSwitchBarrier {
     // Only an explicit switch can arm this guard. A layout report cannot
     // authorize an edit to text the application already owns.
     enum InitialLayout {case conflicting, ready, unknown, sourceChanged}
-    var initialLayout:(()->InitialLayout)?
+    var initialLayout:((String)->InitialLayout)?
     var fieldWindow:(AXUIElement)->AXUIElement? = { field in
         var raw:CFTypeRef?
         guard AXUIElementCopyAttributeValue(field,kAXWindowAttribute as CFString,&raw) == .success,
@@ -30,12 +30,14 @@ final class SourceSwitchBarrier {
         return (raw as! AXUIElement)
     }
     private struct Entry {
+        let sourceID: String
         let field: AXUIElement
         let at: Double
         let switchTimestamp: CGEventTimestamp
         let returnBaseline: Snapshot?
     }
     private struct HeldStart {
+        let sourceID: String
         let snapshot: Snapshot
         let window: AXUIElement
         let until: Double
@@ -45,6 +47,7 @@ final class SourceSwitchBarrier {
     // The two taps see the same delivery at different times. Keep the
     // committed caret and the keys passed after it for this one fallback.
     private struct ReturnReceipt {
+        let sourceID: String
         let baseline: Snapshot
         let window: AXUIElement
         let expires: Double
@@ -96,7 +99,7 @@ final class SourceSwitchBarrier {
         guard let original=attempt.window else{return .originalWindowMissing}
         guard let current=frontWindow(attempt.pid) else{return .currentWindowMissing}
         guard CFEqual(original,current) else{return .windowChanged}
-        guard !needsReadyLayout || initialLayout?() == .ready else{return .layoutNotReady}
+        guard !needsReadyLayout || initialLayout?(KoreanKeyboardLayout.twoSetID) == .ready else{return .layoutNotReady}
         return attempt.usedPrior ? .matchedPreSwitchWindow:.matched
     }
     // Only remember the identity of a key that is passing normally. Changing
@@ -127,7 +130,7 @@ final class SourceSwitchBarrier {
             unfocusedSwitch=attempt
             guard incidentTrace.enabled,let initialLayout else{return}
             let stage:InputIncidentTrace.BoundaryStage
-            switch initialLayout() {
+            switch initialLayout(KoreanKeyboardLayout.twoSetID) {
             case .conflicting:stage = .unfocusedLayoutConflict
             case .ready:stage = .unfocusedLayoutReady
             case .unknown:stage = .unfocusedLayoutUnknown
@@ -140,6 +143,7 @@ final class SourceSwitchBarrier {
     private var resumedOriginalBatch=false
     private var heldStart:HeldStart?
     private struct NativeBatch {
+        let sourceID: String
         let field:AXUIElement,window:AXUIElement
         let layout:InitialLayout
         var keys:[(UInt16,Bool)]=[]
@@ -147,10 +151,10 @@ final class SourceSwitchBarrier {
     }
     private var nativeBatch:NativeBatch?
     private var nextLayoutCheck=0.0
-    static func classifyInitialLayout(first:String,layout:String,override:String?,last:String)->InitialLayout {
-        let target=KoreanKeyboardLayout.twoSetID, keyboard="com.apple.keylayout.2SetHangul"
+    static func classifyInitialLayout(first:String,layout:String,override:String?,last:String,target: String = KoreanKeyboardLayout.twoSetID)->InitialLayout {
         guard first==last else{return .unknown}
         guard first==target else{return first=="unknown" ? .unknown:.sourceChanged}
+        guard let keyboard = KoreanKeyboardLayout.translationIDs[target] else { return .unknown }
         if layout=="com.apple.keylayout.ABC",override==nil{return .conflicting}
         let korean=[target,keyboard]
         return korean.contains(layout) && (override==nil || korean.contains(override!)) ? .ready:.unknown
@@ -664,7 +668,7 @@ final class SourceSwitchBarrier {
         if let history = ledger, history.segments.reduce(0, { $0 + $1.keys.count }) >= 128 {
             // A fully visible mixed run ends in ASCII, so it has no unfinished
             // Hangul syllable. Keep its actual spelling if the whole interval matches.
-            if let plan = history.lastTwoSetPlan(maximumKeys: 128), let snap = read(),
+            if let plan = history.lastKoreanPlan(maximumKeys: 128), let snap = read(),
                let field, CFEqual(field, snap.field),
                plan.matchesMixedInputBeforeSwitch(text: snap.text, selection: snap.selection) {
                 ledger = MismatchReplayLedger(before: snap.text, caret: snap.selection.location)
@@ -721,9 +725,11 @@ final class SourceSwitchBarrier {
             if !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{entry=nil}
             return false
         }
-        guard isInitialLetter(event),let initialLayout else{entry=nil;return false}
+        guard let key = returnLetterOrSymbol(event),
+              MismatchKeyboardLayout.expectsHangul(code: key.0, shift: key.1, sourceID: candidate.sourceID),
+              let initialLayout else { entry=nil; return false }
         entry=nil // at most once, including the ordinary fast path
-        guard initialLayout() == .conflicting,isReady(),!externalEditPending,
+        guard initialLayout(candidate.sourceID) == .conflicting,isReady(),!externalEditPending,
               repairInFlight.isEmpty,onsetInFlight.isEmpty else{return false}
         guard let snap=read(),CFEqual(candidate.field,snap.field),let window=fieldWindow(snap.field) else{
             if alreadyQueued{fail("initial_context_changed");return true}
@@ -737,7 +743,7 @@ final class SourceSwitchBarrier {
             event.timestamp > candidate.switchTimestamp && $0.selection == snap.selection
                 && $0.text.utf16.elementsEqual(snap.text.utf16)
         } ?? false
-        heldStart=HeldStart(snapshot:snap,window:window,until:limit,returnTimestamp:confirmedReturn ? candidate.switchTimestamp : nil);nextLayoutCheck=now()+0.016
+        heldStart=HeldStart(sourceID:candidate.sourceID, snapshot:snap,window:window,until:limit,returnTimestamp:confirmedReturn ? candidate.switchTimestamp : nil);nextLayoutCheck=now()+0.016
         trace("initial_layout_wait");schedule();return true
     }
     private func initialDeliveryReady()->Bool {
@@ -746,7 +752,7 @@ final class SourceSwitchBarrier {
         guard !externalEditPending else{fail("initial_context_changed");return false}
         guard expired || now()>=nextLayoutCheck else{schedule();return false}
         nextLayoutCheck=now()+0.016
-        guard let phase=initialLayout?(), phase != .sourceChanged else{fail("initial_source_changed");return false}
+        guard let phase=initialLayout?(h.sourceID), phase != .sourceChanged else{fail("initial_source_changed");return false}
         // Some input methods can continue to produce correct text while the
         // layout API keeps reporting ABC. That report alone must not park
         // original input indefinitely or authorize rewriting a draft.
@@ -758,14 +764,14 @@ final class SourceSwitchBarrier {
         guard let snap=read(),CFEqual(snap.field,h.snapshot.field),
               let win=fieldWindow(snap.field),CFEqual(win,h.window),
               snap.selection==h.snapshot.selection,snap.text.utf16.elementsEqual(h.snapshot.text.utf16),
-              initialLayout?() == phase else{fail("initial_context_changed");return false}
+              initialLayout?(h.sourceID) == phase else{fail("initial_context_changed");return false}
         if !snap.text.isEmpty {
-            nativeBatch=NativeBatch(field:snap.field,window:win,layout:phase)
+            nativeBatch=NativeBatch(sourceID:h.sourceID, field:snap.field,window:win,layout:phase)
         }
         if phase == .conflicting, let switchTimestamp = h.returnTimestamp {
             let lifetime = MismatchSourceEvidence.confirmationSeconds
             let expires = now() + lifetime
-            returnReceipt = ReturnReceipt(baseline: snap, window: win, expires: expires, sourceEpoch: sourceEvidence?.epoch, switchTimestamp: switchTimestamp)
+            returnReceipt = ReturnReceipt(sourceID:h.sourceID, baseline: snap, window: win, expires: expires, sourceEpoch: sourceEvidence?.epoch, switchTimestamp: switchTimestamp)
             DispatchQueue.main.asyncAfter(deadline: .now() + lifetime) { [weak self] in
                 if self?.returnReceipt?.expires == expires { self?.returnReceipt = nil }
             }
@@ -799,7 +805,7 @@ final class SourceSwitchBarrier {
     func confirmsReturnedASCII(_ plan: MismatchRecoveryPlan, snapshot: MismatchSnapshot, beforeKey: Bool) -> Bool {
         guard let receipt = returnReceipt, !busy, isReady(), !externalEditPending,
               now() <= receipt.expires, receipt.sourceEpoch == sourceEvidence?.epoch,
-              plan.sourceID == KoreanKeyboardLayout.twoSetID,
+              plan.sourceID == receipt.sourceID,
               plan.verifiedReplacement == nil, plan.hasLetters, !plan.codes.isEmpty,
               CFEqual(snapshot.element, receipt.baseline.field),
               plan.caret == receipt.baseline.selection.location,
@@ -813,16 +819,16 @@ final class SourceSwitchBarrier {
         guard receipt.keys.count == count || (beforeKey && receipt.keys.count == count + 1),
               plan.codes.elementsEqual(receipt.keys.prefix(count), by: ==),
               let window = fieldWindow(snapshot.element), CFEqual(window, receipt.window),
-              source() == KoreanKeyboardLayout.twoSetID, initialLayout?() == .conflicting else { return false }
+              source() == receipt.sourceID, initialLayout?(receipt.sourceID) == .conflicting else { return false }
         return true
     }
 
     private func recordNativeBatchEdge(_ event:CGEvent) {
-        guard nativeBatch != nil,event.type != .keyUp else{return}
+        guard let batch = nativeBatch,event.type != .keyUp else{return}
         if event.type == .flagsChanged,event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{return}
-        guard isInitialLetter(event),nativeBatch!.keys.count<64,
-              let code=UInt16(exactly:event.getIntegerValueField(.keyboardEventKeycode)) else{nativeBatch=nil;return}
-        nativeBatch!.keys.append((code,event.flags.contains(.maskShift)));nativeBatch!.expected=nil
+        guard let key = returnLetterOrSymbol(event), batch.keys.count < 64,
+              MismatchKeyboardLayout.expectsHangul(code: key.0, shift: key.1, sourceID: batch.sourceID) else { nativeBatch=nil;return }
+        nativeBatch!.keys.append(key);nativeBatch!.expected=nil
     }
     // Acknowledges transport only, after all owned edges returned through the
     // tap. The original AX body may have disappeared when native input began.
@@ -832,10 +838,10 @@ final class SourceSwitchBarrier {
         guard let batch=nativeBatch,!batch.keys.isEmpty,target==nil,queued.isEmpty,
               !awaitingReplay,!awaitingSelection,!externalEditPending,repairInFlight.isEmpty,onsetInFlight.isEmpty,
               CFEqual(batch.field,s.field),s.selection==NSRange(location:s.text.utf16.count,length:0) else{return false}
-        if batch.expected==nil{nativeBatch!.expected=MismatchKeyboardLayout.render(keys:batch.keys,sourceID:KoreanKeyboardLayout.twoSetID)}
+        if batch.expected==nil{nativeBatch!.expected=MismatchKeyboardLayout.render(keys:batch.keys,sourceID:batch.sourceID)}
         guard let predicted=nativeBatch?.expected,predicted.utf16.elementsEqual(s.text.utf16),
               let win=fieldWindow(s.field),CFEqual(win,batch.window),
-              source()==KoreanKeyboardLayout.twoSetID,initialLayout?() == batch.layout else{return false}
+              source()==batch.sourceID,initialLayout?(batch.sourceID) == batch.layout else{return false}
         resetObservation();field=s.field;ledger=MismatchReplayLedger(before:s.text,caret:s.selection.location)
         trace("initial_native_batch_observed");return true
     }
@@ -916,7 +922,7 @@ final class SourceSwitchBarrier {
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,rightCommand:Bool=false,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
         returnReceipt = nil
-        requestedReturnFromABC = rightCommand && timestamp != 0 && id == KoreanKeyboardLayout.twoSetID
+        requestedReturnFromABC = rightCommand && timestamp != 0 && MismatchKeyboardLayout.supports(id)
             && source() == "com.apple.keylayout.ABC"
         rightCommandRequest = rightCommand
         cancelUnfocusedSwitch()
@@ -1057,7 +1063,7 @@ final class SourceSwitchBarrier {
             if switchSnapshot == nil {
                 if !matches(snap) {
                     guard rightCommandRequest, targetTimestamp > 0, (selectedRange?.length ?? 0) == 0,
-                          let plan = ledger?.lastTwoSetPlan(maximumKeys: 128),
+                          let plan = ledger?.lastKoreanPlan(maximumKeys: 128),
                           plan.matchesMixedInputBeforeSwitch(text: snap.text, selection: snap.selection) else {
                         waitForMatch(snap)
                         return
@@ -1103,10 +1109,10 @@ final class SourceSwitchBarrier {
                 selectedRange=snap.selection
                 noteDiagnosticHistory(7,baseline:true)
             }
-            if initialLayout != nil,target==KoreanKeyboardLayout.twoSetID,confirmedUserRequest {
+            if initialLayout != nil, confirmedUserRequest, target == KoreanKeyboardLayout.twoSetID || requestedReturnFromABC {
                 let baseline = requestedReturnFromABC && snap.selection.length == 0 ? snap : nil
                 let committedAt = now()
-                entry = Entry(field: snap.field, at: committedAt, switchTimestamp: committedTimestamp, returnBaseline: baseline)
+                entry = Entry(sourceID: target, field: snap.field, at: committedAt, switchTimestamp: committedTimestamp, returnBaseline: baseline)
                 if baseline != nil {
                     DispatchQueue.main.asyncAfter(deadline: .now() + MismatchSourceEvidence.confirmationSeconds) { [weak self] in
                         if self?.entry?.at == committedAt { self?.entry = nil }
