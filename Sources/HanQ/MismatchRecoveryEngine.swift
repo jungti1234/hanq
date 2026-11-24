@@ -232,6 +232,7 @@ final class MismatchRecoveryEngine:NSObject {
     let systemSwitch=MismatchSourceSwitch()
     let activationShortcut=MismatchActivationShortcut()
     var testActivationNeeded:(()->Bool)?
+    var activationStartInteraction=0
     var activationFallbackTried=false
     var capsSwitchEnabled:()->Bool = {false}
     var observeSourcesForTests=false
@@ -345,7 +346,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard (inputAllowed() || finishing),!detectionOnly else{return false}
         // Keep queued keys on the successful final retry's route so vowels and
         // final consonants can continue its live IME composition.
-        let route=tap == .cgSessionEventTap && recovering && !rollingBack && replayStarted && koreanRetries==2
+        let route=tap == .cgSessionEventTap && recovering && !rollingBack && replayStarted && usesPacedRecovery
             ? CGEventTapLocation.cghidEventTap:tap
         if event.type == .keyDown {
             guard postedReleases.count<128 || postedReleases[code] != nil,
@@ -838,7 +839,7 @@ final class MismatchRecoveryEngine:NSObject {
         deliveredHeldKeys=heldKeys;replayHeldKeys=[];resetCompositionObservation()
         intendedSource=recoverySourceID;recoverySourceBoundaries=[];pendingSources=[:];pendingTimestamps=[:];bufferedIdentities=[:];keyDownSources=Dictionary(uniqueKeysWithValues:heldKeys.map{($0,recoverySourceID)})
         clearSourceInteraction();systemSwitch.reset(currentSource());lastIntendedKorean=recoverySourceID
-        koreanRetries=0;activationFallbackTried=false;interruptedSourceRestores=0;ledger=nil;ledgerAfterRepair=nil;snapshotWaitStarted=nil
+        koreanRetries=0;activationFallbackTried=false;activationStartInteraction=sourceInteractionRevision;interruptedSourceRestores=0;ledger=nil;ledgerAfterRepair=nil;snapshotWaitStarted=nil
         log("mismatch_confirmed",["roman":candidate.roman,"text":snap.text])
         incidentTrace.recoveryStarted(.mismatch,reason:reason)
         cycleAndReplay(candidate,snap)
@@ -970,8 +971,9 @@ final class MismatchRecoveryEngine:NSObject {
         guard result==noErr else{park(stage+"_source_restore_failed",site:stage);return}
         waitSource(targetSource,completion:resume)
     }
+    private var usesPacedRecovery: Bool { koreanRetries == 2 || activationFallbackTried }
     func replayCandidate(_ candidate:MismatchRecoveryPlan){
-        if koreanRetries==2 {
+        if usesPacedRecovery {
             replayPacedCandidate(candidate);return
         }
         replayStarted=true
@@ -1022,7 +1024,7 @@ final class MismatchRecoveryEngine:NSObject {
             replayProducedRoman = true
             lastRomanReplayDelayMs=(ProcessInfo.processInfo.systemUptime-replayIssuedAt)*1000
             log("roman_replay_confirmed",["attempt":koreanRetries+1,"replayToObservationMs":lastRomanReplayDelayMs!,"remainingPolls":remaining])
-            retryKorean(romanCandidate,snap);return
+            retryKorean(romanCandidate,snap,romanReplayConfirmed:replayStarted);return
         }
         if let partial=romanCandidate.partialFailurePlan(text:snap.text,selection:snap.selection) {
             // Every replayed key is accounted for, including already composed
@@ -1051,16 +1053,16 @@ final class MismatchRecoveryEngine:NSObject {
         var roman=candidate;roman.roman=candidate.replayRoman;roman.verifiedReplacement=nil
         if roman.matches(text:snap.text,selection:snap.selection) {
             if replayStarted { replayProducedRoman = true }
-            retryKorean(roman,snap);return
+            retryKorean(roman,snap,romanReplayConfirmed:replayStarted);return
         }
         awaitKorean(candidate,remaining:remaining)
     }
-    func retryKorean(_ candidate:MismatchRecoveryPlan,_ observed:MismatchSnapshot){
+    func retryKorean(_ candidate:MismatchRecoveryPlan,_ observed:MismatchSnapshot,romanReplayConfirmed:Bool=false){
         guard recovering else{park("recovery_inactive");return}
         guard !rollingBack else{park("rollback_active");return}
         guard let field=planElement else{park("plan_field_missing");return}
         guard CFEqual(observed.element,field) else{park("observed_field_changed");return}
-        guard let fresh=recoverySnapshot("retry_korean",retry:{[weak self] in self?.retryKorean(candidate,observed)}) else{return}
+        guard let fresh=recoverySnapshot("retry_korean",retry:{[weak self] in self?.retryKorean(candidate,observed,romanReplayConfirmed:romanReplayConfirmed)}) else{return}
         guard CFEqual(fresh.element,field) else{park("field_changed");return}
         guard fresh.text==observed.text else{park("snapshot_text_changed");return}
         guard fresh.selection==observed.selection else{park("snapshot_selection_changed");return}
@@ -1074,7 +1076,8 @@ final class MismatchRecoveryEngine:NSObject {
         // exact failed result is stronger evidence than a process-local TIS
         // layout snapshot. Spend the one activation fallback here if unused;
         // never extend the progress deadline or loop after that fallback fails.
-        if koreanRetries==2,!activationFallbackTried,activationShortcutSupported(){
+        if !activationFallbackTried, koreanRetries == 2 || romanReplayConfirmed,
+           activationShortcutSupported(), koreanRetries == 2 || permitsEarlyActivation {
             prepareFinalActivation(retry,fresh,confirmedReplayFailure:true);return
         }
         let activationBudget=(testActivationNeeded != nil || (testSelectSource==nil && recoverySourceID==mismatchKoreanID && activationShortcut.configured)) ? 0.6:0

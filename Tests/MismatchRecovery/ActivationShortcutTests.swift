@@ -29,40 +29,10 @@ func runActivationShortcutTests(){
         s.canPost={block != "permission"};s.modifiersClear={block != "modifiers"};s.post={_ in probeTestCheck(false,"blocked shortcut posted")}
         probeTestCheck(s.request(marker:0,recipient:nil,valid:{block != "context"}) != noErr && !s.busy);checks+=1
     }
-    let field=AXUIElementCreateApplication(12345),e=MismatchRecoveryEngine()
-    var text="앞🙂rks뒤",selection=NSRange(location:6,length:0),source=mismatchKoreanID
-    var api:[String]=[],shortcutDowns=0,sessionDowns=0,hidDowns=0,composition:[(UInt16,Bool)]=[],marked:NSRange?,activationReady=false
+    for early in [false,true]{verifyActivationTiming(early:early);checks+=1}
+    let field=AXUIElementCreateApplication(12345)
     var candidate=MismatchRecoveryPlan(before:"앞🙂뒤",caret:3)
     for code:UInt16 in [15,40,1]{_ = candidate.append(code:code,shift:false)}
-    e.enabled=true;e.planElement=field;e.testSelectionWritable={_ in true};e.testSource={source};e.observeSourcesForTests=true
-    e.testSnapshot={MismatchSnapshot(element:field,text:text,selection:selection)}
-    e.testSetRange={_,r in selection=r;composition=[];marked=nil;return .success}
-    e.testSelectSource={source=$0;api.append($0);return noErr}
-    e.testActivationNeeded={!activationReady}
-    e.activationShortcut.configuration={(49,.maskControl)};e.activationShortcut.canPost={true};e.activationShortcut.modifiersClear={true}
-    e.activationShortcut.post={event in
-        if event.type == .keyDown {shortcutDowns+=1;activationReady=true;source=mismatchKoreanID;e.observeRecoverySource(source)}
-    }
-    e.activationShortcut.releasePosted={_,_ in}
-    e.testPostAtTap={event,tap in
-        guard event.type == .keyDown else{return}
-        let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        if tap == .cgSessionEventTap {
-            sessionDowns+=1
-            let letter=MismatchRecoveryPlan.character(code,false)!
-            text=(text as NSString).replacingCharacters(in:selection,with:letter);selection=NSRange(location:selection.location+1,length:0)
-        }else{
-            hidDowns+=1;composition.append((code,false));let result=MismatchKeyboardLayout.render(keys:composition,sourceID:mismatchKoreanID)!
-            let range=marked ?? selection;text=(text as NSString).replacingCharacters(in:range,with:result);marked=NSRange(location:range.location,length:result.utf16.count);selection=NSRange(location:range.location+result.utf16.count,length:0)
-        }
-    }
-    e.beginRecovery(candidate,MismatchSnapshot(element:field,text:text,selection:selection))
-    let end=Date().addingTimeInterval(3)
-    while e.recovering,Date()<end{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
-    probeTestCheck(!e.recovering && !e.suspended && text=="앞🙂간뒤" && selection==NSRange(location:4,length:0))
-    probeTestCheck(e.koreanRetries==2 && api==[e.englishID,mismatchKoreanID,e.englishID,mismatchKoreanID,e.englishID,mismatchKoreanID,e.englishID])
-    probeTestCheck(shortcutDowns==1 && sessionDowns==6 && hidDowns==3 && e.recoverySourceBoundaries.isEmpty && source==mismatchKoreanID)
-    probeTestCheck(e.retained.isEmpty && e.pending.isEmpty && !e.activationShortcut.busy);checks+=1
     // A source cycle may already have committed the exact Korean rendering.
     // Reopen only that proven range and preserve the queued vowel's composition.
     let restored=MismatchRecoveryEngine()
@@ -182,4 +152,42 @@ private func runLateActivationTests()->Int {
         }else{probeTestCheck(shortcutDowns==0 && hidDowns==0 && sessionDowns==0,"unsafe late retry: \(mode)")}
     }
     return 7
+}
+
+private func verifyActivationTiming(early:Bool){
+    let field=AXUIElementCreateApplication(12345),e=MismatchRecoveryEngine()
+    var text="앞🙂rks뒤",selection=NSRange(location:6,length:0),source=mismatchKoreanID
+    var api:[String]=[],shortcutDowns=0,sessionDowns=0,hidDowns=0,composition:[(UInt16,Bool)]=[],marked:NSRange?,activationReady=false
+    var candidate=MismatchRecoveryPlan(before:"앞🙂뒤",caret:3)
+    for code:UInt16 in [15,40,1]{_ = candidate.append(code:code,shift:false)}
+    e.enabled=true;e.planElement=field;e.testSelectionWritable={_ in true};e.testSource={source};e.observeSourcesForTests=true
+    e.testSnapshot={MismatchSnapshot(element:field,text:text,selection:selection)}
+    e.testSetRange={_,r in selection=r;composition=[];marked=nil;return .success}
+    e.testSelectSource={source=$0;api.append($0);return noErr}
+    e.testActivationNeeded={!activationReady && (early || e.koreanRetries == 2)}
+    e.activationShortcut.configuration={(49,.maskControl)};e.activationShortcut.canPost={true};e.activationShortcut.modifiersClear={true}
+    e.activationShortcut.post={event in
+        if event.type == .keyDown {shortcutDowns+=1;activationReady=true;source=mismatchKoreanID;e.observeRecoverySource(source)}
+    }
+    e.activationShortcut.releasePosted={_,_ in}
+    e.testPostAtTap={event,tap in
+        guard event.type == .keyDown else{return}
+        let code=UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        if tap == .cgSessionEventTap {
+            sessionDowns+=1
+            let letter=MismatchRecoveryPlan.character(code,false)!
+            text=(text as NSString).replacingCharacters(in:selection,with:letter);selection=NSRange(location:selection.location+1,length:0)
+        }else{
+            hidDowns+=1;composition.append((code,false));let result=MismatchKeyboardLayout.render(keys:composition,sourceID:mismatchKoreanID)!
+            let range=marked ?? selection;text=(text as NSString).replacingCharacters(in:range,with:result);marked=NSRange(location:range.location,length:result.utf16.count);selection=NSRange(location:range.location+result.utf16.count,length:0)
+        }
+    }
+    e.beginRecovery(candidate,MismatchSnapshot(element:field,text:text,selection:selection))
+    let end=Date().addingTimeInterval(3)
+    while e.recovering,Date()<end{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
+    probeTestCheck(!e.recovering && !e.suspended && text=="앞🙂간뒤" && selection==NSRange(location:4,length:0))
+    let directCycles=early ? 1:3
+    probeTestCheck(e.koreanRetries==(early ? 0:2) && api==Array(repeating:[e.englishID,mismatchKoreanID],count:directCycles).flatMap{$0}+[e.englishID])
+    probeTestCheck(shortcutDowns==1 && sessionDowns==(early ? 3:6) && hidDowns==3 && e.recoverySourceBoundaries.isEmpty && source==mismatchKoreanID)
+    probeTestCheck(e.retained.isEmpty && e.pending.isEmpty && !e.activationShortcut.busy)
 }

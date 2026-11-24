@@ -1,7 +1,7 @@
 import AppKit
 import Carbon
 
-// Optional last-retry activation through the configured OS input-source path.
+// One optional recovery activation through the configured OS input-source path.
 // A Korean TIS ID can coexist with ABC translation and a missing IME override.
 final class MismatchActivationShortcut {
     private(set) var busy=false
@@ -82,10 +82,17 @@ extension MismatchRecoveryEngine {
         let layout=InputSourceAccess.currentLayoutID()
         return InputSourceAccess.currentOverrideID()==nil && [englishID,"com.apple.keylayout.ABC","com.apple.keylayout.US"].contains(layout)
     }
+    // Advance the existing one-shot fallback only when the editor has returned
+    // literal Roman text after replay and the selected Korean layout still conflicts.
+    var permitsEarlyActivation: Bool {
+        intendedSource == recoverySourceID && recoverySourceBoundaries.isEmpty &&
+        sourceInteractionRevision == activationStartInteraction && !sourceWorkPaused &&
+        activationShortcut.canPost() && activationShortcut.modifiersClear() && needsActivationShortcut()
+    }
     func chooseKoreanWithActivationShortcut()->OSStatus {
         // The direct English selection immediately preceded this operation;
         // an intervening user source boundary invalidates that previous-source proof.
-        guard recovering,!rollingBack,koreanRetries==2,currentSource()==englishID else{return -50}
+        guard recovering,!rollingBack,activationFallbackTried,currentSource()==englishID else{return -50}
         let boundaries=recoverySourceBoundaries.count,interaction=sourceInteractionRevision
         return systemSwitch.request(recoverySourceID,valid:{[weak self] in self?.fastRecoveryContext()==true},current:currentSource,select:{[weak self] _ in
             guard let self else{return -50}
@@ -100,16 +107,28 @@ extension MismatchRecoveryEngine {
         guard recovering,!rollingBack else{return}
         // The direct Korean selection itself can lose the override. Inspect
         // after that phase settles, immediately before the final HID edit.
-        guard koreanRetries==2,!activationFallbackTried,
-              confirmedReplayFailure ? activationShortcutSupported():needsActivationShortcut() else{replaceAndReplay(candidate,before);return}
+        let early = confirmedReplayFailure && koreanRetries < 2
+        if early {
+            guard !activationFallbackTried, activationShortcutSupported(), permitsEarlyActivation else {
+                retryKorean(candidate,before);return
+            }
+        } else {
+            guard koreanRetries == 2, !activationFallbackTried,
+                  confirmedReplayFailure ? activationShortcutSupported() : needsActivationShortcut()
+            else { replaceAndReplay(candidate,before);return }
+        }
         guard let snap=recoverySnapshot("activation",retry:{[weak self] in self?.prepareFinalActivation(candidate,before,confirmedReplayFailure:confirmedReplayFailure)}) else{return}
         guard CFEqual(snap.element,before.element),currentSource()==recoverySourceID else{park("activation_context_changed");return}
         var candidate=candidate
         if !candidate.matches(text:snap.text,selection:snap.selection){
             guard let restored=candidate.restoredKoreanPlan(text:snap.text,selection:snap.selection) else{park("activation_context_changed");return}
+            if early { awaitKorean(candidate,remaining:0);return }
             candidate=restored;currentPlan=restored
         }
-        guard ProcessInfo.processInfo.systemUptime+0.55+Double(candidate.codes.count)*Self.pacedReplayInterval+0.28<recoveryDeadline else{abort("activation_deadline");return}
+        guard ProcessInfo.processInfo.systemUptime+0.55+Double(candidate.codes.count)*Self.pacedReplayInterval+0.28<recoveryDeadline else{
+            if early { retryKorean(candidate,before) } else { abort("activation_deadline") }
+            return
+        }
         activationFallbackTried=true
         let boundaries=recoverySourceBoundaries.count,interaction=sourceInteractionRevision
         guard chooseSource(englishID)==noErr else{abort("english_selection_failed");return}
