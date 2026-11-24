@@ -259,7 +259,7 @@ if ProcessInfo.processInfo.arguments.contains("--test-selected-replacement-histo
     probe.closeSession();probeTestCheck(Set(NSApp.windows.map(ObjectIdentifier.init))==windowsBefore)
     print("PASS: silent detection, no window or focus change, keys pass through, all edit/source/post operations disabled")
 } else if ProcessInfo.processInfo.arguments.contains("--test-retry-exhaustion") {
-    for changed in [false,true] {
+    for (changed, observedRoman, resumed) in [(false,false,false),(true,false,false),(false,true,false),(false,true,true)] {
         let probe=MismatchRecoveryEngine(detectionOnly:false);let field=AXUIElementCreateApplication(12345)
         var candidate=MismatchRecoveryPlan(before:"앞🙂",caret:3)
         _ = candidate.append(code:5,shift:false);_ = candidate.append(code:4,shift:false)
@@ -274,14 +274,19 @@ if ProcessInfo.processInfo.arguments.contains("--test-selected-replacement-histo
             let event=CGEvent(keyboardEventSource:nil,virtualKey:CGKeyCode(code),keyDown:down)!
             probe.pending.append(event)
         }
-        probe.retryKorean(candidate,snap)
+        let original = probe.pending
+        if resumed { probe.resumeKoreanAfterSourceRestore(candidate,remaining:0) }
+        else if observedRoman { probe.awaitKorean(candidate,remaining:0) }
+        else { probe.retryKorean(candidate,snap) }
         let deadline=Date().addingTimeInterval(0.3)
         while probe.recovering && Date()<deadline{RunLoop.current.run(until:Date().addingTimeInterval(0.005))}
         probeTestCheck(!probe.recovering && probe.enabled)
-        if changed{probeTestCheck(delivered.isEmpty && probe.retained.count==4 && cursorRequests==0)}
+        if observedRoman {
+            probeTestCheck(delivered.isEmpty && original.count == probe.retained.count && zip(original,probe.retained).allSatisfy { $0 === $1 } && probe.suspended && cursorRequests == 1)
+        } else if changed{probeTestCheck(delivered.isEmpty && probe.retained.count==4 && cursorRequests==0)}
         else{probeTestCheck(delivered == [5,4,5,4] && probe.pending.isEmpty && probe.retained.isEmpty && cursorRequests==1)}
     }
-    print("PASS: repeated failure returns all four gh events once; changed text retains them without editing; recovery ended")
+    print("PASS: observed Roman replay retains ordered events; unchecked retry and changed-context behavior preserved")
 } else if ProcessInfo.processInfo.arguments.contains("--test-modifier-loop") {
     owner.enabled=true;owner.recovering=true
     for code:CGKeyCode in [57,255,38] {

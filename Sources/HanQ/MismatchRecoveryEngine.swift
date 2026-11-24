@@ -214,6 +214,7 @@ final class MismatchRecoveryEngine:NSObject {
     var stopAfterRollback=false
     var replayStarted=false
     var replayIssuedAt=0.0
+    private var replayProducedRoman = false
     var lastRomanReplayDelayMs:Double?
     var koreanRetries=0
     var interruptedSourceRestores=0
@@ -821,6 +822,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard MismatchKeyboardLayout.supports(candidate.sourceID) else{incidentTrace.decision(.repair,.repairSourceUnsupported);return}
         guard candidate.matches(text:snap.text,selection:snap.selection) else{incidentTrace.decision(.repair,.repairTextMismatch);return}
         guard !detectionOnly else{reportMismatch(candidate,snap);return}
+        replayProducedRoman = false
         recoverySourceID=candidate.sourceID
         var candidate=candidate
         candidate.captureObserved(text:snap.text)
@@ -993,6 +995,7 @@ final class MismatchRecoveryEngine:NSObject {
         guard let korean=MismatchKeyboardLayout.render(keys:candidate.codes,sourceID:candidate.sourceID) else{park("expected_korean_unavailable");return}
         let expected=(candidate.before as NSString).replacingCharacters(in:NSRange(location:candidate.caret,length:0),with:korean)
         if snap.text==expected,snap.selection==NSRange(location:candidate.caret+korean.utf16.count,length:0){
+            replayProducedRoman = false
             log("korean_result_verified",["text":snap.text])
             confirmDeliveryProgress(postedBuffered)
             if let repaired=ledgerAfterRepair{ledger=repaired;ledgerAfterRepair=nil}
@@ -1016,6 +1019,7 @@ final class MismatchRecoveryEngine:NSObject {
         var romanCandidate=candidate
         romanCandidate.roman=candidate.replayRoman;romanCandidate.verifiedReplacement=nil
         if romanCandidate.matches(text:snap.text,selection:snap.selection){
+            replayProducedRoman = true
             lastRomanReplayDelayMs=(ProcessInfo.processInfo.systemUptime-replayIssuedAt)*1000
             log("roman_replay_confirmed",["attempt":koreanRetries+1,"replayToObservationMs":lastRomanReplayDelayMs!,"remainingPolls":remaining])
             retryKorean(romanCandidate,snap);return
@@ -1045,7 +1049,10 @@ final class MismatchRecoveryEngine:NSObject {
             replaceAndReplay(restored,snap);return
         }
         var roman=candidate;roman.roman=candidate.replayRoman;roman.verifiedReplacement=nil
-        if roman.matches(text:snap.text,selection:snap.selection){retryKorean(roman,snap);return}
+        if roman.matches(text:snap.text,selection:snap.selection) {
+            if replayStarted { replayProducedRoman = true }
+            retryKorean(roman,snap);return
+        }
         awaitKorean(candidate,remaining:remaining)
     }
     func retryKorean(_ candidate:MismatchRecoveryPlan,_ observed:MismatchSnapshot){
@@ -1102,6 +1109,27 @@ final class MismatchRecoveryEngine:NSObject {
             guard let candidate=currentPlan,snap.text==candidate.expected,
                   snap.selection==NSRange(location:candidate.caret+candidate.roman.utf16.count,length:0),
                   snap.selectedText?.isEmpty != false else{park("rollback_delivery_context_changed");return}
+        }
+        // A verified Roman replay makes sending more Korean letters unsafe.
+        // Keep the whole undelivered queue, including releases and later source
+        // segments. A queue containing only intentional English still drains.
+        if rollback, replayProducedRoman, pending.contains(where: { event in
+            guard event.type == .keyDown,
+                  let code = UInt16(exactly: event.getIntegerValueField(.keyboardEventKeycode)),
+                  PhysicalLetterKeys.printableCodes.contains(code),
+                  !Self.isSelectAll(event) else { return false }
+            return (pendingSources[bufferedID(event)] ?? recoverySourceID) == recoverySourceID
+        }) {
+            if intendedSource != currentSource() {
+                guard sourceAttempts > 0 else { park("delivery_source_timeout"); return }
+                if sourceAttempts == 45, chooseSource(intendedSource) != noErr {
+                    park("delivery_source_selection_failed"); return
+                }
+                later(0.01) { [weak self] in self?.drain(rollback:true,sourceAttempts:sourceAttempts-1) }
+                return
+            }
+            park("rollback_roman_input_retained")
+            return
         }
         // A queued Select All is an editing boundary, not a printable key.
         // Apply its selection after the next source is ready: switching a live
@@ -1424,7 +1452,7 @@ final class MismatchRecoveryEngine:NSObject {
     static func failureReasonCode(_ reason:String)->Int {
         // Only ordinal codes from fixed product reasons, never arbitrary strings.
         // Keep retired reason slots stable for existing diagnostic codes.
-        let reasons=["pre_edit_mismatch","selection_failed","selection_not_applied","selected_text_not_verified","english_selection_failed","korean_selection_failed","source_switch_timeout","delete_not_verified","rollback_context_not_intact","buffer_result_not_verified","delivery_source_timeout","delivery_source_selection_failed","buffer_roman_retry_unavailable","source_menu_focus_changed","menu_source_restore_failed","caps_during_unsettled_source","menu_during_unsettled_source","final_source_context_changed","korean_retry_exhausted","recovery_deadline","paced_replay_unsafe_context","paced_replay_source_changed","paced_replay_allocation_failed","activation_context_changed","activation_boundary_changed","partial_replay_retry_exhausted","rollback_delivery_context_changed","rollback_unexpected_selection","rollback_caret_timeout","rollback_caret_rejected","rollback_source_failed"]
+        let reasons=["pre_edit_mismatch","selection_failed","selection_not_applied","selected_text_not_verified","english_selection_failed","korean_selection_failed","source_switch_timeout","delete_not_verified","rollback_context_not_intact","buffer_result_not_verified","delivery_source_timeout","delivery_source_selection_failed","buffer_roman_retry_unavailable","source_menu_focus_changed","menu_source_restore_failed","caps_during_unsettled_source","menu_during_unsettled_source","final_source_context_changed","korean_retry_exhausted","recovery_deadline","paced_replay_unsafe_context","paced_replay_source_changed","paced_replay_allocation_failed","activation_context_changed","activation_boundary_changed","partial_replay_retry_exhausted","rollback_delivery_context_changed","rollback_unexpected_selection","rollback_caret_timeout","rollback_caret_rejected","rollback_source_failed","rollback_roman_input_retained"]
         return reason.hasSuffix("_deadline") ? 20:(reasons.firstIndex(of:reason).map{$0+1} ?? 0)
     }
     func failureDiagnostic(_ stage:String,_ reason:String,site:String,condition:String?) {

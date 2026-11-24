@@ -1605,7 +1605,7 @@ final class InputIncidentTrace {
             "selection_invalid", "selection_retry_rejected", "selection_source_changed", "selection_unreadable",
             "shortcut_during_repair", "snapshot_unavailable", "tap_create_failed", "target_changed",
             "text_unreadable", "unsafe_delete_payload_blocked", "unsupported_repair_plan", "web_editor_unconfirmed",
-            "outbound_not_observed", "prefix_plan_missing", "prefix_undo_ticket_changed", "prefix_context_changed", "prefix_result_unreadable", "prefix_caret_refused", "prefix_body_changed", "prefix_result_timeout", "prefix_ticket_missing"
+            "outbound_not_observed", "prefix_plan_missing", "prefix_undo_ticket_changed", "prefix_context_changed", "prefix_result_unreadable", "prefix_caret_refused", "prefix_body_changed", "prefix_result_timeout", "prefix_ticket_missing", "rollback_roman_input_retained"
         ]
     }
     struct KeyboardBurst: Codable {
