@@ -12,7 +12,7 @@ final class MismatchSwitchGate {
     var accepts:()->Bool
     var failed:()->Void = {}
     var switched:(CGEventTimestamp)->Void
-    var forwarded:(CGEventType,CGEvent,CGEventTimestamp)->Void = {_,_,_ in}
+    var forwarded:(CGEventType,CGEvent,CGEventTimestamp,InputIncidentTrace.ShiftArrival?)->Void = {_,_,_,_ in}
     var acceptsExternalSource:()->Bool = {false}
     var capsChanged:(CGEventTimestamp)->Void = {_ in}
     var menuBegan:(CGEventTimestamp)->Void = {_ in}
@@ -33,10 +33,10 @@ final class MismatchSwitchGate {
     init(accepts:@escaping ()->Bool,switched:@escaping (CGEventTimestamp)->Void){self.accepts=accepts;self.switched=switched}
     // Pure/injected callers already supply a single timestamp domain. Only the
     // actual HID callback crosses Quartz's tick/nanosecond boundary.
-    func receiveHID(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
-        receive(type,event,at:MismatchEventClock.hidTimestamp(event))
+    func receiveHID(_ type:CGEventType,_ event:CGEvent,shiftArrival:InputIncidentTrace.ShiftArrival?=nil)->Unmanaged<CGEvent>? {
+        receive(type,event,at:MismatchEventClock.hidTimestamp(event),shiftArrival:shiftArrival)
     }
-    func receive(_ type:CGEventType,_ event:CGEvent,at capturedTimestamp:CGEventTimestamp?=nil)->Unmanaged<CGEvent>? {
+    func receive(_ type:CGEventType,_ event:CGEvent,at capturedTimestamp:CGEventTimestamp?=nil,shiftArrival:InputIncidentTrace.ShiftArrival?=nil)->Unmanaged<CGEvent>? {
         var control=InputIncidentControl.begin(incidentTrace,type,event)
         var consumed=false
         defer{if let control{incidentTrace.control(.hid,type,event,control,consumed:consumed)}}
@@ -64,7 +64,7 @@ final class MismatchSwitchGate {
         control?.route=(consumed ? InputIncidentControl.Route.hidConsumed:.hidPassed).rawValue
         event.flags=result.flags
         if result.edge=="right-down"{switched(timestamp)}
-        if !result.consume {forwarded(type,event,timestamp)}
+        if !result.consume {forwarded(type,event,timestamp,shiftArrival)}
         return result.consume ? nil:Unmanaged.passUnretained(event)
     }
     func start()->Bool {
@@ -72,8 +72,9 @@ final class MismatchSwitchGate {
         let mask:CGEventMask=[CGEventType.flagsChanged,.keyDown,.keyUp,.leftMouseDown,.rightMouseDown].reduce(0){$0 | (1 << $1.rawValue)}
         tap=CGEvent.tapCreate(tap:.cghidEventTap,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,ref in
             let gate=Unmanaged<MismatchSwitchGate>.fromOpaque(ref!).takeUnretainedValue()
+            let shiftArrival = gate.incidentTrace.modifierArrived(.switchHID, type, event)
             var processed=false
-            let result=KeyboardStateMirror.shared.preserve(type,event) {processed=true;return gate.receiveHID(type,event)}
+            let result=KeyboardStateMirror.shared.preserve(type,event) {processed=true;return gate.receiveHID(type,event,shiftArrival:shiftArrival)}
             if !processed,var value=InputIncidentControl.begin(gate.incidentTrace,type,event) {
                 value.route=(KeyboardStateMirror.isMarker(event.getIntegerValueField(.eventSourceUserData)) ? InputIncidentControl.Route.mirrorMarker:.mirrorInactive).rawValue
                 gate.incidentTrace.control(.hid,type,event,value)

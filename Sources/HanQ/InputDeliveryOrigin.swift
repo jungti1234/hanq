@@ -22,6 +22,7 @@ final class InputDeliveryOrigin {
         UInt64(bitPattern:value) >> 48 == 0x4852
     }
     var diagnosticEvent:((CGEventType,CGEvent,Bool)->Void)?
+    var diagnosticArrival: ((CGEventType, CGEvent) -> Void)?
     var diagnosticReceive:((CGEventType,CGEvent,()->Unmanaged<CGEvent>?)->Unmanaged<CGEvent>?)?
     private let lock=NSLock()
     private var entries:[Int64:Origin]=[:]
@@ -156,6 +157,7 @@ final class InputDeliveryOrigin {
             guard let tap=CGEvent.tapCreate(tap:.cghidEventTap,place:.headInsertEventTap,options:.defaultTap,
                 eventsOfInterest:mask,callback:{_,type,event,ref in
                     let owner=Unmanaged<InputDeliveryOrigin>.fromOpaque(ref!).takeUnretainedValue()
+                    owner.diagnosticArrival?(type, event)
                     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {owner.stop()}
                     else {
                         owner.forgetMirroredRelease(type,event)

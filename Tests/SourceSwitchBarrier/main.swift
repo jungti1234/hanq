@@ -306,7 +306,7 @@ do {
  let gate=MismatchSwitchGate(accepts:{!b.busy},switched:{_ in toggles+=1})
  let engine=MismatchRecoveryEngine()
  engine.willForwardEvent={type,event in b.beginRepairBoundary(type,event)}
- gate.forwarded={type,event,timestamp in engine.captureEventOrigin(type,event,at:timestamp)}
+ gate.forwarded={type,event,timestamp,receipt in engine.captureEventOrigin(type,event,at:timestamp,shiftArrival:receipt)}
  let selectAll=key(0,.maskCommand)
  check(gate.receive(.keyDown,selectAll) != nil && b.busy,"HID select-all reserves boundary before arriving at main tap")
  let command=key(54,CGEventFlags(rawValue:CGEventFlags.maskCommand.rawValue|0x10));command.type = .flagsChanged

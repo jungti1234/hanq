@@ -507,6 +507,7 @@ def summarize(data):
         raise ValueError('invalid diagnostic run ID')
     lanes={1:'hid',2:'main',3:'onset',4:'mismatch',5:'annotated_boundary',6:'onset_ax',7:'mismatch_ax',8:'source_boundary'}
     triggers={1:'manual',2:'callback_delay',3:'ax_delay',4:'possible_length_shrink',5:'source_boundary_interrupted',6:'recovery_started',7:'space_observation',8:'onset_observation'}
+    modifier_roles = {1: 'shift', 2: 'right_command', 3: 'right_option'}
     counts=collections.defaultdict(collections.Counter)
     active={}
     completed=[]
@@ -594,7 +595,7 @@ def summarize(data):
                 # Build 366 encoded appended boundary codes into the next lane.
                 # The marker producer uses the main lane, so these HID slots are identifiable.
                 legacy_boundary=(str(data.get('build'))=='366' and operation==7 and lane==0 and 0<=detail<=6)
-                if operation==0:allowed=[1,2,3,5,6,7]
+                if operation==0:allowed=[1,2,3,5,6,7] + ([9,10,11] if lane<2 else [])
                 elif operation==4:allowed=range(1,9)
                 elif operation==5:
                     allowed=([0,31]+list(range(1,8))) if lane==3 else ([0]+list(range(8,13))+list(range(17,22))) if lane==1 else ([0]+list(range(8,13))+list(range(17,21))+[22]) if lane==2 else ([0]+list(range(8,13))) if lane==0 else [0]
@@ -606,7 +607,8 @@ def summarize(data):
                 row=dict(operation=names[operation],lane=lanes[lane+1],detail=detail,count=n)
                 if legacy_boundary:row.update(operation="source_boundary",lane="source_boundary",detail=32+detail)
                 if operation==5 and lane<3 and 8<=detail<=12:row.update(control_role=CONTROL_ROLES[detail-8])
-                if operation==0:row.update(edge={1:'down',2:'up',3:'other'}[detail%4],consumed=detail>=4)
+                if operation==0 and detail>=9:row.update(modifier_arrival=modifier_roles[detail-8])
+                elif operation==0:row.update(edge={1:'down',2:'up',3:'other'}[detail%4],consumed=detail>=4)
                 if operation==9:row.update(trigger=triggers[detail%8 or 8],reason=('post_capture' if detail>=24 else 'capture') if group=='processed' else 'pending_capture' if detail<8 else 'automatic_interval' if detail<16 else 'manual_limit')
                 result.append(row)
             observation_summary[group]=result
@@ -649,8 +651,27 @@ def summarize(data):
     baselines=shape_baselines(data['shapeBaselines']) if 'shapeBaselines' in data else None
     source_actions=dict(enumerate(["observed","requested","committed","deferred","resumed","rejected","roman_skipped"],start=1))
     boundary_rows=[]
+    modifier_arrivals = []
+    modifier_stages = {1: 'recipient_hid', 2: 'switch_hid', 3: 'main'}
     for frame in data['frames']:
         lane=lanes.get(frame['lane'],'unknown')
+        if frame['kind'] == 16 or 'modifierStage' in frame:
+            numeric = {'sequence','milliseconds','lane','kind','event','edge','category','inputOrigin',
+                       'durationMicros','count','field','modifierStage'}
+            if (set(frame) != numeric | {'consumed','selected','observationTiming'}
+                    or any(type(frame[k]) is not int for k in numeric)
+                    or frame['kind'] != 16 or frame['modifierStage'] not in modifier_stages
+                    or frame['lane'] != (2 if frame['modifierStage'] == 3 else 1)
+                    or frame['category'] not in modifier_roles or frame['edge'] not in (1,2,3)
+                    or (frame['modifierStage'] == 1 and frame['edge'] == 3)
+                    or frame['sequence'] < 1 or frame['milliseconds'] < 0 or frame['event'] < 1
+                    or frame['inputOrigin'] not in (1,2,3) or frame['consumed'] is not False
+                    or frame['selected'] is not False or any(frame[k] != 0 for k in ('durationMicros','count','field'))):
+                raise ValueError('invalid modifier arrival')
+            modifier_arrivals.append(dict(sequence=frame['sequence'], milliseconds=frame['milliseconds'],
+                                          event=frame['event'], key=modifier_roles[frame['category']],
+                                          stage=modifier_stages[frame['modifierStage']], inputOrigin=frame['inputOrigin'],
+                                          edge={1:'down',2:'up',3:'flags_changed'}[frame['edge']]))
         if 'applications' in frame:
             if frame['kind']!=2 or frame['category']!=2 or frame['lane'] not in (6,7):raise ValueError('application identity outside a completed snapshot')
             app_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],lane=lane,kind='read',**check_app_refs(frame['applications'])))
@@ -723,7 +744,7 @@ def summarize(data):
             source_evidence_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],action=source_actions[frame['edge']],**value))
         if frame['kind']==9:
             op=frame['category'];detail=frame['edge']
-            allowed=[1,2,3,5,6,7] if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13))+list(range(17,21))+[22] if frame['lane']==3 else [0]+list(range(8,13)) if frame['lane']==1 else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else list(range(0,8))+list(range(24,32)) if op==10 else [0]
+            allowed=([1,2,3,5,6,7] + ([9,10,11] if frame['lane'] in (1,2) else [])) if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13))+list(range(17,21))+[22] if frame['lane']==3 else [0]+list(range(8,13)) if frame['lane']==1 else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else list(range(0,8))+list(range(24,32)) if op==10 else [0]
             if not observed or not 1<=op<=10 or detail not in allowed or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False):raise ValueError('invalid observation wait frame')
         if frame['kind']==8:
             site=decision_sites.get(frame['edge'],'unknown')
@@ -790,7 +811,7 @@ def summarize(data):
             'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'onset_observations':onset_observation_rows,
             'caret_crossings':caret_crossings(onset_observation_rows, key_rows, data.get('skippedEvents', {}).get('2', 0)),'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'unfocused_switch_layout_samples':unfocused_layout_samples,
-            'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
+            'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'modifier_arrivals':modifier_arrivals,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,
             'capture_coverage':capture_coverage(data['coverage']) if 'coverage' in data else None,'capture_preservation':preservation,'capture_backlog':backlog,'monitor_status':monitor, 'recovery_failures':recovery_failures(data.get('recoveryFailures', [])),

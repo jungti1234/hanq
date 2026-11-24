@@ -712,6 +712,11 @@ final class DiagnosticReviewSnapshot {
             // frames, times, links, classifications and other diagnostic evidence.
             if kind == 6 { counts[states[code] ?? "해석하지 못한 처리 상태", default: 0] += 1 }
             if kind == 7 { counts[boundaries[code] ?? "해석하지 못한 경계 상태", default: 0] += 1 }
+            if kind == InputIncidentTrace.Kind.modifierArrival.rawValue,
+               let role = InputIncidentTrace.ModifierRole(rawValue: code),
+               let stage = integer(frame["modifierStage"]).flatMap(InputIncidentTrace.ModifierStage.init(rawValue:)) {
+                counts["\(role.label) 도착 · \(stage.label)", default: 0] += 1
+            }
             if kind == 15,let raw=frame["onsetObservation"] as? [String:Any],let evidence=InputIncidentTrace.OnsetObservation.parse(raw) {
                 counts[evidence.summary,default:0]+=1
             }

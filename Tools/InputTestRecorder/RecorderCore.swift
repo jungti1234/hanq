@@ -303,6 +303,7 @@ struct RecorderFrame: Codable {
     let observationTiming: RecorderDecisionTiming?
     var sourceEvidence:RecorderSourceEvidence?=nil
     var shapeEvidence:RecorderShapeEvidence?=nil
+    var modifierStage: Int? = nil
     var controlEvidence:RecorderControlEvidence?=nil
     var eventEvidence:RecorderEventEvidence?=nil
     var workEvidence:RecorderWorkEvidence?=nil
@@ -328,7 +329,7 @@ struct RecorderObservationDelivery: Codable {
         guard let code=Int(key),String(code)==key,(0..<2560).contains(code) else{return false}
         let operation=code/256+1,detail=code%32
         switch operation {
-        case 1:return [1,2,3,5,6,7].contains(detail)
+        case 1:return [1,2,3,5,6,7].contains(detail) || (code/32%8 < 2 && (9...11).contains(detail))
         case 5:return (1...8).contains(detail)
         case 6:return detail==0 || (code/32%8==3 && ((1...7).contains(detail) || detail==31)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail)) || (code/32%8==2 && ((17...20).contains(detail) || detail==22))
         case 7:return (1...31).contains(detail) || (detail==0 && code/32%8==7)
@@ -479,8 +480,17 @@ struct RecorderTrace: Codable {
     let frames: [RecorderFrame]
 
     private static func validFrame(_ row:RecorderFrame,legacyBoundary:Bool)->Bool {
-                  guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...15).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
+                  guard row.sequence > 0 && row.milliseconds >= 0 && (1...8).contains(row.lane) && (1...16).contains(row.kind) && row.durationMicros >= 0 && row.count >= 0 && row.field >= 0 else{return false}
                   if let refs=row.applications {guard refs.valid,row.kind==2,row.category==2,[6,7].contains(row.lane) else{return false}}
+                  if row.kind == 16 {
+                      guard let stage = row.modifierStage, (1...3).contains(stage),
+                            row.lane == (stage == 3 ? 2 : 1), (1...3).contains(row.category),
+                            (1...3).contains(row.edge), stage != 1 || row.edge != 3 else { return false }
+                      return row.event > 0 && (1...3).contains(row.inputOrigin) &&
+                          row.observationTiming?.valid == true && !row.consumed && !row.selected &&
+                          row.durationMicros == 0 && row.count == 0 && row.field == 0
+                  }
+                  guard row.modifierStage == nil else { return false }
                   if row.kind==15 {
                       return row.onsetObservation?.valid==true && row.lane==3 && row.event==0 && row.edge==0 && row.category==0 && row.inputOrigin==0 && !row.consumed && row.durationMicros==0 && row.count==0 && !row.selected && row.field==0 && row.observationTiming?.valid==true && row.decisionTiming==nil && row.sourceEvidence==nil && row.shapeEvidence==nil && row.controlEvidence==nil && row.eventEvidence==nil && row.workEvidence==nil && row.readOutcome==nil && row.focusEvidence==nil && row.onsetEvidence==nil && row.boundaryEvidence==nil
                   }
@@ -610,7 +620,11 @@ struct RecorderTrace: Codable {
         }
         let keys = Set(["sequence", "milliseconds", "lane", "kind", "event", "edge", "category", "inputOrigin", "consumed", "durationMicros", "count", "selected", "field"])
         guard rows.allSatisfy({ row in
-            guard Set(row.keys).subtracting(["decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence","boundaryEvidence","onsetObservation","applications"])==keys else{return false}
+            if row["kind"] as? Int == 16 || row.keys.contains("modifierStage") {
+                guard row["kind"] as? Int == 16,
+                      Set(row.keys) == keys.union(["modifierStage", "observationTiming"]) else { return false }
+            }
+            guard Set(row.keys).subtracting(["modifierStage","decisionTiming","observationTiming","sourceEvidence","shapeEvidence","controlEvidence","eventEvidence","workEvidence","readOutcome","focusEvidence","onsetEvidence","boundaryEvidence","onsetObservation","applications"])==keys else{return false}
             if let raw=row["applications"],DiagnosticApplicationReferences.parse(raw)==nil{return false}
             if row.keys.contains("onsetObservation") {
                 guard let value=row["onsetObservation"] as? [String:Any],RecorderOnsetObservation.parse(value) != nil else{return false}

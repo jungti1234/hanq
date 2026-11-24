@@ -69,11 +69,14 @@ final class MismatchRecoveryEngine:NSObject {
     var bufferedIdentities:[ObjectIdentifier:Int64]=[:]
     func bufferedID(_ event:CGEvent)->Int64 { bufferedIdentities[ObjectIdentifier(event)] ?? event.getIntegerValueField(.eventSourceUserData) }
     var keyDownSources:[Int64:String]=[:]
-    struct EventOrigin {let timestamp:CGEventTimestamp;let source:String?;let code:Int64;let type:CGEventType}
+    struct EventOrigin {
+        let timestamp:CGEventTimestamp;let source:String?;let code:Int64;let type:CGEventType
+        let shiftArrival: InputIncidentTrace.ShiftArrival?
+    }
     private var eventOrigins:[Int64:EventOrigin]=[:]
     private var nextOrigin:Int64=0
     var willForwardEvent:(CGEventType,CGEvent)->Void = {_,_ in}
-    @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent,at capturedTimestamp:CGEventTimestamp?=nil)->Int64? {
+    @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent,at capturedTimestamp:CGEventTimestamp?=nil,shiftArrival:InputIncidentTrace.ShiftArrival?=nil)->Int64? {
         let timestamp=capturedTimestamp ?? event.timestamp
         if recovering{observeRecoverySource(currentSource(),at:timestamp)}
         let incoming=event.getIntegerValueField(.eventSourceUserData)
@@ -82,7 +85,7 @@ final class MismatchRecoveryEngine:NSObject {
         willForwardEvent(type,event)
         nextOrigin+=1
         let token=InputDeliveryOrigin.isMarker(incoming) ? incoming:(0x4851455600000000 | nextOrigin)
-        eventOrigins[token]=EventOrigin(timestamp:timestamp,source:recovering ? intendedSource:nil,code:event.getIntegerValueField(.keyboardEventKeycode),type:type)
+        eventOrigins[token]=EventOrigin(timestamp:timestamp,source:recovering ? intendedSource:nil,code:event.getIntegerValueField(.keyboardEventKeycode),type:type,shiftArrival:shiftArrival)
         if eventOrigins.count>1024 {eventOrigins=Dictionary(uniqueKeysWithValues:eventOrigins.sorted{$0.value.timestamp>$1.value.timestamp}.prefix(512).map{($0.key,$0.value)})}
         event.setIntegerValueField(.eventSourceUserData,value:token)
         return token
@@ -96,6 +99,9 @@ final class MismatchRecoveryEngine:NSObject {
         return original.timestamp
     }
     func discardEventOrigin(_ token:Int64){eventOrigins.removeValue(forKey:token)}
+    func diagnosticShiftArrival(_ type: CGEventType, _ event: CGEvent) -> InputIncidentTrace.ShiftArrival? {
+        origin(type, event)?.shiftArrival
+    }
     private func origin(_ type:CGEventType,_ event:CGEvent)->EventOrigin? {
         guard let value=eventOrigins[event.getIntegerValueField(.eventSourceUserData)],value.code==event.getIntegerValueField(.keyboardEventKeycode),value.type==type else{return nil}
         return value
@@ -117,7 +123,7 @@ final class MismatchRecoveryEngine:NSObject {
     func applyConfirmedCapsBoundary(at timestamp:CGEventTimestamp) {
         guard timestamp>0 else{return}
         for (token,value) in eventOrigins where value.type == .keyDown && value.timestamp>=timestamp {
-            eventOrigins[token]=EventOrigin(timestamp:value.timestamp,source:intendedSource(at:value.timestamp),code:value.code,type:value.type)
+            eventOrigins[token]=EventOrigin(timestamp:value.timestamp,source:intendedSource(at:value.timestamp),code:value.code,type:value.type,shiftArrival:value.shiftArrival)
         }
         var presses:[Int64:String]=[:]
         for event in pending {
@@ -1473,7 +1479,7 @@ final class MismatchRecoveryEngine:NSObject {
         switchGate?.incidentTrace=incidentTrace
         // Capture intent in the same HID stream as the user's switch. Quartz
         // may retimestamp a delayed event before the downstream session tap.
-        switchGate?.forwarded = { [weak self] type,event,timestamp in self?.captureEventOrigin(type,event,at:timestamp) }
+        switchGate?.forwarded = { [weak self] type,event,timestamp,shiftArrival in self?.captureEventOrigin(type,event,at:timestamp,shiftArrival:shiftArrival) }
         switchGate?.acceptsExternalSource = { [weak self] in
             guard let self else{return false}
             return self.enabled && !self.suspended && self.recovering && self.fastRecoveryContext()

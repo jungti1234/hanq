@@ -87,7 +87,7 @@ func runSourceTimestampTests() {
         engine.noteUserSourceSwitch(at:100000)
         let gate=MismatchSwitchGate(accepts:{false},switched:{_ in})
         var forwarded=0
-        gate.forwarded={type,event,time in forwarded+=1;engine.captureEventOrigin(type,event,at:time)}
+        gate.forwarded={type,event,time,receipt in forwarded+=1;engine.captureEventOrigin(type,event,at:time,shiftArrival:receipt)}
         _=gate.receive(.keyDown,hid,at:normalized)
         let token=hid.getIntegerValueField(.eventSourceUserData)
         probeTestCheck(hid.timestamp==(old ? 2000:3000) && forwarded==1,"normalization leaves delivered event timestamp unchanged")
@@ -97,7 +97,7 @@ func runSourceTimestampTests() {
     do {
         var switchTime:CGEventTimestamp=0,capsTime:CGEventTimestamp=0,forwardedTime:CGEventTimestamp=0
         let gate=MismatchSwitchGate(accepts:{true},switched:{switchTime=$0})
-        gate.forwarded={_,_,time in forwardedTime=time}
+        gate.forwarded={_,_,time,_ in forwardedTime=time}
         let command=key(54,3000);command.type = .flagsChanged;command.flags=CGEventFlags(rawValue:0x10|CGEventFlags.maskCommand.rawValue)
         _=gate.receiveHID(.flagsChanged,command)
         probeTestCheck(switchTime==MismatchEventClock.hidTimestamp(command) && command.timestamp==3000,"native right Command uses normalized boundary without mutating raw event")

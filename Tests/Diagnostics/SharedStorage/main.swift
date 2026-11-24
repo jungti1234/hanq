@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import CryptoKit
+import CoreGraphics
 
 setbuf(stdout,nil)
 var checks=0
@@ -207,6 +208,62 @@ let selected=try! review.files(selected:[review.incidents[0].id],environment:env
 for file in selected where DiagnosticSharedStore.validName(file.path){check(try Data(contentsOf:liveShared.appendingPathComponent(file.path))==file.data,"original shared bytes preserved through review")}
 let archive=try! DiagnosticReviewArchive(files:selected)
 check(archive.bytes>0,"selected dependency archive built")
+
+// Use the default shared writer, real review model and ZIP. No system events are posted.
+do {
+    let store = directory("modifier-store")
+    let capture = InputIncidentTrace(secureInput: { false }, destination: store)
+    for key in [CGKeyCode(56), 54, 61] {
+        let event = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: true)!
+        event.type = .flagsChanged
+        event.timestamp = UInt64(key) * 1000
+        let receipt = capture.modifierArrived(.switchHID, .flagsChanged, event)
+        if key == 56 { event.timestamp += 12_000_000 }
+        capture.modifierArrived(.main, .flagsChanged, event, from: receipt)
+    }
+    capture.flush()
+    check(names(store.appendingPathComponent(DiagnosticSharedStore.directoryName)).isEmpty, "receipts cause zero standalone captures")
+    capture.mark(); capture.flush(); capture.finishCaptureWindowsForTest(); capture.flush()
+    let snapshot = root.appendingPathComponent("modifier-snapshot")
+    let ready = DispatchSemaphore(value: 0)
+    var failure: Error?
+    capture.prepareExport(to: snapshot, reviewMetadata: true) { result in
+        if case .failure(let error) = result { failure = error }
+        ready.signal()
+    }
+    check(ready.wait(timeout: .now() + 10) == .success && failure == nil, "modifier snapshot ready")
+    let review = try DiagnosticReviewSnapshot(directory: snapshot)
+    check(review.incidents.count == 1 && review.incidents[0].complete, "only the requested pre/post pair exists")
+    let incident = review.incidents[0]
+    let labels = try incident.documents.values.flatMap { $0.sections.flatMap { $0.fields.map(\.label) } }
+    for key in ["Shift", "우측 Command", "우측 Option"] {
+        check(labels.contains(key + " 도착 · 전환 감시 입구") && labels.contains(key + " 도착 · 본체 입력 처리 입구"),
+              "preview separately identifies both stages for " + key)
+    }
+    let files = try review.files(selected: [incident.id], environment: environment)
+    let archive = try DiagnosticReviewArchive(files: files)
+    let saved = root.appendingPathComponent("modifier.zip")
+    try archive.save(to: saved)
+    let restored = root.appendingPathComponent("modifier-restored")
+    let unzip = Process()
+    unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+    unzip.arguments = ["-x", "-k", saved.path, restored.path]
+    try unzip.run(); unzip.waitUntilExit()
+    check(unzip.terminationStatus == 0, "saved modifier ZIP restores")
+    var rows: [Int: InputIncidentTrace.Frame] = [:]
+    for file in files where file.path.hasSuffix(".hqdiag") {
+        let url = restored.appendingPathComponent("HanQ-Diagnostics").appendingPathComponent(file.path)
+        check(try Data(contentsOf: url) == Data(contentsOf: store.appendingPathComponent(DiagnosticSharedStore.directoryName).appendingPathComponent(file.path)), "export preserves the source bytes")
+        guard try DiagnosticSharedStore.readHeader(url).0.role != 1 else { continue }
+        let restoredCapture = try DiagnosticSharedStore.expand(url.lastPathComponent, in: url.deletingLastPathComponent())
+        for row in restoredCapture.frames where row.kind == .modifierArrival { rows[row.sequence] = row }
+    }
+    check(Set(rows.values.filter { $0.category == 1 }.map(\.event)).count == 1, "retimed Shift keeps one identity in the restored ZIP")
+    check(rows.count == 6 && Set(rows.values.map(\.category)) == Set([1,2,3]) &&
+          Set(rows.values.compactMap(\.modifierStage)) == Set([.switchHID, .main]), "original six receipts survive ZIP restoration")
+} catch {
+    check(false, "modifier ZIP roundtrip: \(error)")
+}
 trace.stopAndFlush()
 // A late post keeps its pre until 72h after the pair's final phase.
 var pairTime=1_000_000.0

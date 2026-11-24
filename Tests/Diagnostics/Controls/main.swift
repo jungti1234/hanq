@@ -115,6 +115,189 @@ check((overflow.observationDelivery.overflow[((6-1)*8+2-1)*32+9] ?? 0)>0,"overfl
 check((try? RecorderTrace.decode(JSONEncoder().encode(overflow))) != nil,"overflow strict decode")
 let off=InputIncidentTrace(secureInput:{false},destination:nil,initiallyEnabled:false,writer:{_ in})
 check(InputIncidentControl.begin(off,.flagsChanged,event(right))==nil,"OFF skips control probe")
+// Isolate receipt from all control-decision producers, including intentional early returns.
+var secured = false
+var receiptCaptures: [InputIncidentTrace.Capture] = []
+let receiptTrace = InputIncidentTrace(secureInput: { secured }, destination: nil, writer: { receiptCaptures.append($0) })
+let roles: [(CGKeyCode, Int)] = [(56,1), (60,1), (54,2), (61,3)]
+let secret = Array("TEST-INPUT-MUST-STAY-PRIVATE".utf16)
+var receiptTimestamp: UInt64 = 50_000_000
+func receiptEvent(_ key: CGKeyCode, _ type: CGEventType) -> CGEvent {
+    let e = event([.maskCommand, .maskAlternate, .maskShift], key: key)
+    receiptTimestamp += 10_000
+    e.type = type
+    e.timestamp = receiptTimestamp
+    e.keyboardSetUnicodeString(stringLength: secret.count, unicodeString: secret)
+    return e
+}
+for (key, _) in roles {
+    let change = receiptEvent(key, .flagsChanged)
+    receiptTrace.modifierArrived(.switchHID, .flagsChanged, change)
+    receiptTrace.modifierArrived(.main, .flagsChanged, change)
+    for type in [CGEventType.keyDown, .keyUp] {
+        let e = receiptEvent(key, type)
+        receiptTrace.modifierArrived(.recipientHID, type, e)
+        receiptTrace.modifierArrived(.switchHID, type, e)
+        receiptTrace.modifierArrived(.main, type, e)
+    }
+}
+// Two different, incomplete paths must remain distinguishable without assuming delivery or loss.
+receiptTrace.modifierArrived(.switchHID, .flagsChanged, receiptEvent(54, .flagsChanged))
+receiptTrace.modifierArrived(.main, .flagsChanged, receiptEvent(61, .flagsChanged))
+for key in [CGKeyCode(0),12,49,55,57,58,59,62] {
+    for type in [CGEventType.keyDown, .keyUp, .flagsChanged] {
+        receiptTrace.modifierArrived(.main, type, receiptEvent(key, type))
+    }
+}
+receiptTrace.modifierArrived(.main, .leftMouseDown, receiptEvent(54,.leftMouseDown))
+secured = true
+for (key, _) in roles {
+    receiptTrace.modifierArrived(.main, .flagsChanged, receiptEvent(key,.flagsChanged))
+}
+secured = false
+receiptTrace.flush()
+check(receiptCaptures.isEmpty, "modifier receipts alone do not request captures")
+receiptTrace.mark(); receiptTrace.flush()
+let receipts = receiptCaptures.last!
+let arrived = receipts.frames.filter { $0.kind == .modifierArrival }
+check(arrived.count == 34 && receipts.frames.allSatisfy { $0.controlEvidence == nil }, "only permitted receipts without any dedicated records")
+let groups = Dictionary(grouping: arrived, by: { $0.event })
+check(groups.count == 14 && groups.keys.allSatisfy { $0 > 0 }, "same input correlated across taps")
+for (role, count) in [(1,16),(2,9),(3,9)] {
+    check(arrived.filter { $0.category == role }.count == count, "role counts with both Shifts unified")
+}
+check(groups.values.filter { $0.count == 2 }.allSatisfy { $0.map(\.modifierStage) == [.switchHID, .main] && $0.allSatisfy { $0.edge == 3 } }, "flagsChanged kept as a transition")
+check(groups.values.filter { $0.count == 3 }.allSatisfy { $0.map(\.modifierStage) == [.recipientHID, .switchHID, .main] && [1,2].contains($0[0].edge) }, "down and up have all observed receipts")
+check(arrived.suffix(2).map(\.modifierStage) == [.switchHID, .main] && arrived.suffix(2).map(\.category) == [2,3] &&
+      Set(arrived.suffix(2).map(\.event)).count == 2, "HID-only Command and main-only Option tracked independently")
+let receiptData = try JSONEncoder().encode(receipts)
+check((try? RecorderTrace.decode(receiptData)) != nil, "strict decoder accepts modifier arrivals")
+let receiptObject = try JSONSerialization.jsonObject(with: receiptData) as! [String:Any]
+let receiptRows = receiptObject["frames"] as! [[String:Any]]
+let firstReceipt = receiptRows.firstIndex { $0["kind"] as? Int == 16 }!
+let allowed = Set(["sequence","milliseconds","lane","kind","event","edge","category","inputOrigin","consumed","durationMicros","count","selected","field","observationTiming","modifierStage"])
+check(receiptRows.filter { $0["kind"] as? Int == 16 }.allSatisfy { Set($0.keys) == allowed }, "exact scalar receipt fields")
+check(!String(decoding: receiptData, as: UTF8.self).contains("TEST-INPUT"), "Unicode payload absent")
+for (field, value) in [("text", "private" as Any), ("rawFlags", 9 as Any), ("keyCode", 54 as Any), ("category", 4 as Any), ("modifierStage", 9 as Any), ("modifierStage", 1 as Any)] {
+    var invalid = receiptObject, frames = receiptRows
+    frames[firstReceipt][field] = value
+    invalid["frames"] = frames
+    check((try? RecorderTrace.decode(JSONSerialization.data(withJSONObject: invalid))) == nil, "reject invalid arrival field \(field)")
+}
+var sameTimeCaptures: [InputIncidentTrace.Capture] = []
+let sameTime = InputIncidentTrace(secureInput: { false }, destination: nil, writer: { sameTimeCaptures.append($0) })
+for (key, _) in [(CGKeyCode(60),1),(54,2),(61,3)] {
+    let e = receiptEvent(key, .flagsChanged)
+    e.timestamp = 123456000
+    sameTime.modifierArrived(.switchHID, .flagsChanged, e)
+    sameTime.modifierArrived(.main, .flagsChanged, e)
+    if let decision = InputIncidentControl.begin(sameTime, .flagsChanged, e) {
+        sameTime.control(.main, .flagsChanged, e, decision)
+    }
+}
+let mirrorSource = CGEventSource(stateID: .privateState)!
+let mirrorTag = Int64(bitPattern: 0x48414B5300000001)
+mirrorSource.userData = mirrorTag
+let mirrored = CGEvent(keyboardEventSource: mirrorSource, virtualKey: 61, keyDown: true)!
+mirrored.type = .flagsChanged
+mirrored.setIntegerValueField(.eventSourceUserData, value: mirrorTag)
+check(mirrored.getIntegerValueField(.eventSourceUserData) == mirrorTag, "fixture uses the product mirror source tag")
+sameTime.modifierArrived(.main, .flagsChanged, mirrored)
+sameTime.flush(); sameTime.mark(); sameTime.flush()
+let atSameTime = sameTimeCaptures.last!.frames.filter { $0.kind == .modifierArrival }
+check(Set(atSameTime.filter { $0.inputOrigin == 1 }.map(\.event)).count == 3, "different untagged modifier roles at exactly the same OS timestamp stay distinct: \(atSameTime.map { [$0.category, $0.event, $0.inputOrigin] })")
+for decision in sameTimeCaptures.last!.frames.filter({ $0.kind == .controlDecision }) {
+    check(atSameTime.filter { $0.event == decision.event && $0.category == decision.edge + 1 }.count == 2, "dedicated decision links to both arrivals of the same modifier")
+}
+check(atSameTime.last?.inputOrigin == 3, "mirror copy remains separately classified")
+// The HID switch gate tags the original only after its entry observation.
+// Quartz can deliver the very same tagged event using another timestamp.
+var retimedCaptures: [InputIncidentTrace.Capture] = []
+let retimedTrace = InputIncidentTrace(secureInput: { false }, destination: nil, writer: { retimedCaptures.append($0) })
+let routing = MismatchRecoveryEngine()
+let testGate = MismatchSwitchGate(accepts: { false }, switched: { _ in })
+testGate.incidentTrace = retimedTrace
+testGate.forwarded = { type, event, stamp, receipt in
+    routing.captureEventOrigin(type, event, at: stamp, shiftArrival: receipt)
+}
+let keyboardSource = CGEventSource(stateID: .privateState)!
+var forwardedShifts: [CGEvent] = []
+for index in 0..<8 {
+    let event = CGEvent(keyboardEventSource: keyboardSource, virtualKey: index.isMultiple(of: 2) ? 56 : 60, keyDown: true)!
+    event.type = .flagsChanged
+    event.timestamp = UInt64(1_000_000 + index * 10_000)
+    event.flags = index.isMultiple(of: 2) ? .maskShift : []
+    let flags = event.flags
+    let receipt = retimedTrace.modifierArrived(.switchHID, .flagsChanged, event)
+    check(testGate.receiveHID(.flagsChanged, event, shiftArrival: receipt)?.takeUnretainedValue() === event && event.flags == flags, "Shift is forwarded unchanged by the filter")
+    check(event.getIntegerValueField(.eventSourceUserData) != 0, "existing input route supplied a tag")
+    forwardedShifts.append(event)
+}
+for (index, event) in forwardedShifts.enumerated().reversed() {
+    event.timestamp = UInt64(80_000_000 + index * 50_000)
+    retimedTrace.modifierArrived(.main, .flagsChanged, event, from: routing.diagnosticShiftArrival(.flagsChanged, event))
+    retimedTrace.event(.boundary, .flagsChanged, event)
+}
+retimedTrace.flush(); retimedTrace.mark(); retimedTrace.flush()
+let retainedRows = retimedCaptures.last!.frames
+let hidIDs = retainedRows.filter { $0.modifierStage == .switchHID }.map(\.event)
+let mainIDs = retainedRows.filter { $0.modifierStage == .main }.map(\.event)
+let endIDs = retainedRows.filter { $0.kind == .event && $0.lane == .boundary }.map(\.event)
+let linkedShifts = zip(hidIDs, mainIDs.reversed()).filter { $0 == $1 }.count
+print("Retimed Shift receipts: HID \(hidIDs.count), main \(mainIDs.count), linked \(linkedShifts)/8")
+check(linkedShifts == 8 && Set(hidIDs).count == 8 && mainIDs == endIDs, "all retimed Shift edges reach their own downstream event")
+
+// Four overlapping Shift edges with identical timestamps. Drop one origin and
+// feed the main callback in reverse order to forbid FIFO/time-based guesses.
+var collisionCaptures: [InputIncidentTrace.Capture] = []
+let collisionTrace = InputIncidentTrace(secureInput: { false }, destination: nil, writer: { collisionCaptures.append($0) })
+var overlapping: [CGEvent] = []
+for index in 0..<4 {
+    let event = CGEvent(keyboardEventSource: keyboardSource, virtualKey: index.isMultiple(of: 2) ? 56 : 60, keyDown: true)!
+    event.type = .flagsChanged
+    event.timestamp = 40_000_000
+    let receipt = collisionTrace.modifierArrived(.switchHID, .flagsChanged, event)
+    let token = routing.captureEventOrigin(.flagsChanged, event, shiftArrival: receipt)!
+    if index == 2 { routing.discardEventOrigin(token) }
+    overlapping.append(event)
+}
+for event in overlapping.reversed() {
+    collisionTrace.modifierArrived(.main, .flagsChanged, event, from: routing.diagnosticShiftArrival(.flagsChanged, event))
+}
+collisionTrace.flush(); collisionTrace.mark(); collisionTrace.flush()
+let collisions = collisionCaptures.last!.frames.filter { $0.kind == .modifierArrival }
+let allHID = collisions.filter { $0.modifierStage == .switchHID }.map(\.event)
+let correspondingMain = Array(collisions.filter { $0.modifierStage == .main }.map(\.event).reversed())
+check(Set(allHID).count == 4 && Set(correspondingMain).count == 4, "same-time Shift edges remain distinct in both callbacks")
+check([0, 1, 3].allSatisfy { allHID[$0] == correspondingMain[$0] } && !allHID.contains(correspondingMain[2]), "missing origin is reported independently, surviving origins match")
+var lookups = 0
+func countedLookup() -> InputIncidentTrace.ShiftArrival? { lookups += 1; return nil }
+secured = true
+receiptTrace.modifierArrived(.main, .flagsChanged, receiptEvent(56, .flagsChanged), from: countedLookup())
+secured = false
+for key in [CGKeyCode(0), 54, 61] {
+    receiptTrace.modifierArrived(.main, .keyDown, receiptEvent(key, .keyDown), from: countedLookup())
+}
+check(lookups == 0, "secure input, characters and unrelated modifiers never request Shift origins")
+
+var busyCaptures: [InputIncidentTrace.Capture] = []
+let busy = InputIncidentTrace(secureInput: { false }, destination: nil, observationCapacity: 4, writer: { busyCaptures.append($0) })
+let busyHeld = DispatchSemaphore(value: 0), busyRelease = DispatchSemaphore(value: 0)
+Thread { busy.withLockedMetadataForTest { busyHeld.signal(); busyRelease.wait() } }.start()
+check(busyHeld.wait(timeout: .now() + 2) == .success, "hold bounded input queue")
+let busyOption = receiptEvent(61, .flagsChanged)
+for _ in 0..<16 { busy.modifierArrived(.main, .flagsChanged, busyOption) }
+busyRelease.signal(); busy.flush(); busy.mark(); busy.flush()
+let busyCapture = busyCaptures.last!
+let overflowKey = 32 + 8 + InputIncidentTrace.ModifierRole.rightOption.rawValue
+check(busyCapture.observationDelivery.overflow[overflowKey] == 14 &&
+      busyCapture.frames.filter { $0.kind == .modifierArrival }.count == 2,
+      "bounded queue counts omitted Option arrivals without claiming delivery")
+var offSecureChecks = 0
+let disabled = InputIncidentTrace(secureInput: { offSecureChecks += 1; return false }, destination: nil, initiallyEnabled: false, writer: { _ in })
+for (key, _) in roles { disabled.modifierArrived(.main, .flagsChanged, receiptEvent(key,.flagsChanged)) }
+check(offSecureChecks == 0, "disabled trace exits before sampling")
+if CommandLine.arguments.count > 2 { try receiptData.write(to: URL(fileURLWithPath: CommandLine.arguments[2])) }
 let out=CommandLine.arguments.dropFirst().first.map{URL(fileURLWithPath:$0)}
 if let out{try encoded.write(to:out)}
 print("PASS \(checks) control diagnostics checks; no global posts, physical keys or actual TIS queries")

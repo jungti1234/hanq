@@ -1087,7 +1087,41 @@ final class InputIncidentTrace {
     var activityEpoch:Int64 {OSAtomicAdd64Barrier(0,&activitySequence)}
     private func noteActivity(){OSAtomicIncrement64Barrier(&activitySequence)}
     enum Lane:Int,Codable {case hid=1,main,onset,mismatch,boundary,onsetAX,mismatchAX,sourceBoundary}
-    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison,onsetObservation}
+    enum Kind:Int,Codable {case event=1,read,shape,marker,context,state,sourceBoundary,detectionDecision,observationWait,sourceEvidence,controlDecision,hud,onsetDecision,boundaryComparison,onsetObservation,modifierArrival}
+
+    enum ModifierRole: Int {
+        case shift = 1, rightCommand, rightOption
+
+        init?(event: CGEvent) {
+            switch event.getIntegerValueField(.keyboardEventKeycode) {
+            case 56, 60: self = .shift
+            case 54: self = .rightCommand
+            case 61: self = .rightOption
+            default: return nil
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .shift: return "Shift"
+            case .rightCommand: return "우측 Command"
+            case .rightOption: return "우측 Option"
+            }
+        }
+    }
+
+    enum ModifierStage: Int, Codable {
+        case recipientHID = 1, switchHID, main
+
+        var lane: Lane { self == .main ? .main : .hid }
+        var label: String {
+            switch self {
+            case .recipientHID: return "수신 앱 확인 입구"
+            case .switchHID: return "전환 감시 입구"
+            case .main: return "본체 입력 처리 입구"
+            }
+        }
+    }
     // AX samples only. Native input callbacks, DOM transactions and replacement
     // ranges are not observable from this process; coverage 1 states that limit.
     struct OnsetRuntime:Codable,Equatable {
@@ -1468,6 +1502,7 @@ final class InputIncidentTrace {
         let observationTiming:DecisionTiming?
         var sourceEvidence:SourceEvidence?=nil
         var shapeEvidence:ShapeEvidence?=nil
+        var modifierStage:ModifierStage?=nil
         var controlEvidence:InputIncidentControl?=nil
         var eventEvidence:EventEvidence?=nil
         var workEvidence:WorkEvidence?=nil
@@ -1627,12 +1662,32 @@ final class InputIncidentTrace {
             return max(65536,result)
         }
     }
-    private struct Identity:Hashable {let token:UInt64;let type:UInt32;let domain:Int}
+    // Carried by the existing bounded input-origin entry. Only the serial diagnostic
+    // worker reads/writes the ID. The callback never waits for it or puts it on the event.
+    final class ShiftArrival {
+        fileprivate let runID: String
+        fileprivate let generation: Int32
+        fileprivate var identifier: Int?
+
+        fileprivate init(runID: String, generation: Int32) {
+            self.runID = runID
+            self.generation = generation
+        }
+    }
+
+    private struct Identity:Hashable {let token:UInt64;let type:UInt32;let domain:Int;var modifier:Int=0}
     // Scalar reference only: never retain/read a mutable CGEvent asynchronously.
     private struct EventReference {
         let timestamp:CGEventTimestamp;let type:CGEventType;let token:UInt64
-        init(_ event:CGEvent,_ type:CGEventType){
+        let modifier: Int
+        init(_ event:CGEvent,_ type:CGEventType,modifierRole:ModifierRole?=nil){
             timestamp=event.timestamp;self.type=type;token=UInt64(bitPattern:event.getIntegerValueField(.eventSourceUserData))
+            // Untagged events of different modifier roles can share an OS timestamp.
+            // Retain only the allowlisted class in the in-memory correlation key.
+            switch type {
+            case .flagsChanged, .keyDown, .keyUp: modifier = (modifierRole ?? ModifierRole(event: event))?.rawValue ?? 0
+            default: modifier = 0
+            }
         }
     }
     private struct Shape {
@@ -1885,11 +1940,11 @@ final class InputIncidentTrace {
             }
         }}
     }
-    private func append(_ lane:Lane,_ kind:Kind,observedAt:Double?=nil,decisionTiming:DecisionTiming?=nil,observationTiming:DecisionTiming?=nil,event:Int=0,edge:Int=0,category:Int=0,inputOrigin:Int=0,consumed:Bool=false,duration:Double=0,count:Int=0,selected:Bool=false,field:Int=0){
+    private func append(_ lane:Lane,_ kind:Kind,observedAt:Double?=nil,decisionTiming:DecisionTiming?=nil,observationTiming:DecisionTiming?=nil,event:Int=0,edge:Int=0,category:Int=0,inputOrigin:Int=0,consumed:Bool=false,duration:Double=0,count:Int=0,selected:Bool=false,field:Int=0,modifierStage:ModifierStage?=nil){
         preservePreviousFrame()
         ring.trim(now:Int(max(0,(clock()-origin)*1000)))
         sequence+=1
-        ring[position]=Frame(sequence:sequence,milliseconds:Int(max(0,(observedAt ?? clock())-origin)*1000),lane:lane,kind:kind,event:event,edge:edge,category:category,inputOrigin:inputOrigin,consumed:consumed,durationMicros:Int(max(0,min(duration,60))*1_000_000),count:count,selected:selected,field:field,decisionTiming:decisionTiming,observationTiming:observationTiming)
+        ring[position]=Frame(sequence:sequence,milliseconds:Int(max(0,(observedAt ?? clock())-origin)*1000),lane:lane,kind:kind,event:event,edge:edge,category:category,inputOrigin:inputOrigin,consumed:consumed,durationMicros:Int(max(0,min(duration,60))*1_000_000),count:count,selected:selected,field:field,decisionTiming:decisionTiming,observationTiming:observationTiming,modifierStage:modifierStage)
         position=(position+1)%capacity
         if stored<capacity{stored+=1}else{overwritten+=1}
     }
@@ -2299,14 +2354,18 @@ final class InputIncidentTrace {
     private func eventIdentity(_ event:CGEvent,type:CGEventType)->(Int,Int) {
         eventIdentity(EventReference(event,type))
     }
-    private func eventIdentity(_ reference:EventReference)->(Int,Int) {
+    private func eventIdentity(_ reference:EventReference, observedID:Int?=nil)->(Int,Int) {
         let raw=reference.token
         let physicalTag=(raw>>48)==0x4852 || (raw>>32)==0x48514556
         let inputOrigin=(raw>>32)==0x48414B53 ? 3:((raw>>32)==0x48414E51 ? 2:1)
-        let timestampKey=Identity(token:reference.timestamp,type:reference.type.rawValue,domain:inputOrigin)
+        let timestampKey=Identity(token:reference.timestamp,type:reference.type.rawValue,domain:inputOrigin,modifier:reference.modifier)
         let taggedKey=physicalTag ? Identity(token:raw,type:reference.type.rawValue,domain:0):nil
         if identities.count>=capacity{identities.removeAll()}
-        let known=taggedKey.flatMap{identities[$0]} ?? (reference.timestamp>0 ? identities[timestampKey]:nil)
+        // A tagged Shift transition without a matching receipt can share a
+        // timestamp with another key. Only its own tag can identify it.
+        let taggedShift = taggedKey != nil && reference.type == .flagsChanged && reference.modifier == ModifierRole.shift.rawValue
+        let timestampMatch = !taggedShift && reference.timestamp > 0 ? identities[timestampKey] : nil
+        let known = observedID ?? taggedKey.flatMap { identities[$0] } ?? timestampMatch
         let identifier:Int
         if let known{identifier=known}else{eventSequence+=1;identifier=eventSequence}
         if reference.timestamp>0{identities[timestampKey]=identifier}
@@ -2647,6 +2706,41 @@ final class InputIncidentTrace {
             updatePreservedLastFrame()
         }
     }
+    // Observe callback entry before the routing gate or keyboard-state mirror can return.
+    // A flagsChanged event identifies a transition without asserting press or release.
+    @discardableResult
+    func modifierArrived(_ stage: ModifierStage, _ type: CGEventType, _ event: CGEvent,
+                         from original: @autoclosure () -> ShiftArrival? = nil) -> ShiftArrival? {
+        let generation = gate.generation
+        guard generation > 0, type == .flagsChanged || type == .keyDown || type == .keyUp,
+              stage != .recipientHID || type != .flagsChanged,
+              let role = ModifierRole(event: event), !secureInput() else { return nil }
+        let edge = type == .flagsChanged ? 3 : (type == .keyDown ? 1 : 2)
+        let time = clock()
+        let reference = EventReference(event, type, modifierRole: role)
+        let untaggedShift = stage == .switchHID && role == .shift && reference.token == 0
+        let receipt = untaggedShift ? ShiftArrival(runID: runID, generation: generation) : nil
+        let previous = stage == .main && role == .shift ? original() : nil
+        let submitted = submit(.event, stage.lane, 8 + role.rawValue, observedAt: time) { [self] timing in
+            guard gate.generation == generation else { return }
+            var observedID: Int?
+            if receipt != nil && type == .flagsChanged {
+                // This is the first callback for this edge. Two Shift edges can
+                // carry the same timestamp before they get their distinct tags.
+                eventSequence += 1
+                observedID = eventSequence
+            } else if let previous, previous.runID == runID, previous.generation == generation {
+                observedID = previous.identifier
+            }
+            let (identifier, origin) = eventIdentity(reference, observedID: observedID)
+            receipt?.identifier = identifier
+            append(stage.lane, .modifierArrival, observedAt: time, observationTiming: timing,
+                   event: identifier, edge: edge, category: role.rawValue, inputOrigin: origin,
+                   modifierStage: stage)
+        }
+        return submitted ? receipt : nil
+    }
+
     func control(_ lane:Lane,_ type:CGEventType,_ event:CGEvent?,_ value:InputIncidentControl,consumed:Bool=false){
         guard enabled,!secureInput() else{return}
         let time=clock(),reference=event.map{EventReference($0,type)}

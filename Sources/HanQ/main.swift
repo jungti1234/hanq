@@ -811,8 +811,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 | (CGEventMask(1) << CGEventType.rightMouseDown.rawValue)
                 | (CGEventMask(1) << CGEventType.otherMouseDown.rawValue)
             let callback: CGEventTapCallBack = { proxy, type, event, context in
-                var incidentStart=InputIncidentTrace.shared.beginCallback(type)
                 let owner = Unmanaged<AppDelegate>.fromOpaque(context!).takeUnretainedValue()
+                InputIncidentTrace.shared.modifierArrived(.main, type, event, from: owner.mismatchRecovery.engine.diagnosticShiftArrival(type, event))
+                var incidentStart=InputIncidentTrace.shared.beginCallback(type)
                 var control=InputIncidentControl.begin(.shared,type,event)
                 control?.runtime=(owner.enabled ? 1:0) | (owner.permissionGranted ? 2:0) | (owner.updateRestricted ? 4:0) | (owner.koreanEnabled ? 8:0) | (owner.hanjaEnabled ? 16:0) | (owner.sourceSwitchBarrier.busy ? 32:0) | (owner.mismatchRecovery.busy ? 64:0)
                 func process() -> Unmanaged<CGEvent>? {
@@ -1080,6 +1081,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // after it so capture remains ahead of all main-run-loop input work.
         inputDeliveryOrigin?.stop()
         let routing=InputDeliveryOrigin()
+        routing.diagnosticArrival = { InputIncidentTrace.shared.modifierArrived(.recipientHID, $0, $1) }
         routing.diagnosticReceive={type,event,process in
             let started=InputIncidentTrace.shared.beginCallback(type)
             let result=process()

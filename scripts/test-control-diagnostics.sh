@@ -7,7 +7,17 @@ stage=$(hanq_test_stage control-diagnostics)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p .build/hanq/module-cache
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/KeyboardStateMirror.swift Sources/HanQ/InputFocusAccess.swift Sources/HanQ/InputDeliveryOrigin.swift Sources/HanQ/InputSourceAccess.swift Sources/HanQ/InputSourceObserver.swift Sources/HanQ/PhysicalLetterKeys.swift Sources/HanQ/Mismatch*.swift Sources/HanQ/OnsetInputGate.swift Sources/HanQ/OnsetSafetyDiagnostics.swift Sources/HanQ/SyntheticInputMarker.swift Sources/HanQ/DiagnosticArchiveFormat.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Sources/HanQ/CommandFilter.swift Sources/HanQ/JamoComposer.swift Sources/HanQ/KoreanKeyboardLayout.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Controls/main.swift -o "$stage/tests"
-hanq_test_run "$stage/tests" "$stage/control.json"
+hanq_test_run "$stage/tests" "$stage/control.json" "$stage/arrivals.json"
+python3 -B scripts/summarize-input-incident.py "$stage/arrivals.json" > "$stage/arrival-summary.json"
+python3 - "$stage/arrival-summary.json" <<'END'
+import json, sys
+summary = json.load(open(sys.argv[1]))
+arrivals = summary['modifier_arrivals']
+assert not summary['control_decisions'] and len(arrivals) == 34
+assert {(r['key'], r['stage']) for r in arrivals[-2:]} == {('right_command','switch_hid'),('right_option','main')}
+assert arrivals[-1]['event'] != arrivals[-2]['event']
+print('PASS independent modifier arrivals and last observed stages')
+END
 python3 -B scripts/summarize-input-incident.py "$stage/control.json" > "$stage/summary.json"
 python3 - "$stage/summary.json" <<'PY'
 import json,sys
