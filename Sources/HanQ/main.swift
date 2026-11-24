@@ -178,6 +178,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.enabled && self.inputPermissionReady && !self.updateRestricted && self.tap != nil
         }
         controller.engine.didStart = { [weak self] in self?.refreshInputDeliveryOrigin() }
+        controller.engine.confirmsReturnedASCII = { [weak self] plan, snap, beforeKey in
+            self?.sourceSwitchBarrier.confirmsReturnedASCII(plan, snapshot: snap, beforeKey: beforeKey) ?? false
+        }
         controller.engine.verifiedDeliveryHistory = { [weak self] snap,allowPrior in
             guard let self else{return nil}
             return self.sourceSwitchBarrier.verifiedTwoSetHistory(snap,after:self.mismatchRecovery.engine.lastUserSourceSwitchTimestamp,allowPrior:allowPrior)

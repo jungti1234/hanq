@@ -29,8 +29,31 @@ final class SourceSwitchBarrier {
               let raw,CFGetTypeID(raw)==AXUIElementGetTypeID() else{return nil}
         return (raw as! AXUIElement)
     }
-    private struct Entry {let field:AXUIElement;let at:Double}
-    private struct HeldStart {let snapshot:Snapshot;let window:AXUIElement;let until:Double}
+    private struct Entry {
+        let field: AXUIElement
+        let at: Double
+        let switchTimestamp: CGEventTimestamp
+        let returnBaseline: Snapshot?
+    }
+    private struct HeldStart {
+        let snapshot: Snapshot
+        let window: AXUIElement
+        let until: Double
+        let returnTimestamp: CGEventTimestamp?
+    }
+
+    // The two taps see the same delivery at different times. Keep the
+    // committed caret and the keys passed after it for this one fallback.
+    private struct ReturnReceipt {
+        let baseline: Snapshot
+        let window: AXUIElement
+        let expires: Double
+        let sourceEpoch: Int?
+        let switchTimestamp: CGEventTimestamp
+        var keys: [(UInt16, Bool)] = []
+    }
+    private var returnReceipt: ReturnReceipt?
+    private var requestedReturnFromABC = false
     private var entry:Entry?
     private struct UnfocusedSwitch {
         let began:Double, pid:pid_t
@@ -408,7 +431,7 @@ final class SourceSwitchBarrier {
         ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil;noteDiagnosticHistory(9,baseline:true)
         trace("source_initial_body_removed")
     }
-    func resetObservation(){entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){returnReceipt=nil;entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
     // Backspace can remove one component of live Hangul rather than commit the
     // remaining syllable. Reuse only our observed key prefix, after the editor
     // proves its entire text and caret. Never decompose existing editor text.
@@ -567,6 +590,7 @@ final class SourceSwitchBarrier {
     }
     private func observe(_ type:CGEventType,_ event:CGEvent,historyTimestamp:CGEventTimestamp,checkpoint:((InputIncidentTrace.RoutingStage)->Void)?=nil) {
         defer{checkpoint?(.ledger)}
+        if returnReceipt != nil { observeReturnDelivery(type, event) }
         sourceEvidence?.observeInteraction(type,event)
         let heldCode=event.getIntegerValueField(.keyboardEventKeycode)
         if type == .keyDown {deliveredHeld.insert(heldCode)}
@@ -709,7 +733,11 @@ final class SourceSwitchBarrier {
         // an entire source-switch transaction, to catch up. Never renew on input.
         let limit=min(candidate.at+1,now()+0.080)
         if !busy{busy=true;transactionField=snap.field;deadline=limit}
-        heldStart=HeldStart(snapshot:snap,window:window,until:limit);nextLayoutCheck=now()+0.016
+        let confirmedReturn = candidate.returnBaseline.map {
+            event.timestamp > candidate.switchTimestamp && $0.selection == snap.selection
+                && $0.text.utf16.elementsEqual(snap.text.utf16)
+        } ?? false
+        heldStart=HeldStart(snapshot:snap,window:window,until:limit,returnTimestamp:confirmedReturn ? candidate.switchTimestamp : nil);nextLayoutCheck=now()+0.016
         trace("initial_layout_wait");schedule();return true
     }
     private func initialDeliveryReady()->Bool {
@@ -734,9 +762,61 @@ final class SourceSwitchBarrier {
         if !snap.text.isEmpty {
             nativeBatch=NativeBatch(field:snap.field,window:win,layout:phase)
         }
+        if phase == .conflicting, let switchTimestamp = h.returnTimestamp {
+            let lifetime = MismatchSourceEvidence.confirmationSeconds
+            let expires = now() + lifetime
+            returnReceipt = ReturnReceipt(baseline: snap, window: win, expires: expires, sourceEpoch: sourceEvidence?.epoch, switchTimestamp: switchTimestamp)
+            DispatchQueue.main.asyncAfter(deadline: .now() + lifetime) { [weak self] in
+                if self?.returnReceipt?.expires == expires { self?.returnReceipt = nil }
+            }
+        }
         resumedOriginalBatch = phase == .conflicting
         heldStart=nil;deadline=now()+1;trace(phase == .ready ? "initial_layout_ready":"initial_original_resumed");return true
     }
+    private func returnLetterOrSymbol(_ event: CGEvent) -> (UInt16, Bool)? {
+        guard event.type == .keyDown,
+              event.flags.intersection([.maskCommand,.maskControl,.maskAlternate,.maskSecondaryFn,.maskAlphaShift]).isEmpty,
+              event.getIntegerValueField(.keyboardEventAutorepeat) == 0,
+              let key = UInt16(exactly: event.getIntegerValueField(.keyboardEventKeycode)) else { return nil }
+        let shift = event.flags.contains(.maskShift)
+        return MismatchRecoveryPlan.character(key, shift) == nil ? nil : (key, shift)
+    }
+
+    private func observeReturnDelivery(_ type: CGEventType, _ event: CGEvent) {
+        guard let receipt = returnReceipt, now() <= receipt.expires else { returnReceipt = nil; return }
+        if type == .keyUp { return }
+        if type == .flagsChanged, [56, 60].contains(event.getIntegerValueField(.keyboardEventKeycode)) { return }
+        guard receipt.keys.count < 64, let key = returnLetterOrSymbol(event) else {
+            returnReceipt = nil
+            return
+        }
+        returnReceipt?.keys.append(key)
+    }
+
+    // Only literal ASCII newly inserted at the committed return caret can
+    // override mixed-text protection. The plan still takes the normal
+    // verified selection, source activation, replay and editor-receipt path.
+    func confirmsReturnedASCII(_ plan: MismatchRecoveryPlan, snapshot: MismatchSnapshot, beforeKey: Bool) -> Bool {
+        guard let receipt = returnReceipt, !busy, isReady(), !externalEditPending,
+              now() <= receipt.expires, receipt.sourceEpoch == sourceEvidence?.epoch,
+              plan.sourceID == KoreanKeyboardLayout.twoSetID,
+              plan.verifiedReplacement == nil, plan.hasLetters, !plan.codes.isEmpty,
+              CFEqual(snapshot.element, receipt.baseline.field),
+              plan.caret == receipt.baseline.selection.location,
+              plan.before.utf16.elementsEqual(receipt.baseline.text.utf16),
+              let expected = plan.expected, snapshot.text.utf16.elementsEqual(expected.utf16),
+              snapshot.selection == NSRange(location: plan.caret + plan.roman.utf16.count, length: 0),
+              plan.roman == plan.replayRoman else { return false }
+        // During a pre-key sample the main tap can already have observed that
+        // key, while the editor and the downstream plan still end one key earlier.
+        let count = plan.codes.count
+        guard receipt.keys.count == count || (beforeKey && receipt.keys.count == count + 1),
+              plan.codes.elementsEqual(receipt.keys.prefix(count), by: ==),
+              let window = fieldWindow(snapshot.element), CFEqual(window, receipt.window),
+              source() == KoreanKeyboardLayout.twoSetID, initialLayout?() == .conflicting else { return false }
+        return true
+    }
+
     private func recordNativeBatchEdge(_ event:CGEvent) {
         guard nativeBatch != nil,event.type != .keyUp else{return}
         if event.type == .flagsChanged,event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{return}
@@ -769,7 +849,10 @@ final class SourceSwitchBarrier {
         resumedOriginalBatch=false;generation+=1;scheduled=false;busy=false
         transactionField=nil;waitReason=nil;repairWaitStarted=nil
         // This is a transport completion, not a verified editor state.
-        finishDiagnosticRequest(4);resetObservation();trace("initial_transport_completed")
+        let receipt = returnReceipt
+        finishDiagnosticRequest(4);resetObservation()
+        returnReceipt = receipt
+        trace("initial_transport_completed")
         return true
     }
     /// Called before the normal key filters. Only our own one-at-a-time replay bypasses the queue.
@@ -777,6 +860,11 @@ final class SourceSwitchBarrier {
         if event.getIntegerValueField(.eventSourceUserData)==Self.marker {
             event.setIntegerValueField(.eventSourceUserData,value:0)
             awaitingReplay=false;schedule();return false
+        }
+        if let receipt = returnReceipt, type != .keyUp {
+            let code = event.getIntegerValueField(.keyboardEventKeycode)
+            let shifted = type == .flagsChanged && [56, 60].contains(code)
+            if !shifted && (event.timestamp <= receipt.switchTimestamp || returnLetterOrSymbol(event) == nil) { returnReceipt = nil }
         }
         if finishFallbackTransportIfDrained(){return false}
         beginRepairBoundary(type,event)
@@ -827,6 +915,9 @@ final class SourceSwitchBarrier {
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,rightCommand:Bool=false,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
+        returnReceipt = nil
+        requestedReturnFromABC = rightCommand && timestamp != 0 && id == KoreanKeyboardLayout.twoSetID
+            && source() == "com.apple.keylayout.ABC"
         rightCommandRequest = rightCommand
         cancelUnfocusedSwitch()
         if heldStart != nil{fail("initial_source_changed")}
@@ -990,6 +1081,7 @@ final class SourceSwitchBarrier {
             if selectionPending(){wait("waiting_for_source_commit");return}
             guard result==noErr,source()==target else{fail("switch_failed");return}
             let snap=switchSnapshot!;switchSnapshot=nil
+            let committedTimestamp = targetTimestamp
             let confirmedUserRequest=targetTimestamp != 0
             didConfirmSource(target,targetTimestamp)
             didSelect(targetTimestamp);targetTimestamp=0
@@ -1012,7 +1104,14 @@ final class SourceSwitchBarrier {
                 noteDiagnosticHistory(7,baseline:true)
             }
             if initialLayout != nil,target==KoreanKeyboardLayout.twoSetID,confirmedUserRequest {
-                entry=Entry(field:snap.field,at:now())
+                let baseline = requestedReturnFromABC && snap.selection.length == 0 ? snap : nil
+                let committedAt = now()
+                entry = Entry(field: snap.field, at: committedAt, switchTimestamp: committedTimestamp, returnBaseline: baseline)
+                if baseline != nil {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + MismatchSourceEvidence.confirmationSeconds) { [weak self] in
+                        if self?.entry?.at == committedAt { self?.entry = nil }
+                    }
+                }
             }
             awaitingSelection=true
             selectionAttempts=1;selectionRetryAt=now()+0.01
@@ -1030,6 +1129,11 @@ final class SourceSwitchBarrier {
         if let first=queued.first,entry != nil,holdFirstIfNeeded(first,alreadyQueued:true){return}
         waitReason=nil
         let saved=queued.removeFirst()
+        // The posted copy gets a fresh timestamp. Check the original here
+        // so a late English press cannot become evidence for a Korean edit.
+        if let receipt = returnReceipt, saved.type == .keyDown, saved.timestamp <= receipt.switchTimestamp {
+            returnReceipt = nil
+        }
         replaySource?.userData=Self.marker
         guard let replaySource,let event=CGEvent(keyboardEventSource:replaySource,
             virtualKey:CGKeyCode(saved.getIntegerValueField(.keyboardEventKeycode)),keyDown:saved.type == .keyDown) else{queued.insert(saved,at:0);fail("allocation");return}

@@ -162,6 +162,7 @@ final class MismatchRecoveryEngine:NSObject {
     }
     private var compositionObservation:CompositionObservation?
     private var compositionWaitState=0
+    var confirmsReturnedASCII: ((MismatchRecoveryPlan, MismatchSnapshot, Bool) -> Bool)?
     var verifiedDeliveryHistory:((MismatchSnapshot,Bool)->(plan:MismatchRecoveryPlan,lastKeyAt:Double)?)?
     var recovering=false
     var pending:[CGEvent]=[]
@@ -779,7 +780,8 @@ final class MismatchRecoveryEngine:NSObject {
             }
         }else{verified=nil;detectionReason = .unspecifiedMismatch}
         if let verified {
-            if verified.hasAmbiguousLatinInput(verified.roman) {
+            if verified.hasAmbiguousLatinInput(verified.roman),
+               confirmsReturnedASCII?(verified, snap, allowPrior) != true {
                 resetCompositionObservation()
                 incidentTrace.decision(.sample,.repairBlocked)
                 return
