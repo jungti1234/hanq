@@ -637,7 +637,20 @@ final class SourceSwitchBarrier {
         }
         checkpoint?(.snapshot)
         if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil;noteDiagnosticHistory(11)}
-        guard (ledger?.segments.reduce(0,{$0+$1.keys.count}) ?? 0)<128 else{resetObservation();return}
+        if let history = ledger, history.segments.reduce(0, { $0 + $1.keys.count }) >= 128 {
+            // A fully visible mixed run ends in ASCII, so it has no unfinished
+            // Hangul syllable. Keep its actual spelling if the whole interval matches.
+            if let plan = history.lastTwoSetPlan(maximumKeys: 128), let snap = read(),
+               let field, CFEqual(field, snap.field),
+               plan.matchesMixedInputBeforeSwitch(text: snap.text, selection: snap.selection) {
+                ledger = MismatchReplayLedger(before: snap.text, caret: snap.selection.location)
+            } else if let compacted = history.compactedForObservation() {
+                ledger = compacted
+            } else {
+                resetObservation()
+                return
+            }
+        }
         // A completed switch can preserve the proved body/ledger but starts a
         // new (empty) source interval. Timestamp its first accepted key rather
         // than treating the old ledger as an already initialized new interval.
@@ -951,7 +964,20 @@ final class SourceSwitchBarrier {
         if let target {
             guard isReady() else{wait("waiting_for_repair");return}
             if switchSnapshot == nil {
-                guard matches(snap) else{waitForMatch(snap);return}
+                if !matches(snap) {
+                    guard rightCommandRequest, targetTimestamp > 0, (selectedRange?.length ?? 0) == 0,
+                          let plan = ledger?.lastTwoSetPlan(maximumKeys: 128),
+                          plan.matchesMixedInputBeforeSwitch(text: snap.text, selection: snap.selection) else {
+                        waitForMatch(snap)
+                        return
+                    }
+                    // Commit the observed spelling as the baseline. In
+                    // particular the old keys must never re-enter a repair.
+                    resetObservation()
+                    field = snap.field
+                    ledger = MismatchReplayLedger(before: snap.text, caret: snap.selection.location)
+                    noteDiagnosticHistory(9,baseline:true)
+                }
                 switchSnapshot=snap
             }
             if rightCommandRequest, webActivationLimit() != nil, let original = switchSnapshot,

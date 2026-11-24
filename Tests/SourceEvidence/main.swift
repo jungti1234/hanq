@@ -38,6 +38,7 @@ final class Fixture {
     func sample(){engine.sample(synchronous:true)}
     func settle(){selected=ko;time+=0.01;evidence.observe(ko);sample()}
 }
+runMixedInputTests()
 for tracing in [false,true] {
     do {
         let f=Fixture(tracing);f.press();f.text="d";f.sample()

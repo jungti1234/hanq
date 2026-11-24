@@ -127,6 +127,61 @@ struct MismatchRecoveryPlan {
     var replayRoman:String {
         codes.map{Self.character($0.0,$0.1)!}.joined()
     }
+    // Once the proposed edit includes a composed syllable followed by Latin
+    // letters, the same keys can explain deliberate bilingual input. Include
+    // the preceding syllable when tracking started at the Latin run itself.
+    func hasAmbiguousLatinInput(_ insertion: String) -> Bool {
+        guard insertion.utf16.contains(where: Self.isLatinLetter) else { return false }
+        let base = before as NSString
+        guard (0...base.length).contains(caret) else { return false }
+        // Follow the visible ASCII run even if tracking resumed between words.
+        // A separator alone after an unrelated Korean sentence is insufficient.
+        // Match the plan's 256-key horizon; never walk an entire editor document.
+        let lower = max(0, caret - 256)
+        var start = caret
+        var lettersInFirstWord = false
+        var crossedSpace = false
+        while start > lower {
+            let unit = base.character(at: start - 1)
+            guard (32...126).contains(unit) else { break }
+            if unit == 32 {
+                lettersInFirstWord = false
+                crossedSpace = true
+            } else if Self.isLatinLetter(unit) {
+                lettersInFirstWord = true
+            }
+            start -= 1
+        }
+        var sawSyllable = start > 0 && (0xAC00...0xD7A3).contains(base.character(at: start - 1)) &&
+            (!crossedSpace || lettersInFirstWord)
+        // A plan born in the middle of a run longer than our evidence window
+        // cannot establish that changing only its tail is a complete repair.
+        if start == lower, lower > 0, (32...126).contains(base.character(at: lower - 1)) { return true }
+        for unit in insertion.utf16 {
+            if (0xAC00...0xD7A3).contains(unit) { sawSyllable = true }
+            if sawSyllable && Self.isLatinLetter(unit) { return true }
+        }
+        return false
+    }
+
+    private static func isLatinLetter(_ unit: UInt16) -> Bool {
+        (65...90).contains(unit) || (97...122).contains(unit)
+    }
+
+    // A requested switch can proceed when *all* original keys are visible
+    // as a normally rendered prefix and literal Latin suffix. This proves
+    // delivery only. Never use it to select or replay the visible text.
+    func matchesMixedInputBeforeSwitch(text: String, selection: NSRange) -> Bool {
+        guard let insertion = twoSetInsertion(text: text, selection: selection, maximumKeys: 128) else { return false }
+        let suffix = insertion.utf16.reversed().prefix { (32...126).contains($0) }
+        guard suffix.contains(where: Self.isLatinLetter), hasAmbiguousLatinInput(insertion) else { return false }
+        let suffixCount = suffix.count
+        guard suffixCount > 0, suffixCount <= codes.count else { return false }
+        let literal = codes.suffix(suffixCount).compactMap { Self.character($0.0, $0.1) }.joined()
+        let prefix = codes.dropLast(suffixCount)
+        guard let composed = MismatchKeyboardLayout.render(keys: Array(prefix), sourceID: sourceID) else { return false }
+        return insertion.utf16.elementsEqual((composed + literal).utf16)
+    }
     mutating func captureObserved(text:String){
         let range=NSRange(location:caret,length:roman.utf16.count)
         let observed=text as NSString
@@ -267,10 +322,10 @@ extension MismatchRecoveryPlan {
 // separately. Preserve normal Korean prefixes long enough to prove that exact
 // failure; never normalize arbitrary document jamo or unobserved input.
 extension MismatchRecoveryPlan {
-    private func twoSetInsertion(text:String,selection:NSRange)->String? {
+    private func twoSetInsertion(text:String,selection:NSRange,maximumKeys:Int=64)->String? {
         let ns=text as NSString,length=selection.location-caret
         guard sourceID==KoreanKeyboardLayout.twoSetID,verifiedReplacement==nil,
-              !codes.isEmpty,codes.count<=64,selection.length==0,caret>=0,length>0,
+              !codes.isEmpty,codes.count<=maximumKeys,selection.length==0,caret>=0,length>0,
               selection.location<=ns.length else{return nil}
         let range=NSRange(location:caret,length:length)
         guard InputFocusAccess.sameText(ns.replacingCharacters(in:range,with:""),before) else{return nil}

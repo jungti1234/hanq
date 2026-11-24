@@ -75,16 +75,47 @@ struct MismatchReplayLedger {
     var selection:NSRange{NSRange(location:caret+insertion.utf16.count,length:0)}
     // Prove the entire latest Korean interval, including keys whose first
     // consonant was already acknowledged before the buffered batch arrived.
-    func lastTwoSetPlan()->MismatchRecoveryPlan? {
+    func lastTwoSetPlan(maximumKeys:Int=64)->MismatchRecoveryPlan? {
         guard let segment=segments.last,segment.source==KoreanKeyboardLayout.twoSetID,
               caret>=0,caret<=before.utf16.count else{return nil}
         let committed=segments.dropLast().map{Self.render($0)}.joined()
         let base=(before as NSString).replacingCharacters(in:NSRange(location:caret,length:0),with:committed)
         var candidate=MismatchRecoveryPlan(before:base,caret:caret+committed.utf16.count,sourceID:segment.source)
         candidate.codes=segment.keys
-        guard !candidate.codes.isEmpty,candidate.codes.count<=64 else{return nil}
+        guard !candidate.codes.isEmpty,candidate.codes.count<=maximumKeys else{return nil}
         candidate.roman=candidate.replayRoman
         return candidate
+    }
+    // Fold only the committed prefix. Keeping many keys from the current
+    // two-set composition lets a future vowel still move its final consonant.
+    func compactedForObservation() -> Self? {
+        guard postDeletionPrefixCount == nil, let last = segments.last,
+              last.source == KoreanKeyboardLayout.twoSetID || last.source.hasPrefix("com.apple.keylayout."),
+              caret >= 0, caret <= before.utf16.count else { return nil }
+        var prefix = segments.dropLast().map(Self.render).joined()
+        var tail = last.keys
+        if tail.count > 64 {
+            let rendered = Self.render(last)
+            // At most a handful of two-set strokes belong to one syllable.
+            // Verify the split against the entire prior rendering before folding.
+            let middle = tail.count - 48
+            var found = false
+            for split in middle..<(middle + 8) {
+                let head = Self.render((last.source, Array(tail.prefix(split))))
+                let rest = Array(tail.dropFirst(split))
+                if (head + Self.render((last.source, rest))).utf16.elementsEqual(rendered.utf16) {
+                    prefix += head
+                    tail = rest
+                    found = true
+                    break
+                }
+            }
+            guard found else { return nil }
+        }
+        let base = (before as NSString).replacingCharacters(in: NSRange(location: caret, length: 0), with: prefix)
+        var result = Self(before: base, caret: caret + prefix.utf16.count)
+        result.append(source: last.source, keys: tail)
+        return result
     }
     func decomposedPlan(text:String,selection:NSRange)->MismatchRecoveryPlan? {
         lastTwoSetPlan()?.decomposedPlan(text:text,selection:selection)

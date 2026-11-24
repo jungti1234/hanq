@@ -773,6 +773,11 @@ final class MismatchRecoveryEngine:NSObject {
             }
         }else{verified=nil;detectionReason = .unspecifiedMismatch}
         if let verified {
+            if verified.hasAmbiguousLatinInput(verified.roman) {
+                resetCompositionObservation()
+                incidentTrace.decision(.sample,.repairBlocked)
+                return
+            }
             if detectionReason == .interruptedComposition {
                 // An exact partial rendering alone does not prove that the
                 // current composition is finished. Observe through release and

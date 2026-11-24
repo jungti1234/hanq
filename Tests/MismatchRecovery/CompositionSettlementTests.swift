@@ -55,7 +55,10 @@ func runCompositionSettlementTests(){
     }
     let roman=detection();roman.plan=candidate("dk");roman.heldKeys=[40]
     roman.consumeIdleSnapshot(.init(element:field,text:"아dk",selection:NSRange(location:3,length:0)))
-    check(roman.detectionCount==1,"literal Roman mismatch retains its existing immediate detection")
+    check(roman.detectionCount==0,"Latin next to a syllable predating a fresh candidate is ambiguous")
+    roman.plan?.before=" "
+    roman.consumeIdleSnapshot(.init(element:field,text:" dk",selection:NSRange(location:3,length:0)))
+    check(roman.detectionCount==1,"literal Roman mismatch in a separate input range retains immediate detection")
     for asynchronous in [false,true] {
         let p=detection(),evidence=MismatchSourceEvidence()
         var source=ko,clock=100.0

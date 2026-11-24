@@ -70,16 +70,22 @@ for kind in ["live","committed","ascii","detached","delayed-detached","switch","
  default:f.text="sample 달제시ㄷ"
  }
  f.sample("post-consonant")
- let failure=["ascii","delayed-detached"].contains(kind)
- if failure && f.engine.detectionCount==0 {
+ let detachedFailure = kind == "delayed-detached"
+ if (detachedFailure || kind == "ascii") && f.engine.detectionCount==0 {
   // A complete interrupted rendering is now observed through the final key
   // release and the controller's next stable idle poll before detection.
   f.event(positions[kind=="delayed-detached" ? "o":"e"]!,down:false)
   f.sample("released-consonant")
   RunLoop.current.run(until:Date().addingTimeInterval(0.025));f.sample("settled-consonant")
  }
- check(f.engine.detectionCount==(failure ? 1:0),"\(kind): only proved ASCII/detached failure is repaired")
- if !failure {
+ check(f.engine.detectionCount==(detachedFailure ? 1:0),"\(kind): preserve ambiguous Latin input and still recover detached jamo")
+ if kind=="ascii" {
+  var chosen=ko
+  f.barrier.source={chosen};f.barrier.select={chosen=$0;return noErr}
+  check(f.barrier.request("com.apple.keylayout.ABC",at:f.stamp+1,rightCommand:true),"explicit switch after mixed input")
+  f.barrier.step()
+  check(chosen=="com.apple.keylayout.ABC" && f.text=="sample 달제시e","post-deletion Latin suffix is preserved across the switch")
+ } else if !detachedFailure {
   check(f.barrier.expected?.0==f.text && f.barrier.expected?.1==f.range,"\(kind): exact body/caret history remains switchable")
   f.event(positions["e"]!,down:false)
   if kind=="switch" {
