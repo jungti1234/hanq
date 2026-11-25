@@ -275,6 +275,51 @@ private func checkShiftAcrossReturn() {
     print("PASS Shift across the return switch, exact suffix recovery and shortcut guards")
 }
 
+private func checkMultilineHangulToEnglish() {
+    let paragraph = "첫 문단🙂\n\n두 번째 문단을 쓰고, 아무튼 "
+    let suffix = " 남은 본문"
+    let r = ReturnEditor(left: paragraph, right: suffix)
+    let selector = SelectionPreservingSourceSwitch()
+    selector.allowed = { true }
+    selector.focus = { r.field }
+    selector.editable = { _ in true }
+    selector.currentSource = { r.selected }
+    selector.now = { r.time }
+    selector.text = { _ in r.body + "\n" }
+    selector.range = { _ in CFRange(location: r.range.location, length: r.range.length) }
+    selector.caretText = { _, raw, selected in
+        let text = r.body as NSString
+        let caret = NSRange(location: selected.location, length: selected.length)
+        return MismatchTextReader.resolve(value: raw, selection: caret) { range in
+            NSMaxRange(range) <= text.length ? text.substring(with: range) : nil
+        }
+    }
+    selector.postCommit = { _, key in
+        returnCheck(key == 123)
+        let previous = NSRange(location: r.range.location - 1, length: 0)
+        return r.engine.testSetRange?(r.field, previous) == .success
+    }
+    selector.setRange = { _, range in
+        r.engine.testSetRange?(r.field, NSRange(location: range.location, length: range.length)) == .success
+    }
+    selector.selectSource = r.barrier.select
+    r.barrier.select = { selector.select($0, asynchronous: true) }
+    r.barrier.selectAfterTypedHangul = { target, snapshot in
+        let proof = SelectionPreservingSourceSwitch.TypedCaret(field: snapshot.field, text: snapshot.text, offset: snapshot.selection.location)
+        return selector.select(target, asynchronous: true, typedCaret: proof)
+    }
+    r.barrier.selectionPending = { selector.isPending }
+    r.type("gks")
+    r.change(r.english)
+    r.type("Q")
+    let end = (paragraph + "한").utf16.count
+    returnCheck(r.body == paragraph + "한Q" + suffix)
+    returnCheck(r.range == NSRange(location: end + 1, length: 0))
+    returnCheck(r.writes == [NSRange(location: end - 1, length: 0), NSRange(location: end, length: 0)])
+    returnCheck(r.retained == 0 && r.selected == r.english)
+    print("PASS multiline editor: composed Hangul, right Command, Shift+Q and suffix")
+}
+
 private func checkMissingOutboundSyllable() {
     // This editor temporarily hides an active syllable on direct deactivation.
     // Both callbacks run through the normal request and queued-delivery path.
@@ -355,6 +400,7 @@ func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔
         seed = seed &* 6364136223846793005 &+ 1442695040888963407
         return values[Int((seed >> 32) % UInt64(values.count))]
     }
+    checkMultilineHangulToEnglish()
     checkMissingOutboundSyllable()
     checkShiftAcrossReturn()
     checkReturnBoundaries()

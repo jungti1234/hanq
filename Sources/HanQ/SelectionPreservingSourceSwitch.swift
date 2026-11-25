@@ -90,6 +90,12 @@ final class SelectionPreservingSourceSwitch {
         let text: String
         let offset: Int
     }
+    // The barrier proves text in AXStringForRange coordinates. AXValue may
+    // include paragraph separators that the editor's selection offsets omit.
+    var caretText: (AXUIElement, String, CFRange) -> String? = { element, value, caret in
+        MismatchTextReader.read(element, value: value,
+                                selection: NSRange(location: caret.location, length: caret.length))?.text
+    }
     private var pendingCaretCommand = false
     private struct PendingSwitch {
         let field:AXUIElement
@@ -98,7 +104,7 @@ final class SelectionPreservingSourceSwitch {
         let source:String
         let target:String
         let deadline:Double
-        let caretCommit:Bool
+        let verifiedCaretText:String?
         var restoringCaret = false
     }
     private var pendingSwitch:PendingSwitch?
@@ -113,19 +119,24 @@ final class SelectionPreservingSourceSwitch {
         guard CFEqual(current,pending.field) else{return stop(.changedContext)}
         guard let value=text(current),let selected=range(current) else{return AXError.cannotComplete.rawValue}
         guard value.utf16.elementsEqual(pending.text.utf16) else{return stop(.changedContext)}
-        if pending.caretCommit {
+        if let expected = pending.verifiedCaretText {
             let preceding = CFRange(location:pending.selected.location - 1,length:0)
+            let from = pending.restoringCaret ? preceding : pending.selected
+            let to = pending.restoringCaret ? pending.selected : preceding
+            if Self.equal(selected, from) { return AXError.cannotComplete.rawValue }
+            guard Self.equal(selected, to) else { return stop(.changedContext) }
+            guard let verified = caretText(current, value, selected) else { return AXError.cannotComplete.rawValue }
+            guard verified.utf16.elementsEqual(expected.utf16),
+                  allowed(), currentSource() == pending.source,
+                  let focused = focus(), CFEqual(focused, current) else { return stop(.changedContext) }
+            guard now() < pending.deadline else { return stop(.commitUnconfirmed) }
             if pending.restoringCaret {
-                if Self.equal(selected,preceding) {return AXError.cannotComplete.rawValue}
-                guard Self.equal(selected,pending.selected) else{return stop(.changedContext)}
                 pendingSwitch=nil
                 trace(.restored)
                 let status=selectSource(target)
                 trace(.switched)
                 return status
             }
-            if Self.equal(selected,pending.selected) {return AXError.cannotComplete.rawValue}
-            guard Self.equal(selected,preceding) else{return stop(.changedContext)}
             trace(.collapsed)
             // Only restore a displacement the editor actually acknowledged.
             guard setRange(current,pending.selected) else{return stop(.restoreFailed)}
@@ -159,17 +170,26 @@ final class SelectionPreservingSourceSwitch {
         guard editable(element) else { return fallback(.unsupportedField) }
         guard let original = text(element), original.utf16.count <= 16_384 else { return fallback(.missingText) }
         guard let selected = range(element) else { return fallback(.missingSelection) }
+        if typedCaret != nil && selected.length != 0 {
+            trace(.changedContext)
+            return -50
+        }
         let caretCommit = selected.length == 0
         if caretCommit {
             guard asynchronous, target == "com.apple.keylayout.ABC", let typedCaret else{return fallback(.emptySelection)}
             guard CFEqual(typedCaret.field,element), typedCaret.offset == selected.location,
-                  original.utf16.elementsEqual(typedCaret.text.utf16),
-                  selected.location > 0, selected.location <= original.utf16.count else{trace(.changedContext);return -50}
+                  selected.location > 0, selected.location <= typedCaret.text.utf16.count else{trace(.changedContext);return -50}
         } else if !Self.valid(selected, length: original.utf16.count) {return fallback(.invalidSelection)}
         guard now() - started < 0.06 else { return fallback(.deadline) }
         guard currentSource() == source else { return fallback(.changedSource) }
         guard allowed(), let current = focus(), CFEqual(current, element),
               text(element) == original, Self.equal(range(element), selected) else { return fallback(.changedContext) }
+        if let proof = typedCaret {
+            guard let verified = caretText(current, original, selected),
+                  verified.utf16.elementsEqual(proof.text.utf16),
+                  now() - started < 0.06, allowed(), currentSource() == source,
+                  let focused = focus(), CFEqual(focused, element) else {trace(.changedContext);return -50}
+        }
         let collapsed=CFRange(location:selected.location,length:0)
         // AX-only collapse can leave the IME's marked text alive: it can
         // reappear on the next Korean activation. A cursor key commits it in
@@ -179,7 +199,7 @@ final class SelectionPreservingSourceSwitch {
         guard postCommit(element,123) else { return fallback(.collapseFailed) }
         trace(.commitPosted)
         if asynchronous {
-            pendingSwitch=PendingSwitch(field:element,text:original,selected:selected,source:source,target:target,deadline:now()+0.30,caretCommit:caretCommit)
+            pendingSwitch=PendingSwitch(field:element,text:original,selected:selected,source:source,target:target,deadline:now()+0.30,verifiedCaretText:typedCaret?.text)
             return AXError.cannotComplete.rawValue
         }
         let commitDeadline=now()+0.04

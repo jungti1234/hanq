@@ -16,6 +16,7 @@ final class Fixture {
     var onSwitch: (() -> Void)?
     init() {
         owner.allowed = { true }
+        owner.caretText = { _,raw,_ in raw }
         owner.postCommit = { [unowned self] _,key in
             let range=CFRange(location:key==124 ? self.selection.location+self.selection.length:self.selection.location,length:0)
             self.writes.append(range);self.selection=range;return true
@@ -144,5 +145,60 @@ for outcome in ["ok","unchanged","focus","text","restoreFailed","restoreDelayed"
         check(step()==0 && f.selectedTargets==[abc] && f.selection.location==4,"restore exact UTF-16 caret before leaving")
     } else { check(f.selectedTargets.isEmpty && !f.owner.isPending,"unconfirmed caret cannot switch") }
     check(posts==1,"never resend movement")
+}
+// Reproduce editors whose displayed AXValue and range-addressed text differ.
+// Keep the UTF-16 caret inside the paragraph, including an astral character.
+for mode in ["ok", "rawChange", "verifiedChange", "initialMismatch", "unreadable", "selectionChange", "lateFocus", "lateDeadline"] {
+    let f = Fixture()
+    let abc = "com.apple.keylayout.ABC"
+    let prefix = "첫 문단🙂\n\n마지막 문단, 아무튼 한"
+    var editable = prefix + " 끝"
+    let at = prefix.utf16.count
+    f.value = editable + "\n"
+    f.selection = CFRange(location: at, length: 0)
+    let proof = SelectionPreservingSourceSwitch.TypedCaret(field: f.element, text: editable, offset: at)
+    var posts = 0
+    var readable = true
+    var time = 0.0
+    f.owner.now = { time }
+    f.owner.caretText = { _,raw,caret in
+        guard readable else {return nil}
+        if posts == 1 && mode == "lateFocus" { f.owner.focus = { f.other } }
+        if posts == 1 && mode == "lateDeadline" { time = 0.31 }
+        let document = editable as NSString
+        return MismatchTextReader.resolve(value: raw, selection: NSRange(location:caret.location,length:caret.length)) { r in
+            guard NSMaxRange(r) <= document.length else {return nil}
+            return document.substring(with:r)
+        }
+    }
+    f.owner.postCommit = { _,key in
+        check(key == 123, "commit preceding syllable once")
+        posts += 1
+        f.selection = CFRange(location: at-1, length: 0)
+        return true
+    }
+    if mode == "initialMismatch" {editable = editable.replacingOccurrences(of:"마지막",with:"변경된")}
+    if mode == "selectionChange" {f.selection = CFRange(location: at-1, length: 1)}
+    func step() -> Int32 {f.owner.select(abc, asynchronous:true, typedCaret:proof)}
+    let initial = step()
+    if mode == "initialMismatch" || mode == "selectionChange" {
+        check(initial != noErr && posts == 0 && f.selectedTargets.isEmpty, "stale proof leaves the editor untouched")
+        continue
+    }
+    check(initial == AXError.cannotComplete.rawValue && posts == 1 && f.owner.isPending, "verified editor coordinates start commit")
+    if mode == "rawChange" { f.value += "!" }
+    if mode == "verifiedChange" { editable = editable.replacingOccurrences(of:"아무튼",with:"다르게") }
+    if mode == "unreadable" {
+        readable = false
+        check(step() == AXError.cannotComplete.rawValue && f.owner.isPending && f.writes.isEmpty, "missing proof postpones restoration")
+        readable = true
+    }
+    _ = step()
+    if ["rawChange", "verifiedChange", "lateFocus", "lateDeadline"].contains(mode) {
+        check(!f.owner.isPending && f.writes.isEmpty && f.selectedTargets.isEmpty, "changed text prevents a stale caret write")
+    } else {
+        check(f.selection.location == at && f.writes.count == 1 && f.selectedTargets.isEmpty, "restore the editor's caret offset")
+        check(step() == noErr && f.selectedTargets == [abc] && posts == 1, "one ABC selection before the next Q")
+    }
 }
 print("PASS: selection-preserving source switch \(checks) checks")
