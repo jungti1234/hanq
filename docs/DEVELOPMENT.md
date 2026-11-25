@@ -737,7 +737,7 @@ HID 원본 시각과 session 시각은 같은 정수형이라는 이유만으로
 
 어떤 조사·대화·시험이든 다시 확인할 가능성이 있는 로그는 일반 진단 폴더를 유일한 근거로 사용하지 않는다. 재빌드·앱 교체·릴리스·입력 시험 전에 기존 근거를 별도 작업 자료에 백업하고 파일별 크기·SHA-256과 복원 결과를 확인한다. 시험 후 새 로그도 결과 기록과 연결해 보관한다. 원본 실패·미검증·후속 정정을 함께 유지하며 일반 순환 삭제에 맡기지 않는다. 개인 환경의 자료 위치와 원본 로그는 비공개 기록에서 관리한다.
 
-구형 `--bounded-input-incidents` 및 준비 도구의 `--bounded` 모드는 제거됐다. 오래된 옵션은 기존 앱을 종료하거나 권한을 초기화하기 전에 거부한다. 필요한 보존 조사는 `prepare-app-test.py prepare <앱> --preserve-input-incidents <새 전용 경로>`와 `check <record.json> --require-diagnostics`로 명시적으로 준비한다. 72시간 보관은 용량·누적 쓰기 상한이 아니며 preserve 모드는 자동 정리를 하지 않는다. 저장된 `inputIncidentBoundedDirectory`는 일반 실행에서 새 공유 경로를 선택하고, 준비 성공 후 `inputIncidentLegacyDirectories`에 이전 위치를 기록한 다음 구형 선택 키를 제거한다. OFF·준비 실패·설정 불일치에서는 원래 선택 키를 유지한다. 명시적 조사 인자는 일반 설정 전환과 이전 자료 수집을 시작하지 않는다. 이전 폴더는 읽기 전용으로 검토·ZIP 내보내기에 사용하며 원본 JSON·색인·장부를 재작성하거나 정리하지 않는다.
+구형 `--bounded-input-incidents` 및 준비 도구의 `--bounded` 모드는 제거됐다. 오래된 옵션은 기존 앱을 종료하거나 권한을 초기화하기 전에 거부한다. 필요한 보존 조사는 `prepare-app-test.py prepare <앱> --preserve-input-incidents <새 전용 경로>`와 `check <record.json> --require-diagnostics`로 명시적으로 준비한다. 72시간 보관은 용량·누적 쓰기 상한이 아니며 preserve 모드는 자동 정리를 하지 않는다. 저장된 `inputIncidentBoundedDirectory`는 일반 실행에서 새 공유 경로를 선택하고, 준비 성공 후 `inputIncidentLegacyDirectories`에 이전 위치를 기록한 다음 구형 선택 키를 제거한다. OFF·준비 실패·설정 불일치에서는 원래 선택 키를 유지한다. 명시적 조사 인자는 일반 설정 전환과 이전 자료 수집을 시작하지 않는다. 이전 폴더의 원본 JSON·색인·장부는 그대로 보존한다. 메뉴의 내보내기는 현재 저장소를 열며, 개발 검증에서는 이전 기록도 읽기 전용으로 불러와 ZIP과 대조할 수 있다.
 
 조사 전용 실행은 `--preserve-input-incidents <절대 경로>`를 사용한다. 명시적 개발용 `--diagnose-input-incidents <전용 디렉터리>`도 순환 없이 보관하며 일반 메뉴의 저장 설정을 변경하지 않는다. 전용 디렉터리는 조사 자료의 영구 보관 위치로 지정하거나 시험 종료 전에 검증된 사본을 옮긴다. 임시 폴더를 근거의 최종 보관소로 사용하지 않는다.
 

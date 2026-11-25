@@ -63,6 +63,12 @@ do {
     _ = NSApplication.shared
     let app=AppDelegate()
     let diagnostics=app.makeDiagnosticsMenu()
+    if CommandLine.arguments.contains("-inputIncidentLegacyDirectories") {
+        precondition(InputIncidentTrace.shared.legacyDirectories.count == 2, "exercise two registered previous folders")
+    }
+    let exportItems = diagnostics.items.filter { $0.title.contains("내보내기") }
+    precondition(exportItems.count == 1 && exportItems[0] === app.inputDiagnosticExportItem)
+    precondition(app.inputDiagnosticExportItem.action == #selector(AppDelegate.exportInputDiagnostics))
     let noticeIndex=diagnostics.index(of:app.diagnosticStorageItem)
     precondition(diagnostics.items[noticeIndex+1] === app.diagnosticStorageProblemItem)
     precondition(diagnostics.items[noticeIndex+2] === app.diagnosticStorageSeparator)

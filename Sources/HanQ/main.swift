@@ -446,7 +446,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let inputDiagnosticExportItem = NSMenuItem(title:"진단 기록 내보내기…",action:#selector(exportInputDiagnostics),keyEquivalent:"")
     private var changingInputDiagnostics=false
     private(set) var diagnosticReview:DiagnosticReviewController?
-    private var legacyDiagnosticReviews:[Int:DiagnosticReviewController]=[:]
     private(set) var pendingDiagnosticReview:DiagnosticReviewController?
     var diagnosticQuitPreparer:(@escaping(DiagnosticQuitState)->Void)->Void={InputIncidentTrace.shared.prepareForQuit(completion:$0)}
     var diagnosticQuitResumer:()->Void={InputIncidentTrace.shared.cancelQuitPreparation()}
@@ -1194,11 +1193,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         diagnostics.addItem(diagnosticStorageSeparator)
         diagnostics.addItem(inputIncidentItem)
         diagnostics.addItem(inputDiagnosticExportItem)
-        let previous=InputIncidentTrace.shared.legacyDirectories
-        for index in previous.indices {
-            let item=NSMenuItem(title:previous.count==1 ? "이전 진단 기록 내보내기…":"이전 진단 기록 \(index+1) 내보내기…",action:#selector(exportLegacyDiagnostics(_:)),keyEquivalent:"")
-            item.target=self;item.tag=index;diagnostics.addItem(item)
-        }
         return diagnostics
     }
     @objc func toggleInputDiagnostics(){
@@ -1267,17 +1261,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let review=makeDiagnosticReview()
         review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
         review.load(from:InputIncidentTrace.shared)
-    }
-    @objc func exportLegacyDiagnostics(_ sender:NSMenuItem){
-        let index=sender.tag
-        guard InputIncidentTrace.shared.legacyDirectories.indices.contains(index) else{return}
-        if let review=legacyDiagnosticReviews[index]{review.showWindow(nil);NSApp.activate(ignoringOtherApps:true);return}
-        let review=DiagnosticReviewController(environment:diagnosticReviewEnvironment())
-        legacyDiagnosticReviews[index]=review
-        review.onClose={ [weak self] in self?.legacyDiagnosticReviews.removeValue(forKey:index) }
-        review.onFeedback={ [weak self] in self?.openFeedback() }
-        review.showWindow(nil);NSApp.activate(ignoringOtherApps:true)
-        review.load(from:InputIncidentTrace.shared,legacyIndex:index)
     }
     private func makeDiagnosticReview() -> DiagnosticReviewController {
         let review=DiagnosticReviewController(environment:diagnosticReviewEnvironment())
