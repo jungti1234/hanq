@@ -118,4 +118,31 @@ for reason in ["focus","text","source","timeout","cancel"] {
  if reason != "cancel" {_=f.owner.select("com.apple.keylayout.ABC",asynchronous:true)}
  check(!f.owner.isPending && f.selectedTargets.isEmpty && f.writes.isEmpty,"deferred switch safely ends on \(reason)")
 }
+// A typed syllable at a collapsed caret must leave composition before ABC.
+for outcome in ["ok","unchanged","focus","text","restoreFailed","restoreDelayed","wrongCaret"] {
+    let f=Fixture(), abc="com.apple.keylayout.ABC"
+    f.value="앞🙂한 뒤";f.selection=CFRange(location:4,length:0)
+    var posts=0,time=0.0
+    f.owner.now={time}
+    f.owner.postCommit={_,key in posts+=1;check(key==123,"use native left");return true}
+    let proof=SelectionPreservingSourceSwitch.TypedCaret(field:f.element,text:f.value,offset:4)
+    func step()->Int32 { f.owner.select(abc,asynchronous:true,typedCaret:proof) }
+    check(step()==AXError.cannotComplete.rawValue && f.owner.isPending && posts==1,"posted once at original caret")
+    if outcome=="unchanged" {time=0.31}
+    else {f.selection=CFRange(location:outcome=="wrongCaret" ? 2:3,length:0)}
+    if outcome=="focus" {f.owner.focus={f.other}}
+    if outcome=="text" {f.value="앞🙂하 뒤"}
+    if outcome=="restoreFailed" {f.owner.setRange={_,_ in false}}
+    if outcome=="restoreDelayed" {f.owner.setRange={_,_ in true}}
+    _=step()
+    if ["ok","restoreDelayed"].contains(outcome) {
+        check(f.selectedTargets.isEmpty,"caret restoration precedes ABC")
+        if outcome=="restoreDelayed" {
+            _=step();check(f.selectedTargets.isEmpty && f.owner.isPending,"AX success alone is insufficient")
+            f.selection=CFRange(location:4,length:0)
+        }
+        check(step()==0 && f.selectedTargets==[abc] && f.selection.location==4,"restore exact UTF-16 caret before leaving")
+    } else { check(f.selectedTargets.isEmpty && !f.owner.isPending,"unconfirmed caret cannot switch") }
+    check(posts==1,"never resend movement")
+}
 print("PASS: selection-preserving source switch \(checks) checks")

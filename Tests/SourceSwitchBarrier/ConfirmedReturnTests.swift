@@ -275,6 +275,75 @@ private func checkShiftAcrossReturn() {
     print("PASS Shift across the return switch, exact suffix recovery and shortcut guards")
 }
 
+private func checkMissingOutboundSyllable() {
+    // This editor temporarily hides an active syllable on direct deactivation.
+    // Both callbacks run through the normal request and queued-delivery path.
+    for guarded in [false,true] {
+        let r=ReturnEditor(left:"오래 입력한 뒤에도 ",right:" 다음 문단")
+        var hidden="", commits=0
+        r.barrier.select={ id in
+            if id==r.english {hidden=r.composition;r.composition="";r.composingKeys=[]}
+            else if !hidden.isEmpty {r.prefix+=hidden;hidden=""}
+            r.commit();r.selected=id;r.latin=id==r.english;return noErr
+        }
+        if guarded {
+            r.barrier.selectAfterTypedHangul={ id,snap in
+                returnCheck(snap.text==r.body && snap.selection==r.range && id==r.english)
+                r.commit();commits+=1
+                return r.barrier.select(id)
+            }
+        }
+        r.type("gks");r.evidence.request(r.english,at:r.stamp)
+        returnCheck(r.barrier.request(r.english,at:r.stamp,rightCommand:true))
+        r.barrier.step()
+        if guarded {
+            for _ in 0..<6 {r.barrier.step()}
+            r.type("Q");r.change(r.korean);r.type("dptj")
+            returnCheck(commits==1 && hidden.isEmpty && r.body=="오래 입력한 뒤에도 한Q에서 다음 문단" &&
+                        r.range.location=="오래 입력한 뒤에도 한Q에서".utf16.count && r.writes.isEmpty && r.retained==0)
+        } else {returnCheck(hidden=="한" && r.body=="오래 입력한 뒤에도  다음 문단")}
+    }
+
+    for mode in ["nativeRestores","remainsMissing","differentField","differentWindow","expired","changedSuffix","wrongGap","pendingQ","noUserReturn"] {
+        let r=ReturnEditor(left:"🙂 앞 ",right:" 뒤")
+        r.type("gks")
+        r.change(r.english);r.type("Q")
+        let complete=r.body
+        r.prefix="🙂 앞 Q"
+        switch mode {
+        case "changedSuffix":r.right=" 끝"
+        case "wrongGap":r.prefix="🙂 한Q"
+        case "pendingQ":r.prefix="🙂 앞 한"
+        case "expired":r.time+=3.1
+        case "differentWindow":r.window=AXUIElementCreateApplication(89009)
+        case "differentField":r.barrier.read={.init(field:r.window,text:r.body,selection:r.range)}
+        default:break
+        }
+        r.barrier.select={ id in
+            r.commit();r.selected=id;r.latin=id==r.english
+            if mode=="nativeRestores" {r.prefix="🙂 앞 한Q"}
+            return noErr
+        }
+        r.evidence.request(r.korean,at:r.stamp)
+        returnCheck(r.barrier.request(r.korean,at:r.stamp,rightCommand:mode != "noUserReturn"))
+        for _ in 0..<5 {r.barrier.step()}
+        let shouldSwitch=["nativeRestores","remainsMissing"].contains(mode)
+        returnCheck((r.selected==r.korean)==shouldSwitch && r.writes.isEmpty)
+        if shouldSwitch {
+            r.type("dptj")
+            let desired=mode=="nativeRestores" ? "🙂 앞 한Q에서 뒤":"🙂 앞 Q에서 뒤"
+            returnCheck(r.body==desired && r.range.location==desired.utf16.count-2 && r.retained==0)
+        } else {returnCheck(r.body != complete)}
+    }
+    let r=ReturnEditor(left:"문장 중간 한",right:" 다음 문단")
+    r.change(r.english);r.type("Q");r.conflict=true;r.change(r.korean)
+    r.type("f");r.time+=0.09
+    for _ in 0..<8 {r.barrier.step()}
+    r.type("kd");r.change(r.english)
+    returnCheck(r.body=="문장 중간 한Q랑 다음 문단" && r.writes.isEmpty)
+    print("PASS missing outbound syllable, native reinsertion, context guards and composed-onset continuation")
+}
+
 func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔 ", firstPair: (String,String) = ("문제인가 싶어서", "answpdlsrk tlvdjtj")) {
     let words = [("문제인가","answpdlsrk"), ("입력","dlqfur"), ("한글","gksrmf"), ("확인","ghkrdls"),
                  ("바로","qkfh"), ("그래서","rmfotj"), ("끝까지","RmxRkwl"), ("있어","dlTdj")]
@@ -286,6 +355,7 @@ func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔
         seed = seed &* 6364136223846793005 &+ 1442695040888963407
         return values[Int((seed >> 32) % UInt64(values.count))]
     }
+    checkMissingOutboundSyllable()
     checkShiftAcrossReturn()
     checkReturnBoundaries()
     var verified = 0, untouched = 0

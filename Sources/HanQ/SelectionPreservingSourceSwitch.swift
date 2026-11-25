@@ -12,6 +12,7 @@ final class SelectionPreservingSourceSwitch {
         case restoreSkipped, restored, restoreFailed, commitPosted, commitUnconfirmed
     }
     private let commitSource=CGEventSource(stateID:.privateState)
+    private let caretSource=CGEventSource(stateID:.hidSystemState)
     var postCommit: (AXUIElement,CGKeyCode) -> Bool = { _,_ in false }
     var trace: (Stage) -> Void = { _ in }
     private let system = AXUIElementCreateSystemWide()
@@ -45,7 +46,7 @@ final class SelectionPreservingSourceSwitch {
 
     init() {
         postCommit = { [weak self] element,key in
-            guard let source=self?.commitSource,CGPreflightPostEventAccess() else{return false}
+            guard let self, let source=self.pendingCaretCommand ? self.caretSource : self.commitSource,CGPreflightPostEventAccess() else{return false}
             var pid:pid_t=0
             guard AXUIElementGetPid(element,&pid) == .success,pid>0,
                   let down=CGEvent(keyboardEventSource:source,virtualKey:key,keyDown:true),
@@ -84,6 +85,12 @@ final class SelectionPreservingSourceSwitch {
         range.location >= 0 && range.length > 0 && range.location <= length && range.length <= length - range.location
     }
 
+    struct TypedCaret {
+        let field: AXUIElement
+        let text: String
+        let offset: Int
+    }
+    private var pendingCaretCommand = false
     private struct PendingSwitch {
         let field:AXUIElement
         let text:String
@@ -91,6 +98,8 @@ final class SelectionPreservingSourceSwitch {
         let source:String
         let target:String
         let deadline:Double
+        let caretCommit:Bool
+        var restoringCaret = false
     }
     private var pendingSwitch:PendingSwitch?
     var isPending:Bool {pendingSwitch != nil}
@@ -103,7 +112,26 @@ final class SelectionPreservingSourceSwitch {
         guard let current=focus() else{return AXError.cannotComplete.rawValue}
         guard CFEqual(current,pending.field) else{return stop(.changedContext)}
         guard let value=text(current),let selected=range(current) else{return AXError.cannotComplete.rawValue}
-        guard value==pending.text else{return stop(.changedContext)}
+        guard value.utf16.elementsEqual(pending.text.utf16) else{return stop(.changedContext)}
+        if pending.caretCommit {
+            let preceding = CFRange(location:pending.selected.location - 1,length:0)
+            if pending.restoringCaret {
+                if Self.equal(selected,preceding) {return AXError.cannotComplete.rawValue}
+                guard Self.equal(selected,pending.selected) else{return stop(.changedContext)}
+                pendingSwitch=nil
+                trace(.restored)
+                let status=selectSource(target)
+                trace(.switched)
+                return status
+            }
+            if Self.equal(selected,pending.selected) {return AXError.cannotComplete.rawValue}
+            guard Self.equal(selected,preceding) else{return stop(.changedContext)}
+            trace(.collapsed)
+            // Only restore a displacement the editor actually acknowledged.
+            guard setRange(current,pending.selected) else{return stop(.restoreFailed)}
+            pendingSwitch?.restoringCaret=true
+            return AXError.cannotComplete.rawValue
+        }
         let collapsed=CFRange(location:pending.selected.location,length:0)
         if Self.equal(selected,pending.selected){return AXError.cannotComplete.rawValue}
         guard Self.equal(selected,collapsed) else{return stop(.changedContext)}
@@ -120,7 +148,7 @@ final class SelectionPreservingSourceSwitch {
         }else{trace(.restoreSkipped)}
         return result
     }
-    func select(_ target:String,asynchronous:Bool=false)->OSStatus {
+    func select(_ target:String,asynchronous:Bool=false,typedCaret:TypedCaret?=nil)->OSStatus {
         if isPending{return resumeSwitch(target)}
         trace(.begin)
         let source = currentSource(), started = now()
@@ -131,8 +159,13 @@ final class SelectionPreservingSourceSwitch {
         guard editable(element) else { return fallback(.unsupportedField) }
         guard let original = text(element), original.utf16.count <= 16_384 else { return fallback(.missingText) }
         guard let selected = range(element) else { return fallback(.missingSelection) }
-        guard selected.length > 0 else { return fallback(.emptySelection) }
-        guard Self.valid(selected, length: original.utf16.count) else { return fallback(.invalidSelection) }
+        let caretCommit = selected.length == 0
+        if caretCommit {
+            guard asynchronous, target == "com.apple.keylayout.ABC", let typedCaret else{return fallback(.emptySelection)}
+            guard CFEqual(typedCaret.field,element), typedCaret.offset == selected.location,
+                  original.utf16.elementsEqual(typedCaret.text.utf16),
+                  selected.location > 0, selected.location <= original.utf16.count else{trace(.changedContext);return -50}
+        } else if !Self.valid(selected, length: original.utf16.count) {return fallback(.invalidSelection)}
         guard now() - started < 0.06 else { return fallback(.deadline) }
         guard currentSource() == source else { return fallback(.changedSource) }
         guard allowed(), let current = focus(), CFEqual(current, element),
@@ -141,10 +174,12 @@ final class SelectionPreservingSourceSwitch {
         // AX-only collapse can leave the IME's marked text alive: it can
         // reappear on the next Korean activation. A cursor key commits it in
         // the editor. Prepare and post the full pair once, then require proof.
+        pendingCaretCommand=caretCommit
+        defer {pendingCaretCommand=false}
         guard postCommit(element,123) else { return fallback(.collapseFailed) }
         trace(.commitPosted)
         if asynchronous {
-            pendingSwitch=PendingSwitch(field:element,text:original,selected:selected,source:source,target:target,deadline:now()+0.30)
+            pendingSwitch=PendingSwitch(field:element,text:original,selected:selected,source:source,target:target,deadline:now()+0.30,caretCommit:caretCommit)
             return AXError.cannotComplete.rawValue
         }
         let commitDeadline=now()+0.04

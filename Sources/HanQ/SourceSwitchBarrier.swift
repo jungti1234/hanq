@@ -56,6 +56,15 @@ final class SourceSwitchBarrier {
         var keys: [(UInt16, Bool)] = []
     }
     private var returnReceipt: ReturnReceipt?
+    private struct OutboundHangul {
+        let baseline: Snapshot
+        let window: AXUIElement
+        let korean: String
+        let time: Double
+    }
+    private var outboundHangul: OutboundHangul?
+    private var returningWithMissingSyllable = false
+    var selectAfterTypedHangul: ((String,Snapshot)->OSStatus)?
     private var requestedReturnFromABC = false
     private var entry:Entry?
     private struct UnfocusedSwitch {
@@ -435,7 +444,7 @@ final class SourceSwitchBarrier {
         ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil;noteDiagnosticHistory(9,baseline:true)
         trace("source_initial_body_removed")
     }
-    func resetObservation(){returnReceipt=nil;entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){outboundHangul=nil;returnReceipt=nil;entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
     // Backspace can remove one component of live Hangul rather than commit the
     // remaining syllable. Reuse only our observed key prefix, after the editor
     // proves its entire text and caret. Never decompose existing editor text.
@@ -865,10 +874,27 @@ final class SourceSwitchBarrier {
               queued.isEmpty,repairInFlight.isEmpty,onsetInFlight.isEmpty,isReady() else{return false}
         resumedOriginalBatch=false;generation+=1;scheduled=false;busy=false
         transactionField=nil;waitReason=nil;repairWaitStarted=nil
-        // This is a transport completion, not a verified editor state.
+        // The first key can already be a live Korean onset. Keep its keys only
+        // when the editor independently confirms the entire baseline and insertion.
+        var verified: MismatchReplayLedger?
+        if let receipt=returnReceipt, !receipt.keys.isEmpty, now() <= receipt.expires,
+           receipt.sourceEpoch == sourceEvidence?.epoch, source() == receipt.sourceID,
+           let snap=read(), CFEqual(snap.field,receipt.baseline.field),
+           let window=fieldWindow(snap.field), CFEqual(window,receipt.window) {
+            var candidate=MismatchReplayLedger(before:receipt.baseline.text,caret:receipt.baseline.selection.location)
+            candidate.append(source:receipt.sourceID,keys:receipt.keys)
+            if candidate.selection == snap.selection, candidate.text.utf16.elementsEqual(snap.text.utf16),
+               candidate.insertion.unicodeScalars.contains(where:{ (0x3131...0x318E).contains($0.value) || (0xAC00...0xD7A3).contains($0.value) }) {
+                verified=candidate
+            }
+        }
         let receipt = returnReceipt
         finishDiagnosticRequest(4);resetObservation()
         returnReceipt = receipt
+        if let receipt, let verified {
+            ledger=verified;field=receipt.baseline.field;lastKeyAt=now();historyStarted=receipt.switchTimestamp
+            noteDiagnosticHistory(7,baseline:true)
+        }
         trace("initial_transport_completed")
         return true
     }
@@ -932,6 +958,7 @@ final class SourceSwitchBarrier {
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,rightCommand:Bool=false,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
+        returningWithMissingSyllable = false
         returnReceipt = nil
         requestedReturnFromABC = rightCommand && timestamp != 0 && MismatchKeyboardLayout.supports(id)
             && source() == "com.apple.keylayout.ABC"
@@ -995,6 +1022,37 @@ final class SourceSwitchBarrier {
         pendingSelectAll=false
         trace("native_select_all_observed")
     }
+    // Only a keyboard-produced, complete Hangul syllable immediately before
+    // this exact collapsed caret can still belong to the departing IME.
+    private func typedHangulBeforeSwitch(_ target:String, _ snap:Snapshot)->Bool {
+        guard target == "com.apple.keylayout.ABC", rightCommandRequest, targetTimestamp != 0,
+              snap.selection.length == 0, let segment=ledger?.segments.last,
+              MismatchKeyboardLayout.supports(segment.source), segment.source == source(),
+              let key=segment.keys.last, MismatchKeyboardLayout.expectsHangul(code:key.0,shift:key.1,sourceID:segment.source),
+              let expected, expected.1 == snap.selection, expected.0.utf16.elementsEqual(snap.text.utf16),
+              snap.text.utf16.count <= 16_384 else{return false}
+        let ns=snap.text as NSString, offset=snap.selection.location
+        guard offset>0,offset<=ns.length else{return false}
+        let unit=ns.character(at:offset-1)
+        return (0xAC00...0xD7A3).contains(unit) && ns.rangeOfComposedCharacterSequence(at:offset-1)==NSRange(location:offset-1,length:1)
+    }
+
+    private func matchesMissingOutboundSyllable(_ snap:Snapshot, returningTo target:String)->Bool {
+        guard requestedReturnFromABC, let outbound=outboundHangul, outbound.korean==target,
+              (0...3).contains(now()-outbound.time), source()=="com.apple.keylayout.ABC",
+              CFEqual(snap.field,outbound.baseline.field), let win=fieldWindow(snap.field), CFEqual(win,outbound.window),
+              let segment=ledger?.segments.last, segment.source=="com.apple.keylayout.ABC",
+              (1...64).contains(segment.keys.count), snap.selection.length==0 else{return false}
+        let letters=MismatchReplayLedger.render(segment)
+        let old=outbound.baseline, at=old.selection.location
+        let ns=old.text as NSString
+        guard at>0, at<=ns.length, let expected,
+              expected.1==NSRange(location:at+letters.utf16.count,length:0),
+              ns.replacingCharacters(in:NSRange(location:at,length:0),with:letters).utf16.elementsEqual(expected.0.utf16),
+              snap.selection.location==expected.1.location-1 else{return false}
+        return ns.replacingCharacters(in:NSRange(location:at-1,length:1),with:letters).utf16.elementsEqual(snap.text.utf16)
+    }
+
     func step(){
         guard busy else{observeNativeSelection();return}
         if let h=heldStart,now()>=h.until,!isReady(){fail("initial_layout_deadline");return}
@@ -1073,6 +1131,11 @@ final class SourceSwitchBarrier {
             guard isReady() else{wait("waiting_for_repair");return}
             if switchSnapshot == nil {
                 if !matches(snap) {
+                    if matchesMissingOutboundSyllable(snap,returningTo:target) {
+                        // Reactivation belongs to the user. The IME owns any
+                        // pending syllable; do not select or insert it ourselves.
+                        returningWithMissingSyllable=true
+                    } else {
                     guard rightCommandRequest, targetTimestamp > 0, (selectedRange?.length ?? 0) == 0,
                           let plan = ledger?.lastKoreanPlan(maximumKeys: 128),
                           plan.matchesMixedInputBeforeSwitch(text: snap.text, selection: snap.selection) else {
@@ -1085,6 +1148,7 @@ final class SourceSwitchBarrier {
                     field = snap.field
                     ledger = MismatchReplayLedger(before: snap.text, caret: snap.selection.location)
                     noteDiagnosticHistory(9,baseline:true)
+                    }
                 }
                 switchSnapshot=snap
             }
@@ -1093,7 +1157,9 @@ final class SourceSwitchBarrier {
                 fail("pre_edit_context_changed"); return
             }
             let activation = rightCommandRequest ? webActivation?(target, snap.field) : nil
-            let result = activation ?? select(target)
+            let departing = switchSnapshot.flatMap { typedHangulBeforeSwitch(target,$0) ? $0 : nil }
+            let leavingSource = departing == nil ? nil : source()
+            let result = activation ?? departing.flatMap { selectAfterTypedHangul?(target,$0) } ?? select(target)
             if activation != nil, let limit = webActivationLimit() { deadline = max(deadline, limit) }
             if selectionPending(){wait("waiting_for_source_commit");return}
             guard result==noErr,source()==target else{fail("switch_failed");return}
@@ -1104,6 +1170,16 @@ final class SourceSwitchBarrier {
             didSelect(targetTimestamp);targetTimestamp=0
             let previous=ledger,previousDiagnosticHistory=diagnosticHistory
             self.target=nil;resetObservation();self.field=snap.field
+            if let departing,let leavingSource,let window=fieldWindow(departing.field) {
+                outboundHangul=OutboundHangul(baseline:departing,window:window,korean:leavingSource,time:now())
+            }
+            if returningWithMissingSyllable {
+                returningWithMissingSyllable=false
+                // The editor can re-commit before the next physical key. Seed
+                // from its actual state on that key, without a stale caret write.
+                awaitingSelection=false;deadline=now()+1;waitReason=nil
+                trace("editor_confirmed_switch");schedule();return
+            }
             // AX restoration is asynchronous even after a successful source
             // switch. Preserve the verified selection until the editor observes
             // it; otherwise the next key can predict insertion at a transient
@@ -1172,6 +1248,7 @@ final class SourceSwitchBarrier {
         finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
         manualEdit=nil;manualEditSequence+=1
 
+        returningWithMissingSyllable=false
         cancelSelection(reason);switchSnapshot=nil
         repairInFlight.removeAll()
         onsetInFlight.removeAll();onsetPendingCount=0

@@ -293,6 +293,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return access.readElement(access.system)
         }
         barrier.select = { [weak self] target in self?.selectionSourceSwitch.select(target,asynchronous:true) ?? -50 }
+        barrier.selectAfterTypedHangul = { [weak self] target,snapshot in
+            self?.selectionSourceSwitch.select(target,asynchronous:true,typedCaret:.init(field:snapshot.field,text:snapshot.text,offset:snapshot.selection.location)) ?? -50
+        }
         barrier.webActivation = { [weak self] target, field in self?.safariActivation.select(target, field: field) }
         barrier.webActivationLimit = { [weak self] in self?.safariActivation.pendingLimit }
         barrier.selectionPending = { [weak self] in
