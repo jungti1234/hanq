@@ -722,7 +722,18 @@ final class SourceSwitchBarrier {
         guard age>=0,age<=MismatchSourceEvidence.confirmationSeconds else{entry=nil;return false}
         if event.type == .keyUp{return false}
         if event.type == .flagsChanged {
-            if !event.flags.intersection([.maskCommand,.maskControl,.maskAlternate]).isEmpty{entry=nil}
+            let shortcuts = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate])
+            if !shortcuts.isEmpty {
+                // The barrier sees original flags before CommandFilter strips the
+                // right Command that requested this return. Shift can change
+                // during that press, including while awaiting editor confirmation.
+                let code = event.getIntegerValueField(.keyboardEventKeycode)
+                let command = CommandFilter()
+                let sides = event.flags.rawValue & (command.leftDeviceMask | command.rightDeviceMask)
+                let shiftDuringReturn = candidate.returnBaseline != nil && (code == 56 || code == 60)
+                    && shortcuts == .maskCommand && sides == command.rightDeviceMask
+                if !shiftDuringReturn { entry = nil }
+            }
             return false
         }
         guard let key = returnLetterOrSymbol(event),

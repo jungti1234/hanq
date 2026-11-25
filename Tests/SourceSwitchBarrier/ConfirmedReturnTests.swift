@@ -117,10 +117,15 @@ private final class ReturnEditor {
         barrier.observeBeforeOnset(ev.type, ev, waiting: false)
         if engine.event(ev.type, ev) != nil { insert(ev) }
     }
-    func change(_ target: String, explicit: Bool = true) {
+    func change(_ target: String, explicit: Bool = true, afterCommit: (() -> Void)? = nil) {
         time += 0.02
         evidence.request(target, at: stamp)
         returnCheck(barrier.request(target, at: stamp, rightCommand: explicit))
+        barrier.step()
+        if let afterCommit {
+            returnCheck(barrier.busy && selected == target)
+            afterCommit()
+        }
         for _ in 0..<6 { barrier.step() }
         returnCheck(!barrier.busy && selected == target)
         evidence.observe(target)
@@ -216,6 +221,60 @@ private func checkReturnBoundaries() {
     print("PASS 17 invalidated receipts, no selection writes")
 }
 
+// Q is released before the Korean switch, but Shift can change while
+// the right Command used for the switch is still physically held.
+private func checkShiftAcrossReturn() {
+    let command = CommandFilter()
+    let right = CGEventFlags(rawValue: command.rightDeviceMask).union(.maskCommand)
+    let left = CGEventFlags(rawValue: command.leftDeviceMask).union(.maskCommand)
+    let cases: [(CGKeyCode, CGEventFlags, Bool, Bool, Bool)] = [
+        // Shift key, flags at its edge, queued during the switch, Latin output, should repair.
+        (56, right, true, true, true), (60, right, false, true, true),
+        (56, right, true, false, false), (56, left, true, true, false),
+        (56, right.union(left), true, true, false),
+        (60, right.union(.maskControl), true, true, false),
+        (56, right.union(.maskAlternate), true, true, false)
+    ]
+    for (code, flags, queued, latin, repair) in cases {
+        let r = ReturnEditor(left: "한", right: " 뒤")
+        r.change(r.english)
+        r.type("Q")
+        r.conflict = true
+        func shiftEdge() {
+            let ev = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)!
+            ev.type = .flagsChanged
+            ev.flags = flags
+            ev.timestamp = r.stamp
+            let consumed = r.barrier.receive(.flagsChanged, ev)
+            returnCheck(consumed == queued)
+            if !consumed { r.downstream(ev) }
+        }
+        r.change(r.korean, afterCommit: queued ? shiftEdge : nil)
+        if !queued { shiftEdge() }
+        r.latin = latin
+        let release = CGEvent(keyboardEventSource: nil, virtualKey: 54, keyDown: false)!
+        release.type = .flagsChanged
+        release.flags = []
+        returnCheck(!r.barrier.receive(.flagsChanged, release))
+        r.time += 0.16
+        r.type("f")
+        r.time += 0.09
+        for _ in 0..<8 { r.barrier.step() }
+        r.engine.consumeIdleSnapshot(r.snapshot())
+        r.waitForReceipt()
+        r.type("kd dj")
+        r.engine.consumeIdleSnapshot(r.snapshot())
+        r.waitForReceipt()
+        let expected = repair || !latin ? "한Q랑 어 뒤" : "한Qfkd dj 뒤"
+        let ok = r.body == expected && r.range.location == (expected as NSString).length - 2
+            && r.range.length == 0 && r.writes == (repair ? [NSRange(location: 2, length: 1)] : [])
+            && r.retained == 0 && r.engine.retained.isEmpty && r.engine.pending.isEmpty
+        if !ok { print("Shift across return", code, flags.rawValue, queued, r.body, r.writes, r.stages) }
+        returnCheck(ok)
+    }
+    print("PASS Shift across the return switch, exact suffix recovery and shortcut guards")
+}
+
 func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔 ", firstPair: (String,String) = ("문제인가 싶어서", "answpdlsrk tlvdjtj")) {
     let words = [("문제인가","answpdlsrk"), ("입력","dlqfur"), ("한글","gksrmf"), ("확인","ghkrdls"),
                  ("바로","qkfh"), ("그래서","rmfotj"), ("끝까지","RmxRkwl"), ("있어","dlTdj")]
@@ -227,6 +286,7 @@ func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔
         seed = seed &* 6364136223846793005 &+ 1442695040888963407
         return values[Int((seed >> 32) % UInt64(values.count))]
     }
+    checkShiftAcrossReturn()
     checkReturnBoundaries()
     var verified = 0, untouched = 0
     for i in 0..<33 {
