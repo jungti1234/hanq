@@ -10,6 +10,7 @@ let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(4
 runSafariActivationTests()
 runInitialLayoutTests()
 runConfirmedReturnTests()
+runPlaceholderReturnTests()
 check(KoreanKeyboardLayout.supportedIDs.map(checkLayoutReturn).allSatisfy { $0 }, "confirmed return for each Apple Korean input source")
 runSelectedReplacementBarrierTests()
 runNativeObservationTests()

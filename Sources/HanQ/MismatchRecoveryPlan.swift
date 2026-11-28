@@ -65,7 +65,10 @@ struct MismatchRecoveryPlan {
               !sameObservedSurroundings("") else{return false}
         // Lengths are UTF-16. Compare exact keyboard output or an already
         // supported mixed rendering, without normalizing a draft or moving a caret.
-        if text.utf16.count==roman.utf16.count && text.lowercased()==roman.lowercased(){return true}
+        // AX can publish only the first of several already delivered keys.
+        // Preserve their origin until the whole run can be verified.
+        if text.utf8.allSatisfy({ (32...126).contains($0) }),
+           roman.lowercased().hasPrefix(text.lowercased()) { return true }
         guard text.utf16.count<=codes.count*3 else{return false}
         var shape=MismatchRecoveryPlan(before:"",caret:0,sourceID:sourceID)
         shape.codes=codes;shape.roman=roman

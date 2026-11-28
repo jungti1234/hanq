@@ -162,7 +162,7 @@ final class MismatchRecoveryEngine:NSObject {
     }
     private var compositionObservation:CompositionObservation?
     private var compositionWaitState=0
-    var confirmsReturnedASCII: ((MismatchRecoveryPlan, MismatchSnapshot, Bool) -> Bool)?
+    var verifiedReturnedASCII: ((MismatchRecoveryPlan, MismatchSnapshot, Bool) -> MismatchRecoveryPlan?)?
     var verifiedDeliveryHistory:((MismatchSnapshot,Bool)->(plan:MismatchRecoveryPlan,lastKeyAt:Double)?)?
     var recovering=false
     var pending:[CGEvent]=[]
@@ -772,6 +772,9 @@ final class MismatchRecoveryEngine:NSObject {
         if candidate.matches(text:snap.text,selection:snap.selection) {
             verified=candidate
             detectionReason=candidate.verifiedReplacement == nil ? .romanMismatch:.verifiedReplacement
+        }else if let returned = verifiedReturnedASCII?(candidate, snap, allowPrior) {
+            verified=returned
+            detectionReason = .romanMismatch
         }else if let failure=candidate.classifiedPartialFailure(text:snap.text,selection:snap.selection) {
             verified=failure.plan
             switch failure.kind {
@@ -782,8 +785,7 @@ final class MismatchRecoveryEngine:NSObject {
             }
         }else{verified=nil;detectionReason = .unspecifiedMismatch}
         if let verified {
-            if verified.hasAmbiguousLatinInput(verified.roman),
-               confirmsReturnedASCII?(verified, snap, allowPrior) != true {
+            if verified.hasAmbiguousLatinInput(verified.roman), verifiedReturnedASCII?(verified, snap, allowPrior) == nil {
                 resetCompositionObservation()
                 incidentTrace.decision(.sample,.repairBlocked)
                 return

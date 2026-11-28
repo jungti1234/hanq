@@ -23,6 +23,7 @@ final class SourceSwitchBarrier {
     // authorize an edit to text the application already owns.
     enum InitialLayout {case conflicting, ready, unknown, sourceChanged}
     var initialLayout:((String)->InitialLayout)?
+    var inspectReturnSurface: ((MismatchPlaceholderReader.Surface, Snapshot, AXUIElement, Double, @escaping (Bool) -> Void) -> Void)?
     var fieldWindow:(AXUIElement)->AXUIElement? = { field in
         var raw:CFTypeRef?
         guard AXUIElementCopyAttributeValue(field,kAXWindowAttribute as CFString,&raw) == .success,
@@ -42,6 +43,13 @@ final class SourceSwitchBarrier {
         let window: AXUIElement
         let until: Double
         let returnTimestamp: CGEventTimestamp?
+        let placeholder: PlaceholderObservation?
+    }
+
+    private final class PlaceholderObservation {
+        var confirmedBeforeDelivery = false
+        var checkingInput = false
+        var editableKeyCount = 0
     }
 
     // The two taps see the same delivery at different times. Keep the
@@ -53,6 +61,7 @@ final class SourceSwitchBarrier {
         let expires: Double
         let sourceEpoch: Int?
         let switchTimestamp: CGEventTimestamp
+        let placeholder: PlaceholderObservation?
         var keys: [(UInt16, Bool)] = []
     }
     private var returnReceipt: ReturnReceipt?
@@ -763,7 +772,18 @@ final class SourceSwitchBarrier {
             event.timestamp > candidate.switchTimestamp && $0.selection == snap.selection
                 && $0.text.utf16.elementsEqual(snap.text.utf16)
         } ?? false
-        heldStart=HeldStart(sourceID:candidate.sourceID, snapshot:snap,window:window,until:limit,returnTimestamp:confirmedReturn ? candidate.switchTimestamp : nil);nextLayoutCheck=now()+0.016
+        let inspectPrompt = confirmedReturn && candidate.sourceID == KoreanKeyboardLayout.twoSetID
+            && !snap.text.isEmpty && snap.selection.length == 0
+            && (snap.selection.location == 0 || snap.selection.location == snap.text.utf16.count)
+        let placeholder = inspectPrompt ? PlaceholderObservation() : nil
+        heldStart=HeldStart(sourceID:candidate.sourceID, snapshot:snap,window:window,until:limit,
+                            returnTimestamp:confirmedReturn ? candidate.switchTimestamp : nil, placeholder:placeholder)
+        if let placeholder {
+            inspectReturnSurface?(.prompt, snap, window, limit) { [weak placeholder] confirmed in
+                placeholder?.confirmedBeforeDelivery = confirmed
+            }
+        }
+        nextLayoutCheck=now()+0.016
         trace("initial_layout_wait");schedule();return true
     }
     private func initialDeliveryReady()->Bool {
@@ -791,7 +811,10 @@ final class SourceSwitchBarrier {
         if phase == .conflicting, let switchTimestamp = h.returnTimestamp {
             let lifetime = MismatchSourceEvidence.confirmationSeconds
             let expires = now() + lifetime
-            returnReceipt = ReturnReceipt(sourceID:h.sourceID, baseline: snap, window: win, expires: expires, sourceEpoch: sourceEvidence?.epoch, switchTimestamp: switchTimestamp)
+            // A result arriving after originals were released cannot describe
+            // the pre-input field. Only carry a completed positive observation.
+            let placeholder = h.placeholder?.confirmedBeforeDelivery == true ? h.placeholder : nil
+            returnReceipt = ReturnReceipt(sourceID:h.sourceID, baseline: snap, window: win, expires: expires, sourceEpoch: sourceEvidence?.epoch, switchTimestamp: switchTimestamp, placeholder:placeholder)
             DispatchQueue.main.asyncAfter(deadline: .now() + lifetime) { [weak self] in
                 if self?.returnReceipt?.expires == expires { self?.returnReceipt = nil }
             }
@@ -822,7 +845,7 @@ final class SourceSwitchBarrier {
     // Only literal ASCII newly inserted at the committed return caret can
     // override mixed-text protection. The plan still takes the normal
     // verified selection, source activation, replay and editor-receipt path.
-    func confirmsReturnedASCII(_ plan: MismatchRecoveryPlan, snapshot: MismatchSnapshot, beforeKey: Bool) -> Bool {
+    func verifiedReturnedASCII(_ plan: MismatchRecoveryPlan, snapshot: MismatchSnapshot, beforeKey: Bool) -> MismatchRecoveryPlan? {
         guard let receipt = returnReceipt, !busy, isReady(), !externalEditPending,
               now() <= receipt.expires, receipt.sourceEpoch == sourceEvidence?.epoch,
               plan.sourceID == receipt.sourceID,
@@ -830,17 +853,36 @@ final class SourceSwitchBarrier {
               CFEqual(snapshot.element, receipt.baseline.field),
               plan.caret == receipt.baseline.selection.location,
               plan.before.utf16.elementsEqual(receipt.baseline.text.utf16),
-              let expected = plan.expected, snapshot.text.utf16.elementsEqual(expected.utf16),
-              snapshot.selection == NSRange(location: plan.caret + plan.roman.utf16.count, length: 0),
-              plan.roman == plan.replayRoman else { return false }
+              snapshot.selectedText?.isEmpty != false,
+              plan.roman == plan.replayRoman else { return nil }
         // During a pre-key sample the main tap can already have observed that
         // key, while the editor and the downstream plan still end one key earlier.
         let count = plan.codes.count
         guard receipt.keys.count == count || (beforeKey && receipt.keys.count == count + 1),
-              plan.codes.elementsEqual(receipt.keys.prefix(count), by: ==),
-              let window = fieldWindow(snapshot.element), CFEqual(window, receipt.window),
-              source() == receipt.sourceID, initialLayout?(receipt.sourceID) == .conflicting else { return false }
-        return true
+              plan.codes.elementsEqual(receipt.keys.prefix(count), by: ==) else { return nil }
+        let intact = snapshot.selection == NSRange(location: plan.caret + plan.roman.utf16.count, length: 0)
+            && plan.expected.map { snapshot.text.utf16.elementsEqual($0.utf16) } == true
+        let wholeInput = receipt.placeholder != nil && plan.pendingSelectionReplacement == nil && plan.pendingCompletion == nil
+            && snapshot.selection == NSRange(location: plan.roman.utf16.count, length: 0) && snapshot.text.utf16.elementsEqual(plan.roman.utf16)
+        guard intact || wholeInput, let window = fieldWindow(snapshot.element), CFEqual(window, receipt.window),
+              source() == receipt.sourceID, initialLayout?(receipt.sourceID) == .conflicting else { return nil }
+        if intact { return plan }
+        guard let observation = receipt.placeholder else { return nil }
+        // The same characters can still be the prompt. Establish that an
+        // actual editable run has appeared, even when both strings are equal.
+        if observation.editableKeyCount != count, !observation.checkingInput {
+            observation.checkingInput = true
+            let published = Snapshot(field:snapshot.element, text:snapshot.text, selection:snapshot.selection)
+            inspectReturnSurface?(.input, published, window, receipt.expires) { [weak observation] confirmed in
+                observation?.checkingInput = false
+                if confirmed { observation?.editableKeyCount = count }
+            }
+        }
+        guard observation.editableKeyCount == count else { return nil }
+        var result = MismatchRecoveryPlan(before:"", caret:0, sourceID:plan.sourceID)
+        result.codes = plan.codes
+        result.roman = plan.roman
+        return result
     }
 
     private func recordNativeBatchEdge(_ event:CGEvent) {

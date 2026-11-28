@@ -1,12 +1,12 @@
 import AppKit
 import Carbon
 
-private func returnCheck(_ ok: @autoclosure () -> Bool, line: Int = #line) {
+func returnCheck(_ ok: @autoclosure () -> Bool, line: Int = #line) {
     guard ok() else { print("FAIL return regression line \(line)"); exit(1) }
 }
 
 // Separate the TIS selection, the reported layout and the editor's effective IME.
-private final class ReturnEditor {
+final class ReturnEditor {
     let barrier = SourceSwitchBarrier()
     let engine = MismatchRecoveryEngine()
     let evidence = MismatchSourceEvidence()
@@ -27,8 +27,15 @@ private final class ReturnEditor {
     var stages: [String] = []
     var retained = 0
     var time = ProcessInfo.processInfo.systemUptime - 10
-    var body: String { prefix + highlighted + composition + right }
-    var range: NSRange { NSRange(location: (prefix + composition).utf16.count, length: highlighted.utf16.count) }
+    var prompt: String?
+    var promptCaret = 0
+    var beforeFirstInsert: (() -> Void)?
+    var editableText: String { prefix + highlighted + composition + right }
+    var showingPrompt: Bool { prompt != nil && editableText.isEmpty }
+    var body: String { showingPrompt ? prompt! : editableText }
+    var range: NSRange {
+        NSRange(location: showingPrompt ? promptCaret : (prefix + composition).utf16.count, length: highlighted.utf16.count)
+    }
     var stamp: UInt64 { UInt64(time * 1_000_000_000) }
 
     init(left: String, right: String, sourceID: String = KoreanKeyboardLayout.twoSetID) {
@@ -92,8 +99,8 @@ private final class ReturnEditor {
             barrier.adoptVerifiedReplay(ledger, snapshot: snap)
         }
         e.didProcessEvent = { [weak b] type, ev, passed in b?.confirmDelivery(type, ev, passed: passed) }
-        e.confirmsReturnedASCII = { [weak b] plan, snap, prior in
-            b?.confirmsReturnedASCII(plan, snapshot: snap, beforeKey: prior) ?? false
+        e.verifiedReturnedASCII = { [weak b] plan, snap, prior in
+            b?.verifiedReturnedASCII(plan, snapshot: snap, beforeKey: prior)
         }
     }
     func snapshot() -> MismatchSnapshot {
@@ -108,6 +115,8 @@ private final class ReturnEditor {
         guard ev.type == .keyDown else { return }
         let key = UInt16(ev.getIntegerValueField(.keyboardEventKeycode)), shift = ev.flags.contains(.maskShift)
         guard let literal = MismatchRecoveryPlan.character(key, shift) else { return }
+        beforeFirstInsert?()
+        beforeFirstInsert = nil
         highlighted = ""
         if latin { prefix += literal; return }
         composingKeys.append((key, shift))
@@ -177,7 +186,7 @@ private func checkReturnBoundaries() {
         var plan = MismatchRecoveryPlan(before: "한Q 꼬리", caret: 2)
         _ = plan.append(code: ReturnEditor.positions["a"]!.0, shift:false)
         var snap = r.snapshot()
-        returnCheck(r.barrier.confirmsReturnedASCII(plan, snapshot: snap, beforeKey: false))
+        returnCheck(r.barrier.verifiedReturnedASCII(plan, snapshot: snap, beforeKey: false) != nil)
         switch condition {
         case "window": r.window = AXUIElementCreateApplication(89003)
         case "field": snap = .init(element:r.window, text:r.body, selection:r.range)
@@ -200,7 +209,7 @@ private func checkReturnBoundaries() {
             _ = r.barrier.receive(ev.type,ev)
         default: _ = r.barrier.request(r.english, at:r.stamp, rightCommand:true)
         }
-        returnCheck(!r.barrier.confirmsReturnedASCII(plan,snapshot:snap,beforeKey:false) && r.writes.isEmpty)
+        returnCheck(r.barrier.verifiedReturnedASCII(plan,snapshot:snap,beforeKey:false) == nil && r.writes.isEmpty)
     }
     // Delayed originals keep their old source even when replay copies are retimed.
     for lateFirst in [true,false] {
@@ -216,7 +225,7 @@ private func checkReturnBoundaries() {
         for _ in 0..<6 { r.barrier.step() }
         var plan = MismatchRecoveryPlan(before:"한Q",caret:2)
         for ch in "an" { _ = plan.append(code:ReturnEditor.positions[ch]!.0,shift:false) }
-        returnCheck(r.body == "한Qan" && !r.barrier.confirmsReturnedASCII(plan,snapshot:r.snapshot(),beforeKey:false))
+        returnCheck(r.body == "한Qan" && r.barrier.verifiedReturnedASCII(plan,snapshot:r.snapshot(),beforeKey:false) == nil)
     }
     print("PASS 17 invalidated receipts, no selection writes")
 }
@@ -502,14 +511,14 @@ func checkLayoutReturn(_ id: String) -> Bool {
     let firstKey = ReturnEditor.positions[first]!
     _ = evidence.append(code: firstKey.0, shift: firstKey.1)
     let snap = guarded.snapshot()
-    record("original-receipt", guarded.barrier.confirmsReturnedASCII(evidence, snapshot: snap, beforeKey: false))
+    record("original-receipt", guarded.barrier.verifiedReturnedASCII(evidence, snapshot: snap, beforeKey: false) != nil)
     for other in KoreanKeyboardLayout.supportedIDs where other != id {
         var foreign = evidence
         foreign.sourceID = other
         guarded.selected = id
-        let rejectedPlan = !guarded.barrier.confirmsReturnedASCII(foreign, snapshot: snap, beforeKey: false)
+        let rejectedPlan = guarded.barrier.verifiedReturnedASCII(foreign, snapshot: snap, beforeKey: false) == nil
         guarded.selected = other
-        record("different-layout-"+other, rejectedPlan && !guarded.barrier.confirmsReturnedASCII(evidence, snapshot: snap, beforeKey: false))
+        record("different-layout-"+other, rejectedPlan && guarded.barrier.verifiedReturnedASCII(evidence, snapshot: snap, beforeKey: false) == nil)
     }
 
     var history = MismatchReplayLedger(before: "🙂뒤", caret: 2)

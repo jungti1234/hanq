@@ -178,8 +178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.enabled && self.inputPermissionReady && !self.updateRestricted && self.tap != nil
         }
         controller.engine.didStart = { [weak self] in self?.refreshInputDeliveryOrigin() }
-        controller.engine.confirmsReturnedASCII = { [weak self] plan, snap, beforeKey in
-            self?.sourceSwitchBarrier.confirmsReturnedASCII(plan, snapshot: snap, beforeKey: beforeKey) ?? false
+        controller.engine.verifiedReturnedASCII = { [weak self] plan, snap, beforeKey in
+            self?.sourceSwitchBarrier.verifiedReturnedASCII(plan, snapshot: snap, beforeKey: beforeKey)
         }
         controller.engine.verifiedDeliveryHistory = { [weak self] snap,allowPrior in
             guard let self else{return nil}
@@ -260,6 +260,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var sourceSwitchBarrier: SourceSwitchBarrier = {
         let barrier=SourceSwitchBarrier()
         barrier.sourceEvidence=self.inputSourceEvidence
+        barrier.inspectReturnSurface = { kind, snap, window, deadline, done in
+            MismatchPlaceholderReader.request(kind, field:snap.field, window:window, text:snap.text,
+                                              selection:snap.selection, until:deadline, completion:done)
+        }
         barrier.initialLayout = { target in
             let first=InputSourceAccess.currentID(),layout=InputSourceAccess.currentLayoutID()
             let override=InputSourceAccess.currentOverrideID(),last=InputSourceAccess.currentID()
