@@ -611,40 +611,117 @@ struct DiagnosticQuitState:Equatable {
 /// AppKit termination and updater relaunch use the same nonblocking decision.
 /// A stalled filesystem is unknown, never evidence that the queue is empty.
 final class DiagnosticQuitCoordinator {
-    enum Choice {case cancel,export,discard}
-    var prepare:(@escaping(DiagnosticQuitState)->Void)->Void
-    var resume:()->Void
-    var decide:(DiagnosticQuitState?,@escaping(Choice)->Void)->Void
-    var exportPending:()->Void
-    private(set) var active=false
-    private var generation=0,deciding=false
-    init(prepare:@escaping(@escaping(DiagnosticQuitState)->Void)->Void,resume:@escaping()->Void,
-         decide:@escaping(DiagnosticQuitState?,@escaping(Choice)->Void)->Void,exportPending:@escaping()->Void){
-        self.prepare=prepare;self.resume=resume;self.decide=decide;self.exportPending=exportPending
+    enum Choice { case cancel, export, discard, quit }
+    typealias ReadState = (@escaping (DiagnosticQuitState) -> Void) -> Void
+    private let prepare: ReadState
+    private let readState: ReadState
+    private let resume: () -> Void
+    private let decide: (DiagnosticQuitState?, @escaping (Choice) -> Void) -> Void
+    private let exportPending: () -> Void
+    private let refreshInterval: TimeInterval
+    private var reply: ((Bool) -> Void)?
+    private var generation = 0
+    private var readNumber = 0
+    private var confirmationTimeout: TimeInterval = 3
+    private var showing = false
+    private var displayed: DiagnosticQuitState?
+    private var confirmingQuit = false
+    var active: Bool { reply != nil }
+
+    init(prepare: @escaping ReadState, readState: @escaping ReadState, resume: @escaping () -> Void,
+         decide: @escaping (DiagnosticQuitState?, @escaping (Choice) -> Void) -> Void,
+         exportPending: @escaping () -> Void, refreshInterval: TimeInterval = 1) {
+        self.prepare = prepare
+        self.readState = readState
+        self.resume = resume
+        self.decide = decide
+        self.exportPending = exportPending
+        self.refreshInterval = refreshInterval
     }
-    @discardableResult func request(timeout:Double=3,reply:@escaping(Bool)->Void)->Bool {
-        guard !active else{return false}
-        active=true;deciding=false;generation+=1;let current=generation
-        func finish(_ allowed:Bool,_ export:Bool=false){
-            guard self.active,self.generation==current else{return}
-            self.active=false;self.generation+=1
-            if !allowed{self.resume()}
-            reply(allowed)
-            if export{self.exportPending()}
+
+    @discardableResult func request(timeout: Double = 3, reply: @escaping (Bool) -> Void) -> Bool {
+        guard !active else { return false }
+        generation += 1
+        let current = generation
+        self.reply = reply
+        confirmationTimeout = max(0, timeout)
+        prepare { state in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCurrent(current) else { return }
+                if !self.showing && !state.hasPending { self.finish(true); return }
+                self.present(state, current)
+                self.scheduleRead(current)
+            }
         }
-        func completed(_ state:DiagnosticQuitState?){
-            guard self.active,self.generation==current,!self.deciding else{return}
-            self.deciding=true
-            if let state,!state.hasPending{finish(true);return}
-            self.decide(state){choice in
-                DispatchQueue.main.async{
-                    switch choice{case .cancel:finish(false);case .export:finish(false,true);case .discard:finish(true)}
+        DispatchQueue.main.asyncAfter(deadline: .now() + confirmationTimeout) { [weak self] in
+            guard let self, self.isCurrent(current), !self.showing else { return }
+            // The original preparation must finish before an empty count is meaningful.
+            self.present(nil, current)
+        }
+        return true
+    }
+
+    private func isCurrent(_ current: Int) -> Bool { active && generation == current }
+
+    private func present(_ state: DiagnosticQuitState?, _ current: Int) {
+        guard !showing || displayed != state else { return }
+        showing = true
+        displayed = state
+        decide(state) { [weak self] choice in
+            DispatchQueue.main.async {
+                guard let self, self.isCurrent(current) else { return }
+                if choice == .cancel { self.finish(false); return }
+                guard self.displayed == state else { return }
+                switch choice {
+                case .export where state?.hasPending != false: self.finish(false, export: true)
+                case .discard where state?.hasPending != false: self.finish(true)
+                case .quit where state?.hasPending == false && !self.confirmingQuit:
+                    self.confirmingQuit = true
+                    self.read(current)
+                default: break
                 }
             }
         }
-        prepare{state in DispatchQueue.main.async{completed(state)}}
-        DispatchQueue.main.asyncAfter(deadline:.now()+max(0,timeout)){completed(nil)}
-        return true
+    }
+
+    private func scheduleRead(_ current: Int) {
+        let number = readNumber
+        DispatchQueue.main.asyncAfter(deadline: .now() + refreshInterval) { [weak self] in
+            guard let self, self.isCurrent(current), self.readNumber == number else { return }
+            self.read(current)
+        }
+    }
+
+    private func read(_ current: Int) {
+        readNumber += 1
+        let number = readNumber
+        if confirmingQuit {
+            DispatchQueue.main.asyncAfter(deadline: .now() + confirmationTimeout) { [weak self] in
+                guard let self, self.isCurrent(current), self.readNumber == number, self.confirmingQuit else { return }
+                self.confirmingQuit = false
+                self.present(nil, current)
+            }
+        }
+        readState { state in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCurrent(current), self.readNumber == number else { return }
+                if self.confirmingQuit && !state.hasPending { self.finish(true); return }
+                self.confirmingQuit = false
+                self.present(state, current)
+                self.scheduleRead(current)
+            }
+        }
+    }
+
+    private func finish(_ allowed: Bool, export: Bool = false) {
+        guard let reply else { return }
+        self.reply = nil
+        showing = false
+        displayed = nil
+        confirmingQuit = false
+        if !allowed { resume() }
+        reply(allowed)
+        if export { exportPending() }
     }
 }
 
@@ -2937,10 +3014,19 @@ final class InputIncidentTrace {
             queue.async{[self] in
                 _ = sharedStore?.retryForQuit()
                 _ = OperationalDiagnostics.shared.flushCritical(timeout:0.25,retryNow:true)
-                let journal=destinationDirectory.flatMap{OperationalDiagnostics.shared.storageStatus(for:$0)}
-                completion(DiagnosticQuitState(detailPhases:sharedStore?.pendingCount ?? 0,errors:journal?.pendingErrors ?? 0,observations:journal?.pendingObservations ?? 0))
+                completion(currentQuitState())
             }
         }
+    }
+    // Read on the serial writer after preparation. Polling an open prompt must
+    // never force a retry, thaw capture admission or enumerate saved files.
+    private func currentQuitState() -> DiagnosticQuitState {
+        let journal = destinationDirectory.flatMap { OperationalDiagnostics.shared.storageStatus(for: $0) }
+        return DiagnosticQuitState(detailPhases: sharedStore?.pendingCount ?? 0,
+                                   errors: journal?.pendingErrors ?? 0, observations: journal?.pendingObservations ?? 0)
+    }
+    func readQuitState(_ completion: @escaping (DiagnosticQuitState) -> Void) {
+        queue.async { [self] in completion(currentQuitState()) }
     }
     func cancelQuitPreparation(){
         _ = OSAtomicIncrement32Barrier(&quitGeneration)

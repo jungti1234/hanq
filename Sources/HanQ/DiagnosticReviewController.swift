@@ -124,7 +124,7 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         case .success(let snapshot): install(snapshot)
         case .failure(let error):
             if (error as? DiagnosticLogExport.Failure) == .noLogs {
-                countLabel.stringValue = "보관 중인 기록이 없습니다."
+                countLabel.stringValue = allPending ? "내보낼 대기 기록이 없습니다." : "보관 중인 기록이 없습니다."
                 statusLabel.stringValue = "진단 기록 없이도 피드백을 남길 수 있습니다."
                 return
             }
@@ -139,9 +139,9 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         selected.removeAll()
         if allPending{selected=snapshot.pendingIncidentIDs}
         else if let first = snapshot.incidents.first { selected = [first.id] }
-        countLabel.stringValue = allPending ? "저장 대기 기록 전체 \(selected.count)건 · 사건 기록 포함":"전체 \(snapshot.incidents.count)건 · 최신순" + (snapshot.critical != nil ? " · 최소 사건 기록 포함":"")
+        countLabel.stringValue = allPending ? "저장 대기 중인 상세 기록 \(selected.count)건 · 오류·사건 기록 \(snapshot.pendingJournalCount)개":"전체 \(snapshot.incidents.count)건 · 최신순" + (snapshot.critical != nil ? " · 최소 사건 기록 포함":"")
         prepareSelection()
-        if !snapshot.incidents.isEmpty { recordTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+        if !visibleIncidents.isEmpty { recordTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
     }
 
     private func label(_ title: String, size: CGFloat = 13, bold: Bool = false) -> NSTextField {
@@ -353,7 +353,12 @@ final class DiagnosticReviewController: NSWindowController, NSWindowDelegate, NS
         saveButton.isEnabled = false; fileTable.reloadData(); textView.string = ""
         previewTitle.stringValue = "미리보기"
         exportWarningLabel.stringValue="";exportWarningLabel.isHidden=true
-        guard let snapshot, !selected.isEmpty || snapshot.critical != nil else {
+        guard let snapshot, allPending ? snapshot.hasPendingCopies : (!selected.isEmpty || snapshot.critical != nil) else {
+            if allPending {
+                statusLabel.stringValue = snapshot?.pendingExport?.unavailableSources.isEmpty == false
+                    ? "내보낼 대기 기록 사본을 확인할 수 없습니다." : "내보낼 대기 기록이 없습니다."
+                return
+            }
             statusLabel.stringValue = snapshot?.incidents.isEmpty == true ? "보관 중인 기록이 없습니다." : "저장할 기록을 하나 이상 선택해 주세요."
             return
         }

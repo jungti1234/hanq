@@ -146,7 +146,7 @@ func wait(_ predicate:()->Bool){let deadline=Date().addingTimeInterval(5);while 
 let emptyQuit=DiagnosticQuitState(detailPhases:0,errors:0,observations:0),pendingQuit=DiagnosticQuitState(detailPhases:2,errors:1,observations:1)
 for choice in [DiagnosticQuitCoordinator.Choice.cancel,.export,.discard] {
  var replies:[Bool]=[],resumed=0,exports=0,prompts=0
- let coordinator=DiagnosticQuitCoordinator(prepare:{$0(pendingQuit)},resume:{resumed+=1},decide:{state,reply in prompts+=1;check(state==pendingQuit,"quit dialog receives actual counts");reply(choice)},exportPending:{exports+=1})
+ let coordinator=DiagnosticQuitCoordinator(prepare:{$0(pendingQuit)},readState:{$0(pendingQuit)},resume:{resumed+=1},decide:{state,reply in prompts+=1;check(state==pendingQuit,"quit dialog receives actual counts");reply(choice)},exportPending:{exports+=1})
  check(coordinator.request{replies.append($0)},"first termination request starts")
  check(!coordinator.request{_ in check(false,"duplicate reply")},"duplicate termination cannot start a second save or dialog")
  wait{!replies.isEmpty}
@@ -154,13 +154,62 @@ for choice in [DiagnosticQuitCoordinator.Choice.cancel,.export,.discard] {
  check(resumed==(choice == .discard ? 0:1) && exports==(choice == .export ? 1:0),"cancel/export restores collection and export does not imply exit")
 }
 var late:((DiagnosticQuitState)->Void)?,timeoutReplies:[Bool]=[],unknownPrompt=false
-let timeoutQuit=DiagnosticQuitCoordinator(prepare:{late=$0},resume:{},decide:{state,reply in unknownPrompt=state==nil;reply(.cancel)},exportPending:{})
+let timeoutQuit=DiagnosticQuitCoordinator(prepare:{late=$0},readState:{$0(emptyQuit)},resume:{},decide:{state,reply in unknownPrompt=state==nil;reply(.cancel)},exportPending:{})
 _ = timeoutQuit.request(timeout:0.03){timeoutReplies.append($0)};wait{!timeoutReplies.isEmpty}
 late?(emptyQuit);RunLoop.current.run(until:Date().addingTimeInterval(0.05))
 check(unknownPrompt && timeoutReplies == [false],"stalled writer is unknown and late completion cannot undo cancel")
 var cleanReplies:[Bool]=[]
-let cleanQuit=DiagnosticQuitCoordinator(prepare:{$0(emptyQuit)},resume:{check(false,"unexpected resume")},decide:{_,_ in check(false,"healthy quit must not warn")},exportPending:{})
+let cleanQuit=DiagnosticQuitCoordinator(prepare:{$0(emptyQuit)},readState:{$0(emptyQuit)},resume:{check(false,"unexpected resume")},decide:{_,_ in check(false,"healthy quit must not warn")},exportPending:{})
 _ = cleanQuit.request{cleanReplies.append($0)};wait{!cleanReplies.isEmpty};check(cleanReplies == [true],"healthy final save permits normal quit without a prompt")
+// Drive the serial writer replies independently of main-queue UI choices.
+do {
+    var prepared: ((DiagnosticQuitState) -> Void)?
+    var reads: [(DiagnosticQuitState) -> Void] = []
+    var choices: [(DiagnosticQuitCoordinator.Choice) -> Void] = []
+    var states: [DiagnosticQuitState?] = []
+    var replies: [Bool] = []
+    var resumes = 0
+    let gate = DiagnosticQuitCoordinator(prepare: { prepared = $0 }, readState: { reads.append($0) },
+        resume: { resumes += 1 }, decide: { state, reply in states.append(state); choices.append(reply) },
+        exportPending: { check(false, "stale export choice must not open a review") }, refreshInterval: 0.01)
+    _ = gate.request(timeout: 0.15) { replies.append($0) }
+    wait { states == [nil] }
+    check(reads.isEmpty, "a timeout does not read an empty queue before capture windows finish")
+    prepared?(emptyQuit)
+    wait { states.count == 2 }
+    check(states.last! == emptyQuit && replies.isEmpty, "late first save updates the open prompt and requires consent")
+    choices.last?(.export)
+    wait { !reads.isEmpty }
+    check(replies.isEmpty, "zero pending ignores pending export even if invoked programmatically")
+    func confirmAfterPollBegins() -> (DiagnosticQuitState) -> Void {
+        // Hold one observation so the next reader is unambiguously the fresh
+        // confirmation, even if the test run loop advances by a whole interval.
+        wait { !reads.isEmpty }
+        let stalePoll = reads.removeFirst()
+        choices.last?(.quit)
+        wait { !reads.isEmpty }
+        let confirmation = reads.removeFirst()
+        stalePoll(emptyQuit)
+        return confirmation
+    }
+    confirmAfterPollBegins()(pendingQuit)
+    wait { states.last! == pendingQuit }
+    check(replies.isEmpty, "records added just before quit restore the warning and prevent termination")
+    wait { !reads.isEmpty }
+    reads.removeFirst()(emptyQuit)
+    wait { states.last! == emptyQuit }
+    let delayedConfirmation = confirmAfterPollBegins()
+    wait { states.last! == nil }
+    delayedConfirmation(emptyQuit)
+    wait { states.last! == emptyQuit }
+    check(replies.isEmpty, "a stalled final confirmation cannot silently quit on its late clean answer")
+    let afterCancel = confirmAfterPollBegins()
+    choices.last?(.cancel)
+    wait { replies == [false] }
+    afterCancel(emptyQuit)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.04))
+    check(!gate.active && resumes == 1 && reads.isEmpty && replies == [false], "cancel invalidates final reads and stops observing")
+}
 let quitRoot=directory("quit-trace")
 final class QuitWriter {
  let lock=NSLock();var fail=false

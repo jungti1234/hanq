@@ -333,6 +333,11 @@ final class DiagnosticReviewSnapshot {
     private let storageIssueSnapshot:DiagnosticStorageIssueSnapshot?
     let pendingExport:DiagnosticPendingExport?
     var pendingIncidentIDs:Set<String>{pendingExport?.incidentIDs ?? []}
+    var pendingJournalCount: Int { pendingExport?.journalFiles.values.reduce(0, +) ?? 0 }
+    var hasPendingCopies: Bool {
+        guard let pendingExport else { return false }
+        return !pendingExport.captures.isEmpty || !pendingExport.journalFiles.isEmpty
+    }
     private var exportWarnings:[String]=[]
     let critical:DiagnosticReviewDocument?
     var hasRecords:Bool{!incidents.isEmpty || critical != nil}
@@ -907,6 +912,7 @@ final class DiagnosticReviewSnapshot {
     }
     func files(selected: Set<String>, environment: DiagnosticReviewEnvironment,request:DiagnosticSnapshotRequest=DiagnosticSnapshotRequest(),allPending:Bool=false) throws -> [DiagnosticReviewFile] {
         try request.check()
+        if allPending && !hasPendingCopies { throw DiagnosticReviewError.emptySelection }
         let chosen = incidents.filter { selected.contains($0.id) }
         guard (!chosen.isEmpty || !criticalFiles.isEmpty), chosen.count == selected.count else { throw DiagnosticReviewError.emptySelection }
         guard allPending ? selected==pendingIncidentIDs:chosen.count <= Self.selectionLimit else { throw DiagnosticReviewError.tooManySelections }

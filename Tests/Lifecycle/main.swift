@@ -10,6 +10,10 @@ func pressNoticeKey(_ window:NSWindow,_ character:String,_ keyCode:UInt16) {
 
 // Exercises the production teardown with a Mach port/run-loop source, without
 // installing a global event tap or changing Accessibility permissions.
+if CommandLine.arguments.contains("--test-quit-dialog") {
+    try testDiagnosticQuitDialog()
+    exit(0)
+}
 let owner = AppDelegate()
 // Menu quit, Cmd-Q and Sparkle's Apple quit event enter the same delegate.
 // No global termination or input events are sent by these independent checks.
@@ -18,8 +22,10 @@ do {
     var responses:[Bool]=[],prompts=0,resumed=0
     app.diagnosticQuitPreparer={$0(.init(detailPhases:2,errors:1,observations:0))}
     app.diagnosticQuitResumer={resumed+=1}
-    app.diagnosticQuitPresenter={state,reply in
-        precondition(state?.detailPhases==2);prompts+=1;reply(.cancel)
+    app.presentDiagnosticQuitWindow = { window in
+        prompts += 1
+        precondition(quitViews(window).compactMap { $0 as? NSTextField }.contains { $0.stringValue.contains("상세 구간 2개") })
+        quitButton("계속 사용하기", in: window).performClick(nil)
     }
     app.diagnosticQuitReply={responses.append($0)}
     precondition(app.applicationShouldTerminate(NSApp) == .terminateLater)
