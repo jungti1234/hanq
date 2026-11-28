@@ -201,4 +201,43 @@ for mode in ["ok", "rawChange", "verifiedChange", "initialMismatch", "unreadable
         check(step() == noErr && f.selectedTargets == [abc] && posts == 1, "one ABC selection before the next Q")
     }
 }
+// At a document end the editor's cursor command and its eventual AX observation
+// can arrive on different turns. Never resend Right or accept the older caret.
+for mode in ["delayed", "ignored", "denied", "focus", "source", "text", "selection", "movedDuringRead"] {
+    let f = Fixture()
+    f.value = "앞🙂간\n"
+    let body = "앞🙂간", end = body.utf16.count
+    let abc = "com.apple.keylayout.ABC"
+    let proof = SelectionPreservingSourceSwitch.TypedCaret(field: f.element, text: body, offset: end)
+    var keys = [CGKeyCode](), time = 0.0
+    f.selection = CFRange(location: end, length: 0)
+    f.owner.now = { time }
+    f.owner.caretText = { _, _, _ in
+        if mode == "movedDuringRead", keys == [123] { f.selection = CFRange(location: 0, length: 0) }
+        return body
+    }
+    f.owner.postCommit = { _, key in keys.append(key); return !(key == 124 && mode == "denied") }
+    func step() -> Int32 { f.owner.select(abc, asynchronous: true, typedCaret: proof) }
+    _ = step()
+    _ = step()
+    check(keys == [123] && f.selectedTargets.isEmpty, "no return until the editor acknowledges Left")
+    f.selection = CFRange(location: end - 1, length: 0)
+    switch mode {
+    case "focus": f.owner.focus = { f.other }
+    case "source": f.source = "other"
+    case "text": f.value = "앞🙂강\n"
+    case "selection": f.selection.length = 1
+    default: break
+    }
+    _ = step()
+    if ["delayed", "ignored"].contains(mode) {
+        for _ in 0..<4 { _ = step() }
+        check(keys == [123, 124] && f.owner.isPending && f.selectedTargets.isEmpty, "one return, ABC waits for the actual caret")
+        if mode == "delayed" { f.selection = CFRange(location: end, length: 0) } else { time = 0.31 }
+        _ = step()
+    }
+    check(!f.owner.isPending && f.writes.isEmpty, "end restoration cannot race an AX write")
+    check(f.selectedTargets == (mode == "delayed" ? [abc] : []), "only verified return releases the switch")
+    check(keys == (["delayed", "ignored", "denied"].contains(mode) ? [123, 124] : [123]), "at most one return in the original context")
+}
 print("PASS: selection-preserving source switch \(checks) checks")

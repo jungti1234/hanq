@@ -9,7 +9,7 @@ final class SelectionPreservingSourceSwitch {
         case begin, unsupportedSource, permission, missingFocus, unsupportedField
         case missingText, missingSelection, emptySelection, invalidSelection, deadline
         case changedSource, changedContext, collapseFailed, collapsed, switched
-        case restoreSkipped, restored, restoreFailed, commitPosted, commitUnconfirmed
+        case restoreSkipped, restored, restoreFailed, commitPosted, commitUnconfirmed, endCaretReturnPosted
     }
     private let commitSource=CGEventSource(stateID:.privateState)
     private let caretSource=CGEventSource(stateID:.hidSystemState)
@@ -97,6 +97,11 @@ final class SelectionPreservingSourceSwitch {
                                 selection: NSRange(location: caret.location, length: caret.length))?.text
     }
     private var pendingCaretCommand = false
+    private func postCursor(_ key: CGKeyCode, to field: AXUIElement, typedCaret: Bool) -> Bool {
+        pendingCaretCommand = typedCaret
+        defer { pendingCaretCommand = false }
+        return postCommit(field, key)
+    }
     private struct PendingSwitch {
         let field:AXUIElement
         let text:String
@@ -126,6 +131,11 @@ final class SelectionPreservingSourceSwitch {
             if Self.equal(selected, from) { return AXError.cannotComplete.rawValue }
             guard Self.equal(selected, to) else { return stop(.changedContext) }
             guard let verified = caretText(current, value, selected) else { return AXError.cannotComplete.rawValue }
+            let returnAtEnd = !pending.restoringCaret && pending.selected.location == expected.utf16.count
+            if returnAtEnd {
+                guard let latest = range(current) else { return AXError.cannotComplete.rawValue }
+                guard Self.equal(latest, preceding) else { return stop(.changedContext) }
+            }
             guard verified.utf16.elementsEqual(expected.utf16),
                   allowed(), currentSource() == pending.source,
                   let focused = focus(), CFEqual(focused, current) else { return stop(.changedContext) }
@@ -138,8 +148,15 @@ final class SelectionPreservingSourceSwitch {
                 return status
             }
             trace(.collapsed)
-            // Only restore a displacement the editor actually acknowledged.
-            guard setRange(current,pending.selected) else{return stop(.restoreFailed)}
+            if returnAtEnd {
+                // At the verified document end, undo exactly the editor's one-character
+                // Left with a native Right. Some editors accept an absolute AX range
+                // write without changing their actual insertion point.
+                guard postCursor(124, to: current, typedCaret: true) else { return stop(.restoreFailed) }
+                trace(.endCaretReturnPosted)
+            } else {
+                guard setRange(current,pending.selected) else{return stop(.restoreFailed)}
+            }
             pendingSwitch?.restoringCaret=true
             return AXError.cannotComplete.rawValue
         }
@@ -194,9 +211,7 @@ final class SelectionPreservingSourceSwitch {
         // AX-only collapse can leave the IME's marked text alive: it can
         // reappear on the next Korean activation. A cursor key commits it in
         // the editor. Prepare and post the full pair once, then require proof.
-        pendingCaretCommand=caretCommit
-        defer {pendingCaretCommand=false}
-        guard postCommit(element,123) else { return fallback(.collapseFailed) }
+        guard postCursor(123, to: element, typedCaret: caretCommit) else { return fallback(.collapseFailed) }
         trace(.commitPosted)
         if asynchronous {
             pendingSwitch=PendingSwitch(field:element,text:original,selected:selected,source:source,target:target,deadline:now()+0.30,verifiedCaretText:typedCaret?.text)

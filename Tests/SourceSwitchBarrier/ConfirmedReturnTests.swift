@@ -329,6 +329,60 @@ private func checkMultilineHangulToEnglish() {
     print("PASS multiline editor: composed Hangul, right Command, Shift+Q and suffix")
 }
 
+private func checkEndCaretAcrossRightCommands() {
+    let r = ReturnEditor(left: "", right: "")
+    let selector = SelectionPreservingSourceSwitch()
+    let directSwitch = r.barrier.select
+    var cursorKeys = [CGKeyCode]()
+    var sourceSelections = [String]()
+    var rangeRequests = 0
+    selector.allowed = { true }
+    selector.focus = { r.field }
+    selector.editable = { _ in true }
+    selector.currentSource = { r.selected }
+    selector.now = { r.time }
+    selector.text = { _ in r.body }
+    selector.range = { _ in CFRange(location: r.range.location, length: r.range.length) }
+    selector.caretText = { _, value, _ in value }
+    // The editor acknowledges absolute AX writes without moving its insertion point.
+    selector.setRange = { _, _ in rangeRequests += 1; return true }
+    selector.postCommit = { _, key in
+        cursorKeys.append(key)
+        let document = r.body as NSString
+        let offset = r.range.location + (key == 123 ? -1 : 1)
+        returnCheck((0...document.length).contains(offset))
+        r.commit()
+        r.prefix = document.substring(to: offset)
+        r.right = document.substring(from: offset)
+        return true
+    }
+    selector.selectSource = { id in sourceSelections.append(id); return directSwitch(id) }
+    r.barrier.select = { selector.select($0, asynchronous: true) }
+    r.barrier.selectAfterTypedHangul = { target, snap in
+        selector.select(target, asynchronous: true,
+                        typedCaret: .init(field: snap.field, text: snap.text, offset: snap.selection.location))
+    }
+    r.barrier.selectionPending = { selector.isPending }
+    r.barrier.cancelSelection = { _ in selector.cancelPending() }
+    r.type("rks")
+    returnCheck(r.body == "간" && r.range == NSRange(location: 1, length: 0))
+    r.evidence.request(r.english, at: r.stamp)
+    returnCheck(r.barrier.request(r.english, at: r.stamp, rightCommand: true))
+    r.barrier.step()
+    // Both edges of x arrive while the source change owns delivery.
+    r.type("x")
+    for _ in 0..<35 { r.time += 0.01; r.barrier.step() }
+    print("first switch: text=\(r.body) caret=\(r.range) ABC=\(r.selected == r.english) retained=\(r.retained) cursorKeys=\(cursorKeys) rangeRequests=\(rangeRequests)")
+    returnCheck(r.body == "간x" && r.range == NSRange(location: 2, length: 0))
+    returnCheck(r.selected == r.english && r.retained == 0 && !r.barrier.busy)
+    r.change(r.korean)
+    r.type("rks")
+    returnCheck(r.body == "간x간" && r.range == NSRange(location: 3, length: 0))
+    returnCheck(sourceSelections == [r.english, r.korean] && rangeRequests == 0)
+    returnCheck(cursorKeys == [123, 124] && r.retained == 0 && r.engine.retained.isEmpty)
+    print("PASS right Command x right Command rks: 간x간, collapsed UTF-16 caret 3")
+}
+
 private func checkMissingOutboundSyllable() {
     // This editor temporarily hides an active syllable on direct deactivation.
     // Both callbacks run through the normal request and queued-delivery path.
@@ -410,6 +464,7 @@ func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔
         return values[Int((seed >> 32) % UInt64(values.count))]
     }
     checkMultilineHangulToEnglish()
+    checkEndCaretAcrossRightCommands()
     checkMissingOutboundSyllable()
     checkShiftAcrossReturn()
     checkReturnBoundaries()
