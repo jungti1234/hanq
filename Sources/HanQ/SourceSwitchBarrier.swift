@@ -15,8 +15,12 @@ final class SourceSwitchBarrier {
     private var diagnosticHistory=BoundaryDiagnosticHistory()
     private var diagnosticTransaction:BoundaryDiagnosticTransaction?
     private var diagnosticSequence=0
-    struct Snapshot { let field:AXUIElement; let text:String; let selection:NSRange }
+    struct Snapshot { let field:AXUIElement; let text:String; let selection:NSRange; var window = EditorTextWindow.entire }
     static let marker:Int64 = 0x4851535749544348
+    private(set) var ledgerWindow = EditorTextWindow.entire
+    var readForSelection:(()->Snapshot?)?
+    private var observingSelectAll=false
+    var requiresCompleteSelection:Bool { observingSelectAll && (pendingSelectAll || awaitingSelection) }
     var read:()->Snapshot? = {nil}
     struct SwitchWindow {let pid:pid_t,window:AXUIElement,stamp:CGEventTimestamp,at:Double}
     var readForOutsideSwitch:(()->(Snapshot?,(pid_t,AXUIElement)?))?
@@ -373,6 +377,7 @@ final class SourceSwitchBarrier {
         textMatch(snap,ledger,renderedInsertion:ledger.insertion,allowEmptyInsertion:allowEmptyInsertion)
     }
     private func textMatch(_ snap:Snapshot,_ ledger:MismatchReplayLedger,renderedInsertion:String,allowEmptyInsertion:Bool=false)->TextMatch? {
+        guard snap.window==ledgerWindow else{return nil}
         let before=ledger.before as NSString
         let longContext=before.length>=256
         // Compare canonically equivalent text without repeatedly traversing
@@ -524,7 +529,7 @@ final class SourceSwitchBarrier {
         ledger=acknowledged;selectedRange=nil;mismatchedSnapshot=nil;noteDiagnosticHistory(9,baseline:true)
         trace("source_initial_body_removed")
     }
-    func resetObservation(){outboundHangul=nil;returnReceipt=nil;entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
+    func resetObservation(){ledgerWindow = .entire;observingSelectAll=false;outboundHangul=nil;returnReceipt=nil;entry=nil;nativeBatch=nil;let revision=diagnosticHistory.revision;diagnosticHistory=BoundaryDiagnosticHistory();diagnosticHistory.revision=revision;deferredHistoryEpoch=nil;field=nil;ledger=nil;priorKeyLedger=nil;deletionHistory=nil;mismatchedSnapshot=nil;lastTextMatch=nil;lastKeyAt=0;priorKeyAt=0;historyStarted=0;selectedRange=nil;pendingSelectAll=false;awaitingSelection=false;selectionAttempts=0}
     // Backspace can remove one component of live Hangul rather than commit the
     // remaining syllable. Reuse only our observed key prefix, after the editor
     // proves its entire text and caret. Never decompose existing editor text.
@@ -577,16 +582,16 @@ final class SourceSwitchBarrier {
         guard isReady() else{incidentTrace.decision(.handoff,.handoffNotReady);return nil}
         guard !externalEditPending else{incidentTrace.decision(.handoff,.handoffExternalEdit);return nil}
         guard selectedRange==nil else{incidentTrace.decision(.handoff,.handoffSelection);return nil}
-        guard let field,CFEqual(field,snap.element) else{incidentTrace.decision(.handoff,.handoffField);return nil}
+        guard (snap.observation ?? .entire)==ledgerWindow,let field,CFEqual(field,snap.element) else{incidentTrace.decision(.handoff,.handoffField);return nil}
         guard source()==mismatchKoreanID else{incidentTrace.decision(.handoff,.handoffSource);return nil}
         guard historyStarted>boundary else{incidentTrace.decision(.handoff,historyStarted==0 ? .handoffUninitialized:.handoffBoundary);return nil}
-        resolveDeletionBoundary(.init(field:snap.element,text:snap.text,selection:snap.selection))
+        resolveDeletionBoundary(.init(field:snap.element,text:snap.text,selection:snap.selection,window:snap.observation ?? .entire))
         let histories=allowPrior ? [(ledger,lastKeyAt),(priorKeyLedger,priorKeyAt)]:[(ledger,lastKeyAt)]
         var rejection=InputIncidentTrace.DecisionReason.handoffNoHistory
         for (candidate,at) in histories {
             guard var candidate else{continue}
             guard now()-at>=0,now()-at<=5 else{rejection = .handoffExpired;continue}
-            candidate=resolvingDeletionBoundary(.init(field:snap.element,text:snap.text,selection:snap.selection),candidate)
+            candidate=resolvingDeletionBoundary(.init(field:snap.element,text:snap.text,selection:snap.selection,window:snap.observation ?? .entire),candidate)
             guard let plan=candidate.lastTwoSetPlan() else{continue}
             let normal=candidate.selection==snap.selection && InputFocusAccess.sameText(candidate.text,snap.text)
             guard normal || plan.matches(text:snap.text,selection:snap.selection) ||
@@ -641,7 +646,7 @@ final class SourceSwitchBarrier {
             return
         }
         resetObservation();repairInFlight.removeAll();externalEditPending=false
-        field=snapshot.field;ledger=MismatchReplayLedger(before:snapshot.text,caret:snapshot.selection.location)
+        field=snapshot.field;ledgerWindow=snapshot.window;ledger=MismatchReplayLedger(before:snapshot.text,caret:snapshot.selection.location)
         selectedRange=snapshot.selection.length>0 ? snapshot.selection:nil
         noteDiagnosticHistory(5,baseline:true)
         trace("manual_edit_verified")
@@ -665,7 +670,7 @@ final class SourceSwitchBarrier {
     func adoptVerifiedReplay(_ replay:MismatchReplayLedger, snapshot:MismatchSnapshot) {
         guard manualEdit==nil,replay.text==snapshot.text,replay.selection==snapshot.selection else{return}
         guard transactionField == nil || CFEqual(transactionField!,snapshot.element) else{return}
-        field=snapshot.element;ledger=replay;selectedRange=nil;externalEditPending=false
+        field=snapshot.element;ledgerWindow=snapshot.observation ?? .entire;ledger=replay;selectedRange=nil;externalEditPending=false
         priorKeyLedger=nil;lastKeyAt=now();historyStarted=MismatchRecoveryEngine.sourceEventTime()
         noteDiagnosticHistory(6,baseline:true)
         trace("repair_history_adopted")
@@ -721,7 +726,9 @@ final class SourceSwitchBarrier {
         }
         if event.getIntegerValueField(.keyboardEventKeycode)==0,flags == .maskCommand,!event.flags.contains(.maskShift) {
             refreshIdleField()
-            if ledger == nil,let snap=read(){field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);noteDiagnosticHistory(3,baseline:true)}
+            if ledgerWindow != .entire {resetObservation()}
+            observingSelectAll=true
+            if ledger == nil,let snap=(readForSelection ?? read)(){field=snap.field;ledgerWindow=snap.window;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);noteDiagnosticHistory(3,baseline:true)}
             selectedRange=ledger.map{NSRange(location:0,length:$0.text.utf16.count)}
             noteDiagnosticHistory(3)
             pendingSelectAll=selectedRange != nil
@@ -748,18 +755,21 @@ final class SourceSwitchBarrier {
             restoreDeletionHistory(snap)
             if ledger == nil {
                 field=snap.field
+                ledgerWindow=snap.window
                 ledger=MismatchReplayLedger(before:(snap.text as NSString).replacingCharacters(in:snap.selection,with:""),caret:snap.selection.location)
                 noteDiagnosticHistory(1,baseline:true)
             }
         }
         checkpoint?(.snapshot)
         if let selectedRange,let previous=ledger {ledger=MismatchReplayLedger(before:(previous.text as NSString).replacingCharacters(in:selectedRange,with:""),caret:selectedRange.location);self.selectedRange=nil;noteDiagnosticHistory(11)}
+        if let observed=ledger,observed.segments.reduce(0, { $0 + $1.keys.count })>=128,let snap=read() { reframe(snap) }
         if let history = ledger, history.segments.reduce(0, { $0 + $1.keys.count }) >= 128 {
             // A fully visible mixed run ends in ASCII, so it has no unfinished
             // Hangul syllable. Keep its actual spelling if the whole interval matches.
             if let plan = history.lastKoreanPlan(maximumKeys: 128), let snap = read(),
                let field, CFEqual(field, snap.field),
                plan.matchesMixedInputBeforeSwitch(text: snap.text, selection: snap.selection) {
+                ledgerWindow=snap.window
                 ledger = MismatchReplayLedger(before: snap.text, caret: snap.selection.location)
             } else if let compacted = history.compactedForObservation() {
                 ledger = compacted
@@ -840,11 +850,11 @@ final class SourceSwitchBarrier {
         let limit=min(candidate.at+1,now()+0.080)
         if !busy{busy=true;transactionField=snap.field;deadline=limit}
         let confirmedReturn = candidate.returnBaseline.map {
-            event.timestamp > candidate.switchTimestamp && $0.selection == snap.selection
+            event.timestamp > candidate.switchTimestamp && $0.window == snap.window && $0.selection == snap.selection
                 && $0.text.utf16.elementsEqual(snap.text.utf16)
         } ?? false
         let inspectPrompt = confirmedReturn && candidate.sourceID == KoreanKeyboardLayout.twoSetID
-            && !snap.text.isEmpty && snap.selection.length == 0
+            && snap.window == .entire && !snap.text.isEmpty && snap.selection.length == 0
             && (snap.selection.location == 0 || snap.selection.location == snap.text.utf16.count)
         let placeholder = inspectPrompt ? PlaceholderObservation() : nil
         heldStart=HeldStart(sourceID:candidate.sourceID, snapshot:snap,window:window,until:limit,
@@ -872,7 +882,7 @@ final class SourceSwitchBarrier {
         }
         // Nothing in this batch has reached the editor. Even identical letters
         // in a draft cannot be a receipt for one of these owned events.
-        guard let snap=read(),CFEqual(snap.field,h.snapshot.field),
+        guard let snap=read(),snap.window==h.snapshot.window,CFEqual(snap.field,h.snapshot.field),
               let win=fieldWindow(snap.field),CFEqual(win,h.window),
               snap.selection==h.snapshot.selection,snap.text.utf16.elementsEqual(h.snapshot.text.utf16),
               initialLayout?(h.sourceID) == phase else{fail("initial_context_changed");return false}
@@ -921,7 +931,7 @@ final class SourceSwitchBarrier {
               now() <= receipt.expires, receipt.sourceEpoch == sourceEvidence?.epoch,
               plan.sourceID == receipt.sourceID,
               plan.verifiedReplacement == nil, plan.hasLetters, !plan.codes.isEmpty,
-              CFEqual(snapshot.element, receipt.baseline.field),
+              (snapshot.observation ?? .entire) == receipt.baseline.window, CFEqual(snapshot.element, receipt.baseline.field),
               plan.caret == receipt.baseline.selection.location,
               plan.before.utf16.elementsEqual(receipt.baseline.text.utf16),
               snapshot.selectedText?.isEmpty != false,
@@ -1097,7 +1107,7 @@ final class SourceSwitchBarrier {
                 snap=editor
                 if editor==nil,let (pid,window)=origin{recordWindow(SwitchWindow(pid:pid,window:window,stamp:timestamp,at:at))}
             }else{snap=read()}
-            if let snap{field=snap.field;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
+            if let snap{field=snap.field;ledgerWindow=snap.window;ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location);selectedRange=snap.selection;noteDiagnosticHistory(2,baseline:true)}
         }
         guard field != nil,ledger != nil else{return false}
         if !busy { transactionField=field }
@@ -1107,6 +1117,28 @@ final class SourceSwitchBarrier {
         if waitReason != reason {waitReason=reason;trace(reason)}
         schedule()
     }
+    // When typing crosses a window boundary, carry only the final tracked keys
+    // whose rendering and absolute position are present in both observations.
+    private func reframe(_ snap:Snapshot) {
+        guard snap.window != ledgerWindow,let field,CFEqual(field,snap.field),
+              selectedRange==nil,!pendingSelectAll,!awaitingSelection,
+              let previous=ledger,previous.postDeletionPrefixCount==nil,
+              ledgerWindow.absolute(previous.selection)==snap.window.absolute(snap.selection),
+              let compact=previous.compactedForObservation() else{return}
+        let wanted=previous.text as NSString,live=snap.text as NSString
+        let first=max(ledgerWindow.leading,snap.window.leading)
+        let end=min(ledgerWindow.leading+wanted.length,snap.window.leading+live.length)
+        let insertStart=ledgerWindow.leading+compact.caret
+        let width=compact.insertion.utf16.count
+        guard first<=insertStart,insertStart+width<=end,
+              wanted.substring(with:NSRange(location:first-ledgerWindow.leading,length:end-first)).utf16.elementsEqual(
+                live.substring(with:NSRange(location:first-snap.window.leading,length:end-first)).utf16) else{return}
+        let local=NSRange(location:insertStart-snap.window.leading,length:width)
+        var rebased=MismatchReplayLedger(before:live.replacingCharacters(in:local,with:""),caret:local.location)
+        rebased.segments=compact.segments
+        ledger=rebased;ledgerWindow=snap.window;priorKeyLedger=nil;deletionHistory=nil
+    }
+
     private func waitForMatch(_ snap:Snapshot) {
         let textMatches=matchesText(snap)
         mismatchedSnapshot=textMatches ? nil:snap
@@ -1151,6 +1183,23 @@ final class SourceSwitchBarrier {
         guard offset>0,offset<=ns.length else{return false}
         let unit=ns.character(at:offset-1)
         return (0xAC00...0xD7A3).contains(unit) && ns.rangeOfComposedCharacterSequence(at:offset-1)==NSRange(location:offset-1,length:1)
+    }
+
+    /// An explicit ABC-to-Korean request needs no editor write. Where the
+    /// caret and the final delivered ASCII token agree, unrelated draft edits
+    /// need not hold the source change or authorize a replay of the old text.
+    private func canRebaseRomanSwitch(_ target:String, _ snap:Snapshot)->Bool {
+        guard rightCommandRequest,targetTimestamp != 0,target == KoreanKeyboardLayout.twoSetID,
+              source()=="com.apple.keylayout.ABC",!pendingSelectAll,!awaitingSelection,
+              !externalEditPending,repairInFlight.isEmpty,onsetInFlight.isEmpty,
+              snap.selection.length==0,(selectedRange?.length ?? 0)==0,
+              let ledger,ledgerWindow.absolute(ledger.selection)==snap.window.absolute(snap.selection),
+              let last=ledger.segments.last,last.source==source() else{return false}
+        let rendered=MismatchReplayLedger.render(last)
+        let token=String(rendered.suffix(32).reversed().prefix(while: { $0.isASCII && ($0.isLetter || $0.isNumber) }).reversed())
+        guard !token.isEmpty,token.utf16.count<=snap.selection.location else{return false}
+        let run=NSRange(location:snap.selection.location-token.utf16.count,length:token.utf16.count)
+        return (snap.text as NSString).substring(with:run).utf16.elementsEqual(token.utf16)
     }
 
     private func matchesMissingOutboundSyllable(_ snap:Snapshot, returningTo target:String)->Bool {
@@ -1212,8 +1261,10 @@ final class SourceSwitchBarrier {
         // Keep later keys queued and retry within the existing deadline.
         guard let snap=read() else{wait("waiting_for_snapshot");return}
         guard let transactionField,CFEqual(transactionField,snap.field) else{fail("focus_changed");return}
+        reframe(snap)
         if externalEditPending {
             guard isReady() else{wait("waiting_for_repair");return}
+            ledgerWindow=snap.window
             ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)
             selectedRange=snap.selection;field=snap.field;externalEditPending=false
             noteDiagnosticHistory(12,baseline:true)
@@ -1237,7 +1288,9 @@ final class SourceSwitchBarrier {
                 // composition update replaces the selection. Reapply only the
                 // explicit selection, with unchanged text and bounded retries.
                 if selectionAttempts<3,now()>=selectionRetryAt,matchesText(snap),let selectedRange {
-                    guard applySelection(snap.field,selectedRange) else{fail("select_all_failed");return}
+                    guard let proof=(readForSelection ?? read)(),CFEqual(proof.field,snap.field),proof.window == .entire,
+                          snap.window.expanding(snap.text,observed:snap.text,selection:snap.selection,full:proof.text,fullSelection:proof.selection) != nil,
+                          applySelection(snap.field,snap.window.absolute(selectedRange)) else{fail("select_all_failed");return}
                     selectionAttempts+=1;selectionRetryAt=now()+0.01;trace("select_all_retried")
                 }
                 waitForMatch(snap);return
@@ -1248,7 +1301,11 @@ final class SourceSwitchBarrier {
             guard isReady() else{wait("waiting_for_repair");return}
             if switchSnapshot == nil {
                 if !matches(snap) {
-                    if matchesMissingOutboundSyllable(snap,returningTo:target) {
+                    if canRebaseRomanSwitch(target,snap) {
+                        resetObservation();field=snap.field;ledgerWindow=snap.window
+                        ledger=MismatchReplayLedger(before:snap.text,caret:snap.selection.location)
+                        noteDiagnosticHistory(9,baseline:true)
+                    } else if matchesMissingOutboundSyllable(snap,returningTo:target) {
                         // Reactivation belongs to the user. The IME owns any
                         // pending syllable; do not select or insert it ourselves.
                         returningWithMissingSyllable=true
@@ -1263,6 +1320,7 @@ final class SourceSwitchBarrier {
                     // particular the old keys must never re-enter a repair.
                     resetObservation()
                     field = snap.field
+                    ledgerWindow = snap.window
                     ledger = MismatchReplayLedger(before: snap.text, caret: snap.selection.location)
                     noteDiagnosticHistory(9,baseline:true)
                     }
@@ -1287,7 +1345,8 @@ final class SourceSwitchBarrier {
             didConfirmSource(target,targetTimestamp)
             didSelect(targetTimestamp);targetTimestamp=0
             let previous=ledger,previousDiagnosticHistory=diagnosticHistory
-            self.target=nil;resetObservation();self.field=snap.field
+            let previousWindow=ledgerWindow
+            self.target=nil;resetObservation();self.field=snap.field;ledgerWindow=snap.window
             if let departing,let leavingSource,let window=fieldWindow(departing.field) {
                 outboundHangul=OutboundHangul(baseline:departing,window:window,korean:leavingSource,time:now())
             }
@@ -1302,7 +1361,7 @@ final class SourceSwitchBarrier {
             // switch. Preserve the verified selection until the editor observes
             // it; otherwise the next key can predict insertion at a transient
             // collapsed caret while the editor actually replaces the selection.
-            if snap.selection.length==0,previous?.selection==snap.selection {
+            if snap.selection.length==0,previousWindow==snap.window,previous?.selection==snap.selection {
                 // Keep the tracked insertion's case tolerance: an editor can
                 // capitalize it after acknowledging the source switch. An empty
                 // segment commits composition even if no key uses this source.

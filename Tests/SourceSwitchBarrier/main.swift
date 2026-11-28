@@ -9,6 +9,7 @@ let en="com.apple.keylayout.ABC",ko="com.apple.inputmethod.Korean.2SetKorean"
 let field=AXUIElementCreateApplication(123),other=AXUIElementCreateApplication(456)
 runSafariActivationTests()
 runInitialLayoutTests()
+if CommandLine.arguments.contains("--local-typing") {runLocalTypingWindowTests();exit(0)}
 runConfirmedReturnTests()
 runPlaceholderReturnTests()
 check(KoreanKeyboardLayout.supportedIDs.map(checkLayoutReturn).allSatisfy { $0 }, "confirmed return for each Apple Korean input source")

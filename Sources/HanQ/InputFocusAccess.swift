@@ -236,3 +236,149 @@ final class InputFocusAccess {
         return element
     }
 }
+
+/// A read-only slice in the editor's UTF-16 coordinate space. Only an edit
+/// transaction may expand it into a complete, newly verified editor value.
+struct EditorTextWindow: Equatable {
+    let leading: Int
+    let trailing: Int?
+    static let entire = Self(leading: 0, trailing: 0)
+    static let beforeCaret = 64
+    static let afterCaret = 32
+    static let maximumSelection = 128
+
+    struct Observation {
+        let window: EditorTextWindow
+        let text: String
+        let selection: NSRange
+        var absoluteSelection: NSRange { window.absolute(selection) }
+    }
+
+    func absolute(_ range: NSRange) -> NSRange {
+        NSRange(location: leading + range.location, length: range.length)
+    }
+
+    /// Use unchanged text outside the slice from the verified editor. A slice
+    /// cannot authorize writing until its absolute caret and contents agree.
+    func expanding(_ baseline: String, observed: String, selection: NSRange,
+                   full: String, fullSelection: NSRange) -> String? {
+        let body = full as NSString
+        let width = observed.utf16.count
+        guard absolute(selection) == fullSelection, leading <= body.length,
+              width <= body.length - leading,
+              trailing.map({ $0 == body.length - leading - width }) ?? true else { return nil }
+        // AX can cut through a surrogate pair at either edge of a fixed
+        // UTF-16 window. Preserve the complete scalar from the live document.
+        let left = leading>0 && leading<body.length && (0xdc00...0xdfff).contains(body.character(at:leading)) ? 1:0
+        let end=leading+width
+        let right = end>0 && end<body.length && (0xd800...0xdbff).contains(body.character(at:end-1)) ? 1:0
+        let current=observed as NSString, prior=baseline as NSString
+        guard left+right<=width,left+right<=prior.length,
+              current.substring(to:left).utf16.elementsEqual(prior.substring(to:left).utf16),
+              current.substring(from:width-right).utf16.elementsEqual(prior.substring(from:prior.length-right).utf16) else{return nil}
+        let inner=NSRange(location:left,length:width-left-right)
+        let absolute=NSRange(location:leading+left,length:inner.length)
+        guard body.substring(with:absolute).utf16.elementsEqual(current.substring(with:inner).utf16) else{return nil}
+        let replace=NSRange(location:left,length:prior.length-left-right)
+        return body.replacingCharacters(in:absolute,with:prior.substring(with:replace))
+    }
+
+    static func selection(_ raw: CFTypeRef?) -> NSRange? {
+        guard let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        var r = CFRange()
+        guard AXValueGetValue(raw as! AXValue, .cfRange, &r), r.location >= 0,
+              r.location < NSNotFound, r.length >= 0, r.length <= Int.max - r.location else { return nil }
+        return NSRange(location: r.location, length: r.length)
+    }
+
+    static func string(_ field: AXUIElement, range: NSRange) -> (AXError, String?) {
+        var r = CFRange(location: range.location, length: range.length)
+        guard let argument = AXValueCreate(.cfRange, &r) else { return (.illegalArgument, nil) }
+        var raw: CFTypeRef?
+        let error = AXUIElementCopyParameterizedAttributeValue(field, kAXStringForRangeParameterizedAttribute as CFString, argument, &raw)
+        return (error, raw as? String)
+    }
+
+    // Pre-focus witnesses may use a complete short accessible range. A
+    // clipped or unreadable field can never masquerade as an empty editor.
+    static func preFocusAttributes(_ field: AXUIElement, names: [String]) -> [CFTypeRef?] {
+        guard let index=names.firstIndex(of:kAXValueAttribute) else{return InputFocusAccess.attributes(field,names)}
+        var requested=names
+        requested[index]=kAXNumberOfCharactersAttribute
+        let selectionIndex=requested.firstIndex(of:kAXSelectedTextRangeAttribute) ?? requested.count
+        if selectionIndex==requested.count {requested.append(kAXSelectedTextRangeAttribute)}
+        var values=InputFocusAccess.attributes(field,requested)
+        let count=values[index] as? NSNumber
+        let selected=selection(values[selectionIndex])
+        values[index]=nil
+        if let count,CFGetTypeID(count) != CFBooleanGetTypeID(),(0...maximumSelection).contains(count.intValue),
+           selected.map({ NSMaxRange($0)<=count.intValue }) ?? true {
+            let (status,text)=string(field,range:NSRange(location:0,length:count.intValue))
+            if status == .success, let text,text.utf16.count==count.intValue {
+                if count.intValue>0 {values[index]=text as CFString}
+                else {
+                    // A zero-width slice is empty even in a nonempty editor.
+                    // Require independent evidence for the end of the range.
+                    let probe=string(field,range:NSRange(location:0,length:1))
+                    if probe.0 == .illegalArgument || probe.0 == .noValue || (probe.0 == .success && probe.1=="") {values[index]="" as CFString}
+                }
+            }
+        }
+        return Array(values.prefix(names.count))
+    }
+
+    static func read(_ field: AXUIElement, count: CFTypeRef?, selected: CFTypeRef?, preferred: Self? = nil) -> Observation? {
+        guard let caret = selection(selected) else { return nil }
+        guard let view = resolve(count: count.flatMap { CFGetTypeID($0)==CFBooleanGetTypeID() ? nil:($0 as? NSNumber)?.intValue }, selection: caret, preferred: preferred, read: { string(field, range: $0) }) else { return nil }
+        let after = InputFocusAccess.attributes(field, [kAXSelectedTextRangeAttribute, kAXNumberOfCharactersAttribute])
+        guard selection(after[0]) == caret, (count as? NSNumber)?.intValue == (after[1] as? NSNumber)?.intValue else { return nil }
+        return view
+    }
+
+    static func resolve(count: Int?, selection: NSRange, preferred: Self? = nil, read: (NSRange) -> (AXError, String?)) -> Observation? {
+        let at = selection.location, length = selection.length
+        guard at >= 0, length >= 0, length <= maximumSelection,
+              at <= Int.max - length - afterCaret * 2 else { return nil }
+        let end = at + length
+        if let count, count < end { return nil }
+        // Fixed omitted margins keep a run of new keys in the same coordinates.
+        var leading = max(0, at / beforeCaret - 1) * beforeCaret
+        var trailing = count.map { max(0, ($0 - end) / afterCaret - 1) * afterCaret }
+        if let preferred, preferred.leading <= at, at - preferred.leading <= beforeCaret * 3,
+           let count, let tail=preferred.trailing, tail <= count-end, count-end-tail <= afterCaret*3 {
+            leading=preferred.leading;trailing=tail
+        }
+        let right = count.flatMap { n in trailing.map { n - $0 - end } } ?? afterCaret
+        let local = NSRange(location: at - leading, length: length)
+        let minimum = end - leading
+        func fetch(_ right: Int) -> (AXError, String?) {
+            read(NSRange(location: leading, length: minimum + right))
+        }
+        let (error, value) = fetch(right)
+        func observation(_ value: String, _ omitted: Int?) -> Observation? {
+            guard value.utf16.count >= minimum, value.utf16.count <= minimum + right else { return nil }
+            return Observation(window: Self(leading: leading, trailing: omitted), text: value, selection: local)
+        }
+        if error == .success, let value {
+            let exact = value.utf16.count == minimum + right
+            guard exact || trailing == nil || trailing == 0 else { return nil }
+            return observation(value, exact ? trailing : 0)
+        }
+        // Some providers omit the count, or include a display-only terminal
+        // newline in it. Only an out-of-range reply can shorten this probe.
+        func boundary(_ result: AXError) -> Bool { result == .illegalArgument || result == .noValue }
+        guard right > 0, boundary(error), trailing == nil || trailing == 0 else { return nil }
+        var lo = 0, hi = right - 1
+        let first = fetch(0)
+        guard first.0 == .success, var best = first.1, best.utf16.count == minimum else { return nil }
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2
+            let (status, text) = fetch(mid)
+            if status == .success, let text, text.utf16.count == minimum + mid {
+                best = text; lo = mid
+            } else if boundary(status) { hi = mid - 1 }
+            else { return nil }
+        }
+        return observation(best, 0)
+    }
+}

@@ -100,7 +100,7 @@ final class OnsetFocusHandoff {
     }
     var batch:(AXUIElement,[String])->[CFTypeRef?] = { element,names in
         AXUIElementSetMessagingTimeout(element,0.003)
-        return InputFocusAccess.attributes(element,names)
+        return EditorTextWindow.preFocusAttributes(element,names:names)
     }
     var rangeText:(AXUIElement,CFRange)->(AXError,String?) = {element,range in
         AXUIElementSetMessagingTimeout(element,0.003)
@@ -185,7 +185,18 @@ final class OnsetFocusHandoff {
             observeSnapshot(.init(element:field,text:text,selection:NSRange(location:range.location,length:0)))
             return .recorded
         }
-        if observing{draftRead=captureDraft()}
+        if observing,text==nil,values[4] as? Bool==true,values[5] as? Bool==false,
+           let n=count,n>Double(EditorTextWindow.maximumSelection),let selected=EditorTextWindow.selection(values[3]),selected.length==0,
+           let actual=values[6],CFGetTypeID(actual)==AXUIElementGetTypeID(),CFEqual(actual,window),
+           ready(),let pid=frontPID(),owner(field)==pid,owner(window)==pid,
+           let view=EditorTextWindow.read(field,count:values[7],selected:values[3]),
+           now()-began<0.012,ready(),frontPID()==pid {
+            let draft=OnsetSnapshot(element:field,text:view.text,selection:view.selection,observation:view.window)
+            observeSnapshot?(draft)
+            readDraft?(draft)
+            if recording {rememberDraftEntry(draft,window:window)}
+            draftRead = .recorded
+        } else if observing{draftRead=captureDraft()}
         func observeRepresentation(){
             guard let text else{representationReason=4;return}
             guard !text.isEmpty,text.utf16.count<=4096 else{representationReason=5;return}

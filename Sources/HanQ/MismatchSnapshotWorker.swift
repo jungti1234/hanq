@@ -16,14 +16,14 @@ final class MismatchSnapshotWorker {
     private let incidentFocusProbe=InputIncidentFocusProbe()
     private let readOperation:((pid_t)->MismatchSnapshotResult)?
     init(read:((pid_t)->MismatchSnapshotResult)?=nil){readOperation=read}
-    func request(pid:pid_t,semantics:Bool=false,purpose:InputIncidentTrace.ReadPurpose = .unknown,completion:@escaping (MismatchSnapshotResult)->Void){
+    func request(pid:pid_t,semantics:Bool=false,local:Bool=false,preferred:EditorTextWindow?=nil,purpose:InputIncidentTrace.ReadPurpose = .unknown,completion:@escaping (MismatchSnapshotResult)->Void){
         let activity=InputIncidentTrace.shared.activityEpoch
         queue.async {
-            let result=self.readOperation?(pid) ?? Self.read(pid:pid,semantics:semantics,focusProbe:self.incidentFocusProbe,purpose:purpose,activityAtRequest:activity)
+            let result=self.readOperation?(pid) ?? Self.read(pid:pid,semantics:semantics,local:local,preferred:preferred,focusProbe:self.incidentFocusProbe,purpose:purpose,activityAtRequest:activity)
             DispatchQueue.main.async{completion(result)}
         }
     }
-    static func read(pid:pid_t,semantics:Bool=false,focusProbe:InputIncidentFocusProbe=InputIncidentFocusProbe(),purpose:InputIncidentTrace.ReadPurpose = .unknown,activityAtRequest:Int64?=nil)->MismatchSnapshotResult {
+    static func read(pid:pid_t,semantics:Bool=false,local:Bool=false,preferred:EditorTextWindow?=nil,focusProbe:InputIncidentFocusProbe=InputIncidentFocusProbe(),purpose:InputIncidentTrace.ReadPurpose = .unknown,activityAtRequest:Int64?=nil)->MismatchSnapshotResult {
         let began=ProcessInfo.processInfo.systemUptime
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX,purpose:purpose,activityAtRequest:activityAtRequest)
         var axResult=InputIncidentAXResult()
@@ -60,7 +60,7 @@ final class MismatchSnapshotWorker {
         guard let element=focused() else{return result(nil,"focused_element_unreadable")}
         let start=ProcessInfo.processInfo.systemUptime
         var values:CFArray?
-        let baseNames=[kAXRoleAttribute,kAXSubroleAttribute,kAXValueAttribute,kAXSelectedTextRangeAttribute]
+        let baseNames=[kAXRoleAttribute,kAXSubroleAttribute,local ? kAXNumberOfCharactersAttribute:kAXValueAttribute,kAXSelectedTextRangeAttribute]
         // One optional attribute batch on the existing bounded idle worker;
         // input callbacks never perform these supplemental IPCs or await it.
         let names=(baseNames + (collectSemantics ? ["AXPlaceholderValue",kAXTitleAttribute,kAXDescriptionAttribute,kAXNumberOfCharactersAttribute,kAXWindowAttribute]:[])) as CFArray
@@ -82,6 +82,19 @@ final class MismatchSnapshotWorker {
         }
         guard ["AXTextArea","AXTextField"].contains(role) else{return result(nil,"not_supported_text_field")}
         guard list[1] as? String != "AXSecureTextField" else{return result(nil,"secure_text_field")}
+        if local {
+            guard let view=EditorTextWindow.read(element,count:list[2],selected:list[3],preferred:preferred) else{return result(nil,"editor_coordinates_unverified")}
+            guard let final=focused(),CFEqual(element,final) else{return result(nil,"focus_changed_during_snapshot")}
+            var evidence:InputIncidentAXEvidence?,window:AXUIElement?
+            if collectSemantics,list.count>=9 {
+                if view.window == .entire {
+                    var measured=InputIncidentAXEvidence.attributes(list,value:view.text,verified:view.text,route:route)
+                    measured.0.representation=0 // AXValue was not requested.
+                    (evidence,window)=measured
+                } else if CFGetTypeID(list[8])==AXUIElementGetTypeID() {window=(list[8] as! AXUIElement)}
+            }
+            return result(MismatchSnapshot(element:element,text:view.text,selection:view.selection,observation:view.window,incidentAX:evidence,incidentWindow:window,incidentGeneration:diagnosticGeneration))
+        }
         guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{return result(nil,"text_unreadable")}
         let raw=list[3]
         guard CFGetTypeID(raw)==AXValueGetTypeID() else{return result(nil,"selection_unreadable")}

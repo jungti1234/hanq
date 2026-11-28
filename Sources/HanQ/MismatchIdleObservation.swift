@@ -23,7 +23,7 @@ extension MismatchRecoveryEngine {
         if let testIdleRead{testIdleRead(completion)}
         else{
             let idle=diagnosticBackgroundAllowed()
-            snapshotWorker.request(pid:pid,semantics:true,purpose:idle ? .background:.active,completion:completion)
+            snapshotWorker.request(pid:pid,semantics:true,local:true,preferred:observationWindow,purpose:idle ? .background:.active,completion:completion)
         }
     }
 }

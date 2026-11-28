@@ -4,7 +4,7 @@ import CoreFoundation
 // Track observed printable keys across digits/punctuation, including delayed AX batches.
 struct MismatchRecoveryPlan {
     var before: String
-    let caret: Int
+    var caret: Int
     var sourceID = KoreanKeyboardLayout.twoSetID
     var roman = ""
     // Only an exact rendering of the observed keys may set a mixed replacement.

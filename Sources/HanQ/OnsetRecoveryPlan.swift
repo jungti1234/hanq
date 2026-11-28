@@ -2,8 +2,8 @@ import Foundation
 
 // Pure detector: only a contiguous run created by observed physical letter keys.
 struct OnsetRecoveryPlan {
-    let before: String
-    let caret: Int
+    var before: String
+    var caret: Int
     var allowSingle=false
     var roman = ""
     var codes: [(UInt16, Bool)] = []

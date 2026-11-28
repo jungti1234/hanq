@@ -463,6 +463,7 @@ func runConfirmedReturnTests(firstLeft: String = "기존 내용을 그대로 둔
         seed = seed &* 6364136223846793005 &+ 1442695040888963407
         return values[Int((seed >> 32) % UInt64(values.count))]
     }
+    runLocalTypingWindowTests()
     checkMultilineHangulToEnglish()
     checkEndCaretAcrossRightCommands()
     checkMissingOutboundSyllable()

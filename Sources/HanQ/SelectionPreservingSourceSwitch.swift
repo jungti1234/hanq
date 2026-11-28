@@ -115,6 +115,16 @@ final class SelectionPreservingSourceSwitch {
     private var pendingSwitch:PendingSwitch?
     var isPending:Bool {pendingSwitch != nil}
     func cancelPending(){pendingSwitch=nil}
+    static func canReverseLeft(in text:String,at offset:Int)->Bool {
+        let s=text as NSString
+        guard offset>0,offset<=s.length else{return false}
+        if offset==s.length{return true}
+        // An adjacent Hangul or Latin letter has unambiguous left-to-right
+        // direction. At a bidi or paragraph boundary use the absolute range.
+        let next=s.character(at:offset)
+        return (0xAC00...0xD7A3).contains(next) || (65...90).contains(next) || (97...122).contains(next) || (48...57).contains(next)
+    }
+
     private func resumeSwitch(_ target:String)->OSStatus {
         guard let pending=pendingSwitch else{return -50}
         func stop(_ stage:Stage)->OSStatus {pendingSwitch=nil;trace(stage);return -50}
@@ -131,8 +141,8 @@ final class SelectionPreservingSourceSwitch {
             if Self.equal(selected, from) { return AXError.cannotComplete.rawValue }
             guard Self.equal(selected, to) else { return stop(.changedContext) }
             guard let verified = caretText(current, value, selected) else { return AXError.cannotComplete.rawValue }
-            let returnAtEnd = !pending.restoringCaret && pending.selected.location == expected.utf16.count
-            if returnAtEnd {
+            let nativeReturn = !pending.restoringCaret && Self.canReverseLeft(in:expected,at:pending.selected.location)
+            if nativeReturn {
                 guard let latest = range(current) else { return AXError.cannotComplete.rawValue }
                 guard Self.equal(latest, preceding) else { return stop(.changedContext) }
             }
@@ -148,10 +158,8 @@ final class SelectionPreservingSourceSwitch {
                 return status
             }
             trace(.collapsed)
-            if returnAtEnd {
-                // At the verified document end, undo exactly the editor's one-character
-                // Left with a native Right. Some editors accept an absolute AX range
-                // write without changing their actual insertion point.
+            if nativeReturn {
+                // The editor itself must acknowledge the one-step return.
                 guard postCursor(124, to: current, typedCaret: true) else { return stop(.restoreFailed) }
                 trace(.endCaretReturnPosted)
             } else {
@@ -185,8 +193,9 @@ final class SelectionPreservingSourceSwitch {
         guard allowed() else { return fallback(.permission) }
         guard let element = focus() else { return fallback(.missingFocus) }
         guard editable(element) else { return fallback(.unsupportedField) }
-        guard let original = text(element), original.utf16.count <= 16_384 else { return fallback(.missingText) }
         guard let selected = range(element) else { return fallback(.missingSelection) }
+        if selected.length == 0 && typedCaret == nil {return fallback(.emptySelection)}
+        guard let original = text(element), original.utf16.count <= 16_384 else { return fallback(.missingText) }
         if typedCaret != nil && selected.length != 0 {
             trace(.changedContext)
             return -50

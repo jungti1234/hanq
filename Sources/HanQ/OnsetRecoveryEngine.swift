@@ -2,7 +2,7 @@ import AppKit
 import Carbon
 
 let onsetKoreanID="com.apple.inputmethod.Korean.2SetKorean"
-struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var compositionEnded=false }
+struct OnsetSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var compositionEnded=false;var observation:EditorTextWindow?=nil }
 final class OnsetRecoveryEngine:NSObject {
     var diagnosticBackgroundAllowed:()->Bool = { false }
     var decisionTrace=InputIncidentTrace.shared
@@ -161,7 +161,7 @@ final class OnsetRecoveryEngine:NSObject {
         guard gateAcknowledged(now:now) else{resumeObservedAt=nil;resumeField=nil;return}
         observePassedIdentity()
         refreshAcknowledgedPassedBaseline()
-        guard currentLayout() != nil,let snap=snapshot(),snap.selection.length==0 else{
+        guard currentLayout() != nil,let snap=snapshot(local:true),snap.selection.length==0 else{
             resumeObservedAt=nil;resumeField=nil;return
         }
         guard let field=resumeField,CFEqual(field,snap.element),let since=resumeObservedAt else{
@@ -213,7 +213,7 @@ final class OnsetRecoveryEngine:NSObject {
     func publishPassedBaseline(_ snap:OnsetSnapshot?){
         guard enabled,!recovering,pending.isEmpty,!hasRetainedInputFromCurrentSession,prefixRemainder.isEmpty,
               let layout=currentLayout(),let snap,snap.selection.length==0 else{gate?.configurePassedBaseline(nil);return}
-        if let last=publishedPassedBaselines.last,CFEqual(last.snapshot.element,snap.element),InputFocusAccess.sameText(last.snapshot.text,snap.text),last.snapshot.selection==snap.selection {
+        if let last=publishedPassedBaselines.last,(last.snapshot.observation ?? .entire)==(snap.observation ?? .entire),CFEqual(last.snapshot.element,snap.element),InputFocusAccess.sameText(last.snapshot.text,snap.text),last.snapshot.selection==snap.selection {
             gate?.configurePassedBaseline(last.revision,sourceID:layout.sourceID);return
         }
         publishedPassedRevision+=1
@@ -284,7 +284,7 @@ final class OnsetRecoveryEngine:NSObject {
         let romanBaseline = fromOutside ? (observed ?? draft.flatMap{
             !$0.text.isEmpty && $0.selection.length==0 && $0.selection.location>=0
                 && $0.selection.location<=$0.text.utf16.count ? $0:nil
-        }):nil
+        }).flatMap{ ($0.observation ?? .entire)==(snap.observation ?? .entire) ? $0:nil }:nil
         if measure,fromOutside {
             if observed != nil{lookup = .entry}
             else if draft != nil && romanBaseline==nil{lookup = .unusable}
@@ -299,7 +299,7 @@ final class OnsetRecoveryEngine:NSObject {
             return detail
         }
         let baseline=publicationMatches ? nil:
-            passedBaseline.flatMap{CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
+            passedBaseline.flatMap{($0.observation ?? .entire)==(snap.observation ?? .entire) && CFEqual($0.element,snap.element) && $0.selection.length==0 ? $0:nil}
         // A terminal plain Space selects the committed-word strategy even
         // when a pre-key baseline could also prove an earlier split replay.
         let committedBoundary=p.keys.last.map{$0.0==49 && !$0.1} ?? false
@@ -436,7 +436,7 @@ final class OnsetRecoveryEngine:NSObject {
             guard observedEmptyEntry,let previous,CFEqual(previous.element,current.element),previous.text.isEmpty,previous.selection==NSRange(location:0,length:0) else{return nil}
             return ""
         }
-        guard let previous,CFEqual(previous.element,current.element),previous.selection.length == 0 else{return nil}
+        guard let previous,(previous.observation ?? .entire)==(current.observation ?? .entire),CFEqual(previous.element,current.element),previous.selection.length == 0 else{return nil}
         let length=previous.text.utf16.count
         if length>0,
            current.selection == NSRange(location:length+2,length:0),
@@ -604,6 +604,7 @@ final class OnsetRecoveryEngine:NSObject {
     var nextBufferedID:Int64=0
     var postedBuffered=0
     // Deterministic failure tests inject only the OS-facing operations.
+    var testObservation:(()->OnsetSnapshot?)?
     var testSnapshot:(()->OnsetSnapshot?)?
     var testCanSelect:(()->Bool)?
     var testCanReplaceText:(()->Bool)?
@@ -790,7 +791,7 @@ final class OnsetRecoveryEngine:NSObject {
         serviceFocusAccessibility()
         gate?.beat()
     }
-    func snapshot(purpose:InputIncidentTrace.ReadPurpose = .unknown)->OnsetSnapshot?{
+    func snapshot(purpose:InputIncidentTrace.ReadPurpose = .unknown,local:Bool=false)->OnsetSnapshot?{
         diagnosticRead=OnsetDiagnosticHistory.Read()
         let incidentRead=InputIncidentTrace.shared.beginRead(.onsetAX,purpose:purpose)
         var axResult=InputIncidentAXResult()
@@ -814,6 +815,7 @@ final class OnsetRecoveryEngine:NSObject {
             else if testSnapshot == nil {diagnosticRead=OnsetDiagnosticHistory.Read()}
             InputIncidentTrace.shared.endRead(.onsetAX,incidentRead,outcome:incidentMeasured ? .snapshot(unavailableReason):nil,focus:focus,axResult:allowed ? axResult:nil,applications:allowed ? focusRead?.applications:nil)
         }
+        if local,let testObservation{return testObservation()}
         if let testSnapshot{return testSnapshot()}
         unavailableReason="";incidentMeasured=incidentRead != nil
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
@@ -847,10 +849,16 @@ final class OnsetRecoveryEngine:NSObject {
                 unavailableReason="active_composition";return nil
             }
         }
-        let content=InputFocusAccess.attributes(element,[kAXValueAttribute,kAXSelectedTextRangeAttribute],observed:incidentMeasured ? {_,_,error in axResult.attribute(error)}:nil)
-        guard let text=content[0] as? String else{unavailableReason="text_unreadable";return nil}
-        guard let raw=content[1],CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
-        var range=CFRange();guard AXValueGetValue(raw as! AXValue,.cfRange,&range),range.location>=0,range.length>=0,range.location+range.length<=text.utf16.count else{unavailableReason="selection_invalid";return nil}
+        let content=InputFocusAccess.attributes(element,[local ? kAXNumberOfCharactersAttribute:kAXValueAttribute,kAXSelectedTextRangeAttribute],observed:incidentMeasured ? {_,_,error in axResult.attribute(error)}:nil)
+        guard let selected=EditorTextWindow.selection(content[1]) else{unavailableReason="selection_unreadable";return nil}
+        let text:String, range:NSRange, observation:EditorTextWindow?
+        if local {
+            guard let view=EditorTextWindow.read(element,count:content[0],selected:content[1]) else{unavailableReason="text_unreadable";return nil}
+            text=view.text;range=view.selection;observation=view.window
+        } else {
+            guard let value=content[0] as? String, NSMaxRange(selected)<=value.utf16.count else{unavailableReason="selection_invalid";return nil}
+            text=value;range=selected;observation=nil
+        }
         guard let after=focusedElement(ax,pid:target.processIdentifier),CFEqual(element,after) else{unavailableReason="focus_changed_during_snapshot";return nil}
         if InputIncidentTrace.shared.enabled {
             let trace=InputIncidentTrace.shared
@@ -859,7 +867,7 @@ final class OnsetRecoveryEngine:NSObject {
             let change=incidentShapeProbe.observe(identity:identity,text:text,selection:NSRange(location:range.location,length:range.length),generation:trace.collectionGeneration,ax:evidence,correlation:trace.shapeCorrelation,activity:trace.activityEpoch)
             trace.shape(.onsetAX,identity:identity,count:text.utf16.count,selected:range.length>0,editing:recovering,change:change,applications:.init(target:target.processIdentifier,owner:target.processIdentifier))
         } else {incidentShapeProbe.reset()}
-        return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length),compositionEnded:markedRangeState == .empty)
+        return OnsetSnapshot(element:element,text:text,selection:NSRange(location:range.location,length:range.length),compositionEnded:markedRangeState == .empty,observation:observation)
     }
     func observeAvailability(_ snap:OnsetSnapshot?){
         let availability=snap == nil ? unavailableReason : "tracking"
@@ -952,7 +960,7 @@ final class OnsetRecoveryEngine:NSObject {
             return
         }
         let idle=diagnosticBackgroundAllowed()
-        let observed=snapshot(purpose:idle ? .background:.active);traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
+        let observed=snapshot(purpose:idle ? .background:.active,local:true);traceReentryObservation(observed == nil ? unavailableReason:"tracking",hasSnapshot:observed != nil);observeAvailability(observed)
         if decisionTrace.enabled,!IsSecureEventInputEnabled(),!["secure_input","secure_field","secure_text_field","accessibility_permission"].contains(unavailableReason) {
             let passed=gate?.passedObservation()
             var runtime=InputIncidentTrace.OnsetRuntime()
@@ -970,6 +978,18 @@ final class OnsetRecoveryEngine:NSObject {
     }
 
     func beginRecovery(_ candidate:OnsetRecoveryPlan,_ snap:OnsetSnapshot,deferred:OnsetInputGate.Reservation?=nil,passed:OnsetInputGate.PassedInput?=nil){
+        if let window=snap.observation {
+            guard candidate.matches(text:snap.text,selection:snap.selection),
+                  let full=snapshot(),full.observation==nil,CFEqual(full.element,snap.element),
+                  let before=window.expanding(candidate.before,observed:snap.text,selection:snap.selection,
+                                              full:full.text,fullSelection:full.selection) else{return}
+            var absolute=candidate
+            absolute.before=before
+            absolute.caret += window.leading
+            absolute.prefixOriginalCaret=candidate.prefixOriginalCaret.map { $0 + window.leading }
+            beginRecovery(absolute,full,deferred:deferred,passed:passed)
+            return
+        }
         guard canBeginRepair() else{onset.cancel();emergencyStop("manual_edit_busy");return}
         committedNativeIssued=false;prefixCaretRestoring=false
         if candidate.isSettledPrefix {

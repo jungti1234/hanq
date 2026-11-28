@@ -11,6 +11,7 @@ final class OnsetOutsideObservation {
     private var nextCycle=0.0
     var clock:()->Double = { ProcessInfo.processInfo.systemUptime }
     var read:(AXUIElement,String)->CFTypeRef? = { element,name in
+        if name==kAXValueAttribute{return EditorTextWindow.preFocusAttributes(element,names:[name])[0]}
         var value:CFTypeRef?
         AXUIElementSetMessagingTimeout(element,0.003)
         guard AXUIElementCopyAttributeValue(element,name as CFString,&value) == .success else{return nil}
@@ -61,7 +62,12 @@ final class OnsetOutsideObservation {
             guard let role=read(node,kAXRoleAttribute) as? String else{continue}
             if OnsetEditableRole.supports(role) {
                 guard read(node,kAXSubroleAttribute) as? String != kAXSecureTextFieldSubrole else{continue}
-                guard let text=read(node,kAXValueAttribute) as? String,text.utf16.count<=16384 else{continue}
+                let small=read(node,kAXValueAttribute) as? String
+                if small==nil,let view=EditorTextWindow.read(node,count:read(node,kAXNumberOfCharactersAttribute),selected:read(node,kAXSelectedTextRangeAttribute)),view.selection.length==0,view.window != .entire {
+                    remember(.init(element:node,text:view.text,selection:view.selection,observation:view.window),window:newRoot)
+                    continue
+                }
+                guard let text=small,text.utf16.count<=16384 else{continue}
                 // Unfocused fields may omit their cursor. Unknown is not zero:
                 // only a full surrounding-text match can use this observation.
                 // The focused, post-key snapshot still requires a valid caret.

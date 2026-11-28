@@ -13,6 +13,7 @@ swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache \
     Sources/HanQ/{CommandFilter,JamoComposer,KoreanKeyboardLayout,SafariInputActivation}.swift \
     Sources/HanQ/{SourceSwitchBarrier,SelectionPreservingSourceSwitch,RightCommandLayoutDiagnostics}.swift \
     Tools/InputTestRecorder/RecorderCore.swift Tests/SourceSwitchBarrier/ConfirmedReturnTests.swift \
+    Tests/SourceSwitchBarrier/LocalTypingWindowTests.swift \
     Tests/Diagnostics/RightCommandLayout/main.swift -o "$stage/layout-tests"
 hanq_test_run "$stage/layout-tests"
 manual=$(cat "$stage/manual-name")

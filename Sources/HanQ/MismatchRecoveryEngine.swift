@@ -2,7 +2,7 @@ import AppKit
 import Carbon
 
 let mismatchKoreanID="com.apple.inputmethod.Korean.2SetKorean"
-struct MismatchSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var selectedText:String?=nil;var incidentAX:InputIncidentAXEvidence?=nil;var incidentWindow:AXUIElement?=nil;var incidentGeneration:Int32?=nil }
+struct MismatchSnapshot { let element:AXUIElement;let text:String;let selection:NSRange;var selectedText:String?=nil;var observation:EditorTextWindow?=nil;var incidentAX:InputIncidentAXEvidence?=nil;var incidentWindow:AXUIElement?=nil;var incidentGeneration:Int32?=nil }
 final class MismatchRecoveryEngine:NSObject {
     var sourceEvidence:MismatchSourceEvidence?
     private var deferredCandidateEpoch:Int?
@@ -218,6 +218,7 @@ final class MismatchRecoveryEngine:NSObject {
     var currentPlan:MismatchRecoveryPlan?
     private var incidentShapeProbe=InputIncidentShapeProbe()
     var lastText:String?
+    var observationWindow = EditorTextWindow.entire
     var lastSampleSnapshot:MismatchSnapshot?
     var unavailableReason=""
     var lastAvailability=""
@@ -237,6 +238,7 @@ final class MismatchRecoveryEngine:NSObject {
     var nextBufferedID:Int64=0
     var postedBuffered=0
     // Deterministic failure tests inject only the OS-facing operations.
+    var testObservation:(()->MismatchSnapshot?)?
     var testSnapshot:(()->MismatchSnapshot?)?
     var testSetRange:((AXUIElement,NSRange)->AXError)?
     var testSource:(()->String)?
@@ -413,7 +415,7 @@ final class MismatchRecoveryEngine:NSObject {
     static func supportsSnapshotRole(_ role:String,includeContent:Bool,allowComboBox:Bool)->Bool {
         ["AXTextArea","AXTextField"].contains(role) || (allowComboBox && includeContent && role=="AXComboBox")
     }
-    func snapshot(includeContent:Bool=true,allowComboBox:Bool=false,observeOutsideWindow:((pid_t,AXUIElement)->Void)?=nil)->MismatchSnapshot?{
+    func snapshot(includeContent:Bool=true,allowComboBox:Bool=false,local:Bool=false,preferred:EditorTextWindow?=nil,observeOutsideWindow:((pid_t,AXUIElement)->Void)?=nil)->MismatchSnapshot?{
         let incidentRead=InputIncidentTrace.shared.beginRead(.mismatchAX)
         var axResult=InputIncidentAXResult()
         let oldResultObserver=focusAccess.observeResult
@@ -437,6 +439,7 @@ final class MismatchRecoveryEngine:NSObject {
             activeSnapshotID=previousID
             lastCompletedSnapshotID=id
         }
+        if local,let testObservation{return testObservation()}
         if let testSnapshot{return testSnapshot()}
         unavailableReason="";incidentMeasured=incidentRead != nil
         guard AXIsProcessTrusted() else{unavailableReason="accessibility_permission";return nil}
@@ -452,7 +455,7 @@ final class MismatchRecoveryEngine:NSObject {
             unavailableReason=focusAccess.lastOwner==target.processIdentifier ? "focused_element_unreadable":"target_not_frontmost";return nil
         }
         // Fetch one coherent attribute batch instead of four synchronous IPCs.
-        let names=(includeContent ? [kAXRoleAttribute,kAXSubroleAttribute,kAXValueAttribute,kAXSelectedTextRangeAttribute] : [kAXRoleAttribute,kAXSubroleAttribute]) as CFArray
+        let names=(includeContent ? [kAXRoleAttribute,kAXSubroleAttribute,local ? kAXNumberOfCharactersAttribute:kAXValueAttribute,kAXSelectedTextRangeAttribute] : [kAXRoleAttribute,kAXSubroleAttribute]) as CFArray
         var values:CFArray?
         let began=ProcessInfo.processInfo.systemUptime
         if traceLatency{log("attributes_query_started",["snapshotID":id,"includeContent":includeContent,"uptime":began])}
@@ -471,6 +474,11 @@ final class MismatchRecoveryEngine:NSObject {
         }
         guard list[1] as? String != "AXSecureTextField" else{unavailableReason="secure_text_field";return nil}
         if !includeContent{return MismatchSnapshot(element:element,text:"",selection:NSRange(location:0,length:0))}
+        if local {
+            guard let view=EditorTextWindow.read(element,count:list[2],selected:list[3],preferred:preferred) else{unavailableReason="editor_coordinates_unverified";return nil}
+            guard let after=focusedElement(ax,pid:target.processIdentifier),CFEqual(element,after) else{unavailableReason="focus_changed_during_snapshot";return nil}
+            return MismatchSnapshot(element:element,text:view.text,selection:view.selection,observation:view.window)
+        }
         guard let text=MismatchTextReader.value(element,batchValue:list[2]) else{unavailableReason="text_unreadable";return nil}
         let raw=list[3]
         guard CFGetTypeID(raw)==AXValueGetTypeID() else{unavailableReason="selection_unreadable";return nil}
@@ -708,7 +716,7 @@ final class MismatchRecoveryEngine:NSObject {
         }
         // sample() already read this callback's pre-insertion state. No edit or
         // event delivery occurred between that read and this decision.
-        let observed=sampled ?? snapshot();observeAvailability(observed)
+        let observed=sampled ?? snapshot(local:true,preferred:observationWindow);observeAvailability(observed)
         guard let snap=observed else{
             incidentTrace.decision(.event,.snapshotUnavailable,event:event)
             // A new untracked event breaks the exact key sequence. Sampling-only
@@ -725,10 +733,11 @@ final class MismatchRecoveryEngine:NSObject {
         if type == .keyDown{
             let disallowed=event.flags.intersection([.maskCommand,.maskControl,.maskAlternate])
             guard MismatchKeyboardLayout.supports(currentSource()),disallowed.isEmpty,
-                  let candidate=MismatchRecoveryPlan.next(previous:plan,text:snap.text,selection:snap.selection,
+                  let candidate=MismatchRecoveryPlan.next(previous:observationWindow == (snap.observation ?? .entire) ? plan:nil,text:snap.text,selection:snap.selection,
                     code:UInt16(event.getIntegerValueField(.keyboardEventKeycode)),shift:event.flags.contains(.maskShift),sourceID:currentSource()) else{
                 plan=nil;incidentTrace.decision(.event,.candidateRejectedKey,event:event);log("candidate_cancelled",["reason":"non_korean_or_non_printable_or_selection"]);return Unmanaged.passUnretained(event)
             }
+            observationWindow=snap.observation ?? .entire
             plan=candidate;planElement=snap.element;planStart=ProcessInfo.processInfo.systemUptime
             log("candidate_recorded")
             incidentTrace.decision(.event,.candidateRecorded,event:event)
@@ -755,7 +764,7 @@ final class MismatchRecoveryEngine:NSObject {
         if !synchronous,(testSnapshot==nil || testIdleRead != nil) {
             requestIdleSnapshot();return
         }
-        consumeIdleSnapshot(snapshot(),allowPrior:beforeKey)
+        consumeIdleSnapshot(snapshot(local:true,preferred:observationWindow),allowPrior:beforeKey)
     }
     func consumeIdleSnapshot(_ observed:MismatchSnapshot?,allowPrior:Bool=false) {
         // A queued AX reply can arrive after the source changed. Apply the same
@@ -763,6 +772,9 @@ final class MismatchRecoveryEngine:NSObject {
         if enabled,!suspended,!recovering,skipRomanObservation(){return}
         observeAvailability(observed)
         guard let snap=observed else{resetCompositionObservation();incidentTrace.decision(.sample,.snapshotUnavailable);return}
+        let coordinates=snap.observation ?? .entire
+        if observationWindow != coordinates { plan=nil; resetCompositionObservation() }
+        observationWindow=coordinates
         lastSampleSnapshot=snap
         sourceChanged(currentSource(),snap)
         plan?.observeSelectionReplacement(text:snap.text,selection:snap.selection)
@@ -837,6 +849,21 @@ final class MismatchRecoveryEngine:NSObject {
         wait(2);return false
     }
     func beginRecovery(_ candidate:MismatchRecoveryPlan,_ snap:MismatchSnapshot,reason:InputIncidentTrace.RecoveryReason = .unspecifiedMismatch){
+        if let window=snap.observation {
+            guard candidate.matches(text:snap.text,selection:snap.selection),
+                  let full=snapshot(),full.observation==nil,CFEqual(full.element,snap.element),
+                  let before=window.expanding(candidate.before,observed:snap.text,selection:snap.selection,
+                                              full:full.text,fullSelection:full.selection) else{return}
+            var absolute=candidate
+            absolute.before=before
+            absolute.caret += window.leading
+            absolute.pendingCompletion=nil
+            absolute.pendingSelectionReplacement=nil
+            if absolute.hasAmbiguousLatinInput(absolute.roman),
+               verifiedReturnedASCII?(candidate,snap,true)==nil {return}
+            beginRecovery(absolute,full,reason:reason)
+            return
+        }
         guard canBeginRepair() else{incidentTrace.decision(.repair,.repairBlocked);return}
         guard MismatchKeyboardLayout.supports(candidate.sourceID) else{incidentTrace.decision(.repair,.repairSourceUnsupported);return}
         guard candidate.matches(text:snap.text,selection:snap.selection) else{incidentTrace.decision(.repair,.repairTextMismatch);return}

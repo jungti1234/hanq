@@ -314,16 +314,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.inputSourceEvidence.didCommit(id,at:timestamp)
             InputIncidentTrace.shared.sourceEvidence(.committed,self.inputSourceEvidence.diagnostic(selected:id))
         }
-        let read:(((pid_t,AXUIElement)->Void)?)->SourceSwitchBarrier.Snapshot? = { [weak self] observe in
+        let read:(Bool,((pid_t,AXUIElement)->Void)?)->SourceSwitchBarrier.Snapshot? = { [weak self, weak barrier] whole,observe in
             guard let self,self.inputPermissionReady,!self.updateRestricted,!IsSecureEventInputEnabled() else{return nil}
             self.mismatchRecovery.engine.followFrontmost()
-            guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true,observeOutsideWindow:observe) else{return nil}
-            return SourceSwitchBarrier.Snapshot(field:snap.element,text:snap.text,selection:snap.selection)
+            guard let snap=self.mismatchRecovery.engine.snapshot(allowComboBox:true,local:!whole,preferred:barrier?.ledgerWindow,observeOutsideWindow:observe) else{return nil}
+            return SourceSwitchBarrier.Snapshot(field:snap.element,text:snap.text,selection:snap.selection,window:snap.observation ?? .entire)
         }
-        barrier.read={read(nil)}
+        barrier.read={ [weak barrier] in read(barrier?.requiresCompleteSelection ?? false,nil) }
+        barrier.readForSelection={read(true,nil)}
         barrier.readForOutsideSwitch={
             var origin:(pid_t,AXUIElement)?
-            let editor=read{origin=($0,$1)}
+            let editor=read(false){origin=($0,$1)}
             return (editor,origin)
         }
         barrier.ready = { [weak self] in
@@ -337,7 +338,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         barrier.select = { [weak self] target in self?.selectionSourceSwitch.select(target,asynchronous:true) ?? -50 }
         barrier.selectAfterTypedHangul = { [weak self] target,snapshot in
-            self?.selectionSourceSwitch.select(target,asynchronous:true,typedCaret:.init(field:snapshot.field,text:snapshot.text,offset:snapshot.selection.location)) ?? -50
+            guard let self else{return -50}
+            if self.selectionSourceSwitch.isPending{return self.selectionSourceSwitch.select(target,asynchronous:true)}
+            guard let full=read(true,nil),CFEqual(snapshot.field,full.field),
+                  snapshot.window.expanding(snapshot.text,observed:snapshot.text,selection:snapshot.selection,
+                                            full:full.text,fullSelection:full.selection) != nil else{return -50}
+            return self.selectionSourceSwitch.select(target,asynchronous:true,typedCaret:.init(field:full.field,text:full.text,offset:full.selection.location))
         }
         barrier.webActivation = { [weak self] target, field in self?.safariActivation.select(target, field: field) }
         barrier.webActivationLimit = { [weak self] in self?.safariActivation.pendingLimit }

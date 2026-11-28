@@ -23,7 +23,7 @@ extension OnsetRecoveryEngine {
         }
     }
     func sampleSettledPrefix(_ p:OnsetInputGate.PassedInput,_ snap:OnsetSnapshot)->Bool {
-        guard settledPrefixEnabled,settledPrefixPublication?.matches(p,snap)==true else{return false}
+        guard settledPrefixEnabled,(snap.observation ?? .entire) == .entire,settledPrefixPublication?.matches(p,snap)==true else{return false}
         // Empty marked ranges and elapsed idle time do not prove Korean commit.
         // Wait for the user's actual terminal Space and the exact complete body.
         guard p.keys.last?.0==49 else{return true}
