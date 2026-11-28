@@ -75,6 +75,9 @@ final class MismatchRecoveryEngine:NSObject {
     }
     private var eventOrigins:[Int64:EventOrigin]=[:]
     private var nextOrigin:Int64=0
+    var diagnosticSwitchRequested: ((String, CGEventTimestamp, Bool) -> Void)?
+    var diagnosticSwitchConfirmed: ((String, CGEventTimestamp) -> Void)?
+    var diagnosticFirstKey: ((CGEventType, CGEvent, CGEventTimestamp) -> Void)?
     var willForwardEvent:(CGEventType,CGEvent)->Void = {_,_ in}
     @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent,at capturedTimestamp:CGEventTimestamp?=nil,shiftArrival:InputIncidentTrace.ShiftArrival?=nil)->Int64? {
         let timestamp=capturedTimestamp ?? event.timestamp
@@ -82,6 +85,7 @@ final class MismatchRecoveryEngine:NSObject {
         let incoming=event.getIntegerValueField(.eventSourceUserData)
         guard type == .keyDown || type == .keyUp || type == .flagsChanged,
               incoming==0 || InputDeliveryOrigin.isMarker(incoming) else{return nil}
+        diagnosticFirstKey?(type, event, timestamp)
         willForwardEvent(type,event)
         nextOrigin+=1
         let token=InputDeliveryOrigin.isMarker(incoming) ? incoming:(0x4851455600000000 | nextOrigin)
@@ -101,6 +105,9 @@ final class MismatchRecoveryEngine:NSObject {
     func discardEventOrigin(_ token:Int64){eventOrigins.removeValue(forKey:token)}
     func diagnosticShiftArrival(_ type: CGEventType, _ event: CGEvent) -> InputIncidentTrace.ShiftArrival? {
         origin(type, event)?.shiftArrival
+    }
+    func originalTimestamp(_ type: CGEventType, _ event: CGEvent) -> CGEventTimestamp {
+        origin(type, event)?.timestamp ?? event.timestamp
     }
     private func origin(_ type:CGEventType,_ event:CGEvent)->EventOrigin? {
         guard let value=eventOrigins[event.getIntegerValueField(.eventSourceUserData)],value.code==event.getIntegerValueField(.keyboardEventKeycode),value.type==type else{return nil}
@@ -140,10 +147,11 @@ final class MismatchRecoveryEngine:NSObject {
             }
         }
     }
-    func userToggleDuringRecovery(at timestamp:CGEventTimestamp=0){
+    func userToggleDuringRecovery(at timestamp:CGEventTimestamp=0, rightCommand:Bool=true){
         guard recovering else{return}
         noteUserSourceSwitch(at:timestamp)
-        setUserSourceIntent(toggledUserSource(intendedSource),at:timestamp)
+        let target = toggledUserSource(intendedSource)
+        setUserSourceIntent(target,at:timestamp,rightCommand:rightCommand)
         cancelExternalSourceSettlement();resumeDeferredSourceWork()
         log("user_source_boundary",["source":intendedSource,"afterBufferedID":nextBufferedID,"origin":"right_command"])
     }
@@ -1167,6 +1175,9 @@ final class MismatchRecoveryEngine:NSObject {
                 log("delivery_source_direct_fallback",["target":nextSource,"result":result])
             }
             later(0.01){[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts-1)};return
+        }
+        if nextSource == intendedSource, let boundary = recoverySourceBoundaries.last, boundary.source == nextSource {
+            diagnosticSwitchConfirmed?(nextSource, boundary.timestamp)
         }
         if queuedSelectAll {
             guard snap.text==queuedSelectAllText else{park("select_all_context_changed");return}

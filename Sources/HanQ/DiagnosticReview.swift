@@ -751,6 +751,23 @@ final class DiagnosticReviewSnapshot {
         var coverage = [DiagnosticReviewField(label: "기록 당시 앱 빌드", value: build),
                         .init(label: "캐시된 손쉬운 사용 권한", value: permission),
                         field("최근 관측 덮어쓰기 수", object["discardedOldFrames"])]
+        if let raw = object["rightCommandLayouts"] {
+            guard let records = DiagnosticSwitchLayout.parse(raw) else { throw DiagnosticReviewError.invalidCapture }
+            func description(_ sample: DiagnosticLayoutSample) -> String {
+                let selected = sample.selected == sample.selectedAfter ? sample.selected.label : sample.selected.label + " → " + sample.selectedAfter.label
+                return "소스 " + selected + " · 배열 " + sample.layout.label + " · 재지정 " + sample.overrideLayout.label
+            }
+            for record in records.reversed() {
+                let first: String
+                if let key = record.firstKey {
+                    let ms = Double(key.observedMicros - record.commit.observedMicros) / 1000
+                    first = String(format: "첫 키 +%.1fms ", ms) + description(key)
+                } else {
+                    first = record.outcome == .superseded ? "첫 키 전 재전환" : "첫 키 미관측"
+                }
+                coverage.append(.init(label: "우측 Command #\(record.id)", value: "전환 직후 " + description(record.commit) + " / " + first))
+            }
+        }
         if let sample = object["keyboardOrigin"] as? [String: Any], let status = integer(sample["status"]) {
             let names = [1: "조회 가능", 2: "입력 모니터링 권한 필요", 3: "내장 키보드 식별 불가",
                          4: "장치 열기 실패", 5: "관측 공백"]

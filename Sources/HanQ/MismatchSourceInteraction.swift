@@ -40,8 +40,13 @@ extension MismatchRecoveryEngine {
         if let timestamp=CGEvent(source:nil)?.timestamp,timestamp>0{return timestamp}
         return CGEventTimestamp(ProcessInfo.processInfo.systemUptime*1_000_000_000)
     }
-    func setUserSourceIntent(_ source:String,at timestamp:CGEventTimestamp) {
+    func setUserSourceIntent(_ source:String,at timestamp:CGEventTimestamp,rightCommand:Bool=false) {
         guard recovering else{return}
+        // Caps/menu changes also end an older right-Command observation. A late
+        // notification for an earlier boundary cannot supersede the newer one.
+        if timestamp == 0 || timestamp >= (recoverySourceBoundaries.last?.timestamp ?? 0) {
+            diagnosticSwitchRequested?(source, timestamp, rightCommand)
+        }
         guard supportsRecoverySource(source) else{park("unsupported_external_source");return}
         if MismatchKeyboardLayout.supports(source){lastIntendedKorean=source}else{englishID=source}
         intendedSource=source

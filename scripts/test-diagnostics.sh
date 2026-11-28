@@ -71,6 +71,7 @@ assert [h['stage'] for h in r['hud']]==['requested','ordered','first_appkit_draw
 print('PASS switch timeline end-to-end summary; selection/drawing are not IME receipt')
 PY
 
+bash scripts/test-right-command-layout.sh
 swiftc -D HANQ_DIAGNOSTIC_TESTING -module-cache-path .build/hanq/module-cache Sources/HanQ/DiagnosticArchiveFormat.swift Tests/Support/LegacyDiagnosticFixture.swift Sources/HanQ/InputDiagnostics.swift Sources/HanQ/DiagnosticSharedStorage.swift Tools/InputTestRecorder/RecorderCore.swift Tests/Diagnostics/Export/main.swift -o "$stage/export-tests"
 hanq_test_run "$stage/export-tests"
 

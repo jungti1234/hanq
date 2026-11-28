@@ -331,7 +331,7 @@ struct RecorderObservationDelivery: Codable {
         switch operation {
         case 1:return [1,2,3,5,6,7].contains(detail) || (code/32%8 < 2 && (9...11).contains(detail))
         case 5:return (1...8).contains(detail)
-        case 6:return detail==0 || (code/32%8==3 && ((1...7).contains(detail) || detail==31)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...21).contains(detail)) || (code/32%8==2 && ((17...20).contains(detail) || detail==22))
+        case 6:return detail==0 || (code/32%8==3 && ((1...7).contains(detail) || detail==31)) || (code/32%8<3 && (8...12).contains(detail)) || (code/32%8==1 && (17...22).contains(detail)) || (code/32%8==2 && ((17...20).contains(detail) || detail==22))
         case 7:return (1...31).contains(detail) || (detail==0 && code/32%8==7)
         case 8:return detail==0 || (legacyBoundary && code/32%8==0 && detail<=6)
         case 10:return (0...15).contains(detail) || detail==17 || (24...31).contains(detail)
@@ -459,6 +459,7 @@ struct RecorderMonitorStatus:Codable {
     }
 }
 struct RecorderTrace: Codable {
+    var rightCommandLayouts:[DiagnosticSwitchLayout]?=nil
     var applicationInfo:DiagnosticApplicationSnapshot?=nil
     var coverage:[String:Int]?=nil
     let schema: Int
@@ -552,8 +553,9 @@ struct RecorderTrace: Codable {
     static func decode(_ data: Data) throws -> RecorderTrace {
         guard data.count <= 16 * 1024 * 1024,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog","keyboardOrigin","coverage","applicationInfo"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
+              Set(object.keys).subtracting(["decisionDelivery","observationDelivery","captureTiming","storageBeforeWrite","runID","clockOriginMicros","recoveryFailures","monitorStatus","shapeBaselines","capturePreservation","captureBacklog","keyboardOrigin","coverage","applicationInfo","rightCommandLayouts"]) == Set(["schema", "build", "bestEffort", "appReceiptVerified", "correlationIsHeuristic", "lossCountersMayLag", "skippedEvents", "skippedAuxiliary", "trigger", "incident", "phase", "discardedOldFrames", "frames"]),
               let rows = object["frames"] as? [[String: Any]], rows.count <= 16384 else { throw RecorderError.invalidTrace }
+        if let raw=object["rightCommandLayouts"],DiagnosticSwitchLayout.parse(raw)==nil {throw RecorderError.invalidTrace}
         if let raw=object["applicationInfo"],DiagnosticApplicationSnapshot.parse(raw)==nil {throw RecorderError.invalidTrace}
         if let raw = object["keyboardOrigin"] {
             func integer(_ raw: Any?, in range: ClosedRange<Int>) -> Int? {

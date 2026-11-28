@@ -220,6 +220,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.engine.didProcessEvent = { [weak self] type,event,passed in
             self?.sourceSwitchBarrier.confirmDelivery(type,event,passed:passed)
         }
+        controller.engine.diagnosticSwitchRequested = { [weak self] target, stamp, rightCommand in
+            self?.rightCommandLayouts.requested(target, at: stamp, rightCommand: rightCommand)
+        }
+        controller.engine.diagnosticSwitchConfirmed = { [weak self] target, stamp in
+            self?.rightCommandLayouts.confirmed(target, at: stamp)
+        }
+        controller.engine.diagnosticFirstKey = { [weak self] type, event, stamp in
+            self?.rightCommandLayouts.firstKey(type, event, at: stamp)
+        }
         controller.engine.willForwardEvent = { [weak self] type,event in
             self?.sourceSwitchBarrier.beginRepairBoundary(type,event)
         }
@@ -257,9 +266,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.trace = { stage in InputDiagnostics.shared.record("switch.selection.stage=\(stage.rawValue)") }
         return controller
     }()
+    lazy var rightCommandLayouts = RightCommandLayoutDiagnostics(textFlags: { [weak self] flags in
+        guard var filter = self?.filter, filter.consuming else { return flags }
+        return filter.process(type: .keyDown, key: -1, flags: flags, acceptNewPress: false).flags
+    })
     lazy var sourceSwitchBarrier: SourceSwitchBarrier = {
         let barrier=SourceSwitchBarrier()
         barrier.sourceEvidence=self.inputSourceEvidence
+        barrier.recordDiagnosticSwitchRequest = { [weak self] target, stamp, rightCommand in
+            self?.rightCommandLayouts.requested(target, at: stamp, rightCommand: rightCommand)
+        }
+        barrier.recordDiagnosticSwitchCommit = { [weak self] target, stamp in
+            self?.rightCommandLayouts.confirmed(target, at: stamp)
+        }
         barrier.inspectReturnSurface = { kind, snap, window, deadline, done in
             MismatchPlaceholderReader.request(kind, field:snap.field, window:window, text:snap.text,
                                               selection:snap.selection, until:deadline, completion:done)
@@ -604,6 +623,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         inputSource.onChange = { [weak self] snapshot in
             guard let self else { return }
+            if !self.mismatchRecovery.engine.recovering { self.rightCommandLayouts.sourceChanged(to: snapshot?.id) }
             if let snapshot{self.mismatchRecovery.engine.observeRecoverySource(snapshot.id)}
             self.jamoRepair.inputSourceDidChange()
             self.sourceObservations += 1
@@ -777,7 +797,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if mismatchRecovery.busy {
             var evidence=InputIncidentControl();evidence.route=InputIncidentControl.Route.recoveryRedirect.rawValue;evidence.runtime=64
             InputIncidentTrace.shared.control(.main,.flagsChanged,nil,evidence)
-            mismatchRecovery.engine.userToggleDuringRecovery(at: timestamp)
+            mismatchRecovery.engine.userToggleDuringRecovery(at: timestamp, rightCommand: rightCommand)
             return noErr
         }
         // Requesting a boundary does not change the source yet. Keep the
@@ -863,6 +883,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         control?.route=(event.getIntegerValueField(.eventSourceUserData)==SyntheticInputMarker.manualEdit ? InputIncidentControl.Route.manualMarker:.replayMarker).rawValue
                         return Unmanaged.passUnretained(event)
                     }
+                    owner.rightCommandLayouts.firstKey(type, event, at: owner.mismatchRecovery.engine.originalTimestamp(type, event))
                     let originalRecipient=owner.inputDeliveryOrigin?.take(type,event)
                     func forwardOriginalIfMoved()->Bool {
                         guard let routing=owner.inputDeliveryOrigin else{return false}
@@ -1105,6 +1126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func stopMapping(afterIdleTimeout:Bool=false,keepPermissionMonitor:Bool=false,recordIdleBoundaryFailure:Bool=true) {
         timeoutRestart?.cancel();timeoutRestart=nil
         explicitTapStop=false
+        rightCommandLayouts.reset()
         inputDeliveryOrigin?.stop();inputDeliveryOrigin=nil
         if !freshPermissionGate.allowsInput {
             // Complete only releases for downs already posted by this process.

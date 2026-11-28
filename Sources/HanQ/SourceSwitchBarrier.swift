@@ -6,6 +6,8 @@ import Carbon
 final class SourceSwitchBarrier {
     var sourceEvidence:MismatchSourceEvidence?
     private var deferredHistoryEpoch:Int?
+    var recordDiagnosticSwitchRequest: ((String, CGEventTimestamp, Bool) -> Void)?
+    var recordDiagnosticSwitchCommit: ((String, CGEventTimestamp) -> Void)?
     var didConfirmSource:(String,CGEventTimestamp)->Void = {_,_ in}
     var incidentTrace=InputIncidentTrace.shared
     var diagnostic:(InputIncidentTrace.BoundaryEvidence)->Void = {_ in}
@@ -96,6 +98,7 @@ final class SourceSwitchBarrier {
     }
 
     func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp,prior:SwitchWindow?=nil) {
+        recordDiagnosticSwitchCommit?(id, timestamp)
         unfocusedSwitch=nil
         guard id==KoreanKeyboardLayout.twoSetID,timestamp != 0,let pid=frontPID() else{return}
         let began=now(),current=frontWindow(pid)
@@ -1000,6 +1003,7 @@ final class SourceSwitchBarrier {
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,rightCommand:Bool=false,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
+        recordDiagnosticSwitchRequest?(id, timestamp, rightCommand)
         returningWithMissingSyllable = false
         returnReceipt = nil
         requestedReturnFromABC = rightCommand && timestamp != 0 && MismatchKeyboardLayout.supports(id)
@@ -1208,6 +1212,7 @@ final class SourceSwitchBarrier {
             let snap=switchSnapshot!;switchSnapshot=nil
             let committedTimestamp = targetTimestamp
             let confirmedUserRequest=targetTimestamp != 0
+            recordDiagnosticSwitchCommit?(target, targetTimestamp)
             didConfirmSource(target,targetTimestamp)
             didSelect(targetTimestamp);targetTimestamp=0
             let previous=ledger,previousDiagnosticHistory=diagnosticHistory

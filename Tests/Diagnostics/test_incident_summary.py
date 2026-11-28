@@ -9,6 +9,21 @@ def frame(lane,kind,event=0,category=0,ms=0,origin=1,consumed=False):
     return dict(lane=lane,kind=kind,event=event,category=category,milliseconds=ms,durationMicros=0,edge=1,inputOrigin=origin,consumed=consumed)
 
 class IncidentSummaryTests(unittest.TestCase):
+    def test_right_command_switch_layouts(self):
+        commit = dict(selected=4, layout=2, overrideLayout=1, selectedAfter=4,
+                      observedMicros=1000, readMicros=1010)
+        first = dict(commit, observedMicros=708000, readMicros=708005, eventMicros=707990)
+        switch = dict(id=1, target=4, requestMicros=995, commit=commit, outcome=1, firstKey=first)
+        record, = summary.right_command_layouts([switch])
+        self.assertEqual((record["first_key_after_commit_us"], record["firstKey"]["layoutName"]), (707000, "ABC"))
+        for patch in (dict(key="private"), dict(layout=10), dict(selected=True), dict(eventMicros=0),
+                      dict(readMicros=707995), dict(selectedAfter=1)):
+            with self.subTest(patch=patch), self.assertRaises(ValueError):
+                summary.right_command_layouts([dict(switch, firstKey=dict(first, **patch))])
+        for rows in ([switch, switch], [dict(switch, outcome=2)], [switch] * 17):
+            with self.assertRaises(ValueError):
+                summary.right_command_layouts(rows)
+
     def test_onset_runtime_bounds_unknowns_and_old_capture(self):
         value=dict(markedResult=1,receiverCoverage=1,readOutcome=9,marked=3,markedTransition=3,markedAnchor=2,focusRelation=2,publicationWindow=2,publicationProof=0,observedKeys=3,heldKeys=1,pending=0,retainedCurrent=0,retainedPrevious=4,prefix=0,valueSubscription=1,selectionSubscription=2)
         parsed=summary.onset_runtime(value)

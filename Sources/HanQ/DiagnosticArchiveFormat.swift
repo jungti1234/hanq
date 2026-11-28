@@ -1,5 +1,79 @@
 import Foundation
 
+// Fixed categories shared by the writer, incident preview and strict collector.
+enum DiagnosticLayoutKind: Int, Codable {
+    case unavailable, none, abc, us, twoSet, threeSet, threeSet390, gongjin, hancom, other
+
+    var label: String {
+        switch self {
+        case .unavailable: return "조회 불가"
+        case .none: return "없음"
+        case .abc: return "ABC"
+        case .us: return "US"
+        case .twoSet: return "두벌식"
+        case .threeSet: return "세벌식"
+        case .threeSet390: return "세벌식 390"
+        case .gongjin: return "공진청 로마자"
+        case .hancom: return "한컴 로마자"
+        case .other: return "기타"
+        }
+    }
+}
+
+struct DiagnosticLayoutSample: Codable, Equatable {
+    let observedMicros, readMicros: Int
+    let selected, layout, overrideLayout, selectedAfter: DiagnosticLayoutKind
+    var eventMicros: Int? = nil
+
+    var valid: Bool {
+        (0...9_000_000_000_000_000).contains(readMicros) && (0...readMicros).contains(observedMicros)
+            && (eventMicros.map { (0...observedMicros).contains($0) } ?? true)
+            && selected != .none && layout != .none && selectedAfter != .none
+    }
+}
+
+struct DiagnosticSwitchLayout: Codable, Equatable {
+    enum Outcome: Int, Codable { case unobserved, firstKey, superseded }
+    static let limit = 16
+    let id, requestMicros: Int
+    let target: DiagnosticLayoutKind
+    let commit: DiagnosticLayoutSample
+    var firstKey: DiagnosticLayoutSample?
+    var outcome: Outcome = .unobserved
+
+    static func parse(_ raw: Any) -> [Self]? {
+        guard let rows = raw as? [[String: Any]], rows.count <= limit else { return nil }
+        let sampleKeys: Set<String> = ["observedMicros", "readMicros", "selected", "layout", "overrideLayout", "selectedAfter"]
+        func integers(_ values: Dictionary<String, Any>.Values) -> Bool {
+            values.allSatisfy { value in
+                guard let n = value as? NSNumber else { return false }
+                return CFGetTypeID(n) != CFBooleanGetTypeID() && n.doubleValue == Double(n.int64Value)
+            }
+        }
+        func sample(_ raw: Any?) -> Bool {
+            guard let value = raw as? [String: Any] else { return false }
+            return Set(value.keys).subtracting(["eventMicros"]) == sampleKeys && integers(value.values)
+        }
+        guard rows.allSatisfy({ row in
+            Set(row.keys).subtracting(["firstKey"]) == ["id", "requestMicros", "target", "commit", "outcome"]
+                && integers(row.filter { $0.key != "commit" && $0.key != "firstKey" }.values)
+                && sample(row["commit"]) && (row["firstKey"].map(sample) ?? true)
+        }), let data = try? JSONSerialization.data(withJSONObject: rows),
+            let records = try? JSONDecoder().decode([Self].self, from: data) else { return nil }
+        var previous = 0
+        for record in records {
+            guard record.id > previous, record.target != .none, record.commit.valid, record.commit.eventMicros == nil,
+                  (0...record.commit.observedMicros).contains(record.requestMicros),
+                  (record.outcome == .firstKey) == (record.firstKey != nil) else { return nil }
+            if let key = record.firstKey {
+                guard key.valid, (key.eventMicros ?? key.observedMicros) >= record.commit.observedMicros else { return nil }
+            }
+            previous = record.id
+        }
+        return records
+    }
+}
+
 struct DiagnosticApplicationReferences:Codable,Equatable {
     let target:Int,owner:Int
     var packed:UInt64{UInt64(target)<<32 | UInt64(owner)}

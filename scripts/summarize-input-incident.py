@@ -303,6 +303,44 @@ def shape_baselines(values):
     return values
 
 
+LAYOUT_NAMES = ["unavailable", "none", "ABC", "US", "two_set", "three_set", "three_set_390", "gongjin_roman", "hancom_roman", "other"]
+
+def right_command_layouts(rows):
+    if not isinstance(rows, list) or len(rows) > 16:
+        raise ValueError("invalid right Command layout history")
+    def sample(raw):
+        names = ("selected", "layout", "overrideLayout", "selectedAfter")
+        required = {"observedMicros", "readMicros", *names}
+        if not isinstance(raw, dict) or set(raw) - {"eventMicros"} != required or any(type(n) is not int for n in raw.values()):
+            raise ValueError("invalid layout sample")
+        if not (0 <= raw.get("eventMicros", 0) <= raw["observedMicros"] <= raw["readMicros"] <= 9_000_000_000_000_000):
+            raise ValueError("invalid layout sample timing")
+        if any(raw[name] not in range(len(LAYOUT_NAMES)) or (raw[name] == 1 and name != "overrideLayout") for name in names):
+            raise ValueError("invalid layout category")
+        return {**raw, **{name + "Name": LAYOUT_NAMES[raw[name]] for name in names}}
+    result = []
+    previous = 0
+    for row in rows:
+        if not isinstance(row, dict) or set(row) - {"firstKey"} != {"id", "requestMicros", "target", "commit", "outcome"}:
+            raise ValueError("invalid switch fields")
+        if any(type(row[k]) is not int for k in ("id", "requestMicros", "target", "outcome")) or row["id"] <= previous:
+            raise ValueError("invalid transition identity")
+        previous = row["id"]
+        commit = sample(row["commit"])
+        if ("eventMicros" in commit or not 0 <= row["requestMicros"] <= commit["observedMicros"] or
+                row["target"] not in range(len(LAYOUT_NAMES)) or row["target"] == 1 or row["outcome"] not in (0, 1, 2) or
+                ("firstKey" in row) != (row["outcome"] == 1)):
+            raise ValueError("invalid transition")
+        r = dict(row, commit=commit, targetName=LAYOUT_NAMES[row["target"]],
+                 outcomeName=("first_key_unobserved", "first_key", "superseded_before_first_key")[row["outcome"]])
+        if "firstKey" in row:
+            key = sample(row["firstKey"])
+            if key.get("eventMicros", key["observedMicros"]) < commit["observedMicros"]:
+                raise ValueError("first key precedes commit")
+            r.update(firstKey=key, first_key_after_commit_us=key["observedMicros"] - commit["observedMicros"])
+        result.append(r)
+    return result
+
 def source_evidence(value):
     required={'selected','confirmed','target','committed','deferred','candidatePreserved','historyPreserved','observedAtMilliseconds','ageClipped'}
     optional={'targetEventMilliseconds','confirmedAtMilliseconds','targetAtMilliseconds','confirmedAgeMicros','targetAgeMicros'}
@@ -598,7 +636,7 @@ def summarize(data):
                 if operation==0:allowed=[1,2,3,5,6,7] + ([9,10,11] if lane<2 else [])
                 elif operation==4:allowed=range(1,9)
                 elif operation==5:
-                    allowed=([0,31]+list(range(1,8))) if lane==3 else ([0]+list(range(8,13))+list(range(17,22))) if lane==1 else ([0]+list(range(8,13))+list(range(17,21))+[22]) if lane==2 else ([0]+list(range(8,13))) if lane==0 else [0]
+                    allowed=([0,31]+list(range(1,8))) if lane==3 else ([0]+list(range(8,13))+list(range(17,23))) if lane==1 else ([0]+list(range(8,13))+list(range(17,21))+[22]) if lane==2 else ([0]+list(range(8,13))) if lane==0 else [0]
                 elif operation==6:allowed=range(32) if lane==7 else range(1,32)
                 elif operation==9:allowed=list(range(0,16))+[17]+list(range(24,32))
                 else:allowed=[0]
@@ -744,7 +782,7 @@ def summarize(data):
             source_evidence_rows.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],event=frame['event'],action=source_actions[frame['edge']],**value))
         if frame['kind']==9:
             op=frame['category'];detail=frame['edge']
-            allowed=([1,2,3,5,6,7] + ([9,10,11] if frame['lane'] in (1,2) else [])) if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,22)) if frame['lane']==2 else [0]+list(range(8,13))+list(range(17,21))+[22] if frame['lane']==3 else [0]+list(range(8,13)) if frame['lane']==1 else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else list(range(0,8))+list(range(24,32)) if op==10 else [0]
+            allowed=([1,2,3,5,6,7] + ([9,10,11] if frame['lane'] in (1,2) else [])) if op==1 else range(1,9) if op==5 else ([0,31]+list(range(1,8)) if frame["lane"]==4 else ([0]+list(range(8,13))+list(range(17,23)) if frame['lane']==2 else [0]+list(range(8,13))+list(range(17,21))+[22] if frame['lane']==3 else [0]+list(range(8,13)) if frame['lane']==1 else [0])) if op==6 else (range(39) if str(data.get("build"))=="366" and frame["lane"]==8 else (range(32) if frame["lane"]==8 else range(1,32))) if op==7 else list(range(0,8))+list(range(24,32)) if op==10 else [0]
             if not observed or not 1<=op<=10 or detail not in allowed or any(frame.get(k,0)!=0 for k in ['event','inputOrigin','durationMicros','count','field']) or frame.get('consumed',False) or frame.get('selected',False):raise ValueError('invalid observation wait frame')
         if frame['kind']==8:
             site=decision_sites.get(frame['edge'],'unknown')
@@ -810,6 +848,7 @@ def summarize(data):
             'space_observations':None if preservation is None else [dict(r,reason={1:'rapid_space_downs',2:'space_consumed',3:'hanq_replay_marker',4:'repeat_flag'}[r['detail']],interpretation='observation_only_not_duplicate_text_or_root_cause') for r in preservation['requests'] if r['trigger']==7],
             'boundary_comparisons':boundary_rows,'onset_decisions':onset_rows,'onset_observations':onset_observation_rows,
             'caret_crossings':caret_crossings(onset_observation_rows, key_rows, data.get('skippedEvents', {}).get('2', 0)),'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
+            'right_command_layouts':right_command_layouts(data['rightCommandLayouts']) if 'rightCommandLayouts' in data else None,
             'unfocused_switch_layout_samples':unfocused_layout_samples,
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'modifier_arrivals':modifier_arrivals,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,

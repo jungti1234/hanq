@@ -1620,6 +1620,7 @@ final class InputIncidentTrace {
         let frames:Int,sequenceGaps:Int,historyEvictions:Int,historyByteEvictions:Int,encodingFailures:Int
     }
     struct Capture:Encodable {
+        var rightCommandLayouts:[DiagnosticSwitchLayout]?=nil
         var coverage:CaptureCoverage?=nil
         var keyboardOrigin: KeyboardSample? = nil
         let schema=1
@@ -1653,6 +1654,7 @@ final class InputIncidentTrace {
             result+=dictionary(skippedEvents)+dictionary(skippedAuxiliary)+dictionary(decisionDelivery.overflow)+dictionary(decisionDelivery.waits)+dictionary(decisionDelivery.coalesced ?? [:])
             result+=dictionary(observationDelivery.processed)+dictionary(observationDelivery.overflow)+dictionary(observationDelivery.omitted)+dictionary(observationDelivery.coalesced)+dictionary(observationDelivery.waits)
             if let backlog=captureBacklog{for value in [backlog.requested,backlog.merged,backlog.deferred,backlog.requestOverflow,backlog.windowOverflow,backlog.postOverflow,backlog.discardedOnDisable,backlog.rateSuppressed ?? [:]]{result+=dictionary(value)}}
+            result+=(rightCommandLayouts?.count ?? 0)*MemoryLayout<DiagnosticSwitchLayout>.stride*2
             result+=(shapeBaselines?.count ?? 0)*MemoryLayout<ShapeBaseline>.stride*2
             result+=(applicationInfo?.records.reduce(0){$0+$1.memoryCharge} ?? 0)+(applicationInfo?.unavailableReferences.count ?? 0)*16
             result+=(capturePreservation?.requests.count ?? 1)*(MemoryLayout<CaptureRequest>.stride+64)*2
@@ -1703,6 +1705,7 @@ final class InputIncidentTrace {
         return InputIncidentTrace(destination:option.directory,initiallyEnabled:option.enabled,persistentOwnership:option.persistent,retention:option.preserve ? .investigation:.incidentDefault,archiveDirectory:archive,legacyDirectories:option.legacy,migration:option.legacy.isEmpty ? nil:{InputIncidentPreferences.commitLegacyMigration(defaults:.standard,expected:option.legacy)})
     }()
     private let runID=UUID().uuidString
+    private var recentSwitchLayouts:[DiagnosticSwitchLayout]=[]
     private var recentRecoveryFailures:[RecoveryFailure]=[]
     private var monitorStatus:MonitorStatus?
     private var applicationRegistry=DiagnosticApplicationRegistry()
@@ -1933,6 +1936,7 @@ final class InputIncidentTrace {
                 lastSpaceDown.removeAll();lastSpaceCapture.removeAll()
                 monitorStatus=nil
                 recentRecoveryFailures.removeAll()
+                recentSwitchLayouts.removeAll()
                 applicationRegistry.reset()
                 if active,configured{captures=max(captures,last);_ = gate.activate(paused)}
                 lock.unlock()
@@ -1972,6 +1976,7 @@ final class InputIncidentTrace {
         let sequenceGaps=zip(selected.packets,selected.packets.dropFirst()).reduce(0){$0+max(0,$1.1.sequence-$1.0.sequence-1)}
         value.coverage=CaptureCoverage(requestedFromMilliseconds:requestedFrom ?? max(0,now-(reason == .manual ? 60000:10000)),requestedThroughMilliseconds:requestedThrough ?? now,
             firstAvailableMilliseconds:selected.packets.first?.milliseconds,lastAvailableMilliseconds:selected.packets.last?.milliseconds,frames:selected.count,sequenceGaps:sequenceGaps,historyEvictions:ring.dropped,historyByteEvictions:ring.byteEvictions,encodingFailures:ring.encodingFailures)
+        value.rightCommandLayouts=recentSwitchLayouts
         value.clockOriginMicros=Int(max(0,min(origin*1_000_000,9_000_000_000_000_000)))
         value.recoveryFailures=recentRecoveryFailures.isEmpty ? nil:recentRecoveryFailures
         if sampleKeyboard,reason == .manual, let origin = value.clockOriginMicros, let keyboardSample {
@@ -2688,6 +2693,19 @@ final class InputIncidentTrace {
             ring[(position-1+capacity)%capacity]?.onsetObservation=value
             updatePreservedLastFrame()
             if capture{requestCapture(.onsetObservation,lane:.onset,episode:value.episode)}
+        }
+    }
+    // Each update is self-contained in case the commit-time queue slot was busy.
+    func recordSwitchLayout(_ record: DiagnosticSwitchLayout, generation: Int32) {
+        guard generation > 0, gate.generation == generation, !secureInput() else { return }
+        _ = submit(.context, .main, 22) { [self] _ in
+            guard gate.generation == generation else { return }
+            if recentSwitchLayouts.last?.id == record.id {
+                recentSwitchLayouts[recentSwitchLayouts.count - 1] = record
+            } else {
+                if recentSwitchLayouts.count == DiagnosticSwitchLayout.limit { recentSwitchLayouts.removeFirst() }
+                recentSwitchLayouts.append(record)
+            }
         }
     }
     func sourceEvidence(_ action:SourceEvidenceAction,_ value:SourceEvidence,event:CGEvent?=nil){
