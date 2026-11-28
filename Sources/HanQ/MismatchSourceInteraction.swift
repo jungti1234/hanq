@@ -46,6 +46,8 @@ extension MismatchRecoveryEngine {
         // notification for an earlier boundary cannot supersede the newer one.
         if timestamp == 0 || timestamp >= (recoverySourceBoundaries.last?.timestamp ?? 0) {
             diagnosticSwitchRequested?(source, timestamp, rightCommand)
+            roundTripRequest = rightCommand && source == mismatchKoreanID && timestamp != 0 ? timestamp : nil
+            roundTripUntil = nil
         }
         guard supportsRecoverySource(source) else{park("unsupported_external_source");return}
         if MismatchKeyboardLayout.supports(source){lastIntendedKorean=source}else{englishID=source}
@@ -105,6 +107,7 @@ extension MismatchRecoveryEngine {
         resumeDeferredSourceWork()
     }
     func clearSourceInteraction() {
+        roundTripRequest = nil; roundTripUntil = nil
         sourceMenuPaused=false;sourceMenuSawPopup=false;capsSourceInteraction=nil;sourcePauseStarted=nil;pausedRecoveryActions=[];sourceInteractionRevision+=1
         cancelExternalSourceSettlement()
     }

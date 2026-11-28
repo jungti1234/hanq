@@ -1,10 +1,18 @@
 import AppKit
 import Carbon
 
+final class TrialTextView: NSTextView {
+    var didDraw: (() -> Void)?
+    override func draw(_ rect: NSRect) {
+        super.draw(rect)
+        didDraw?()
+    }
+}
+
 // This editor owns every text event. Only the switch filter and barrier intercept
 // the generated hardware positions; Cocoa and the selected macOS IME render them.
 final class EditorTrial: NSObject, NSApplicationDelegate {
-    let view = NSTextView()
+    let view = TrialTextView()
     let window = NSWindow(contentRect: NSRect(x: 180, y: 200, width: 430, height: 110),
                           styleMask: [.titled], backing: .buffered, defer: false)
     let field = AXUIElementCreateApplication(getpid())
@@ -16,11 +24,27 @@ final class EditorTrial: NSObject, NSApplicationDelegate {
     let previousApp = NSWorkspace.shared.frontmostApplication
     let original = InputSourceAccess.currentID()
     let ignoresAX = CommandLine.arguments.contains("--ignore-ax-write")
+    let overlap = CommandLine.arguments.contains("--overlap-round-trip")
+    let observeLayout = CommandLine.arguments.contains("--observe-round-trip")
+    let control = CommandLine.arguments.contains("--observe-only")
+    let keyDelayMS = CommandLine.arguments.compactMap { argument -> Int? in
+        guard argument.hasPrefix("--gap-ms=") else { return nil }
+        return Int(argument.dropFirst("--gap-ms=".count)).flatMap { [0,12,40,120].contains($0) ? $0 : nil }
+    }.first ?? 120
+    var hops = [String]()
+    var overlapEdges = 0
+    var firstAfterReturn: String?
+    var firstDraw: String?
+    var firstRequestAt: Double?, firstReceivedAt: Double?, firstEditAt: Double?, firstDrawAt: Double?
+    var commitAt: Double?, decisionMS: Double?, sampleKind = "unobserved"
+    var returnRequestAt: Double?
+    var editObserver: NSObjectProtocol?
     let keySource = CGEventSource(stateID: .hidSystemState)
     var retained = 0
     var targets = [String]()
     var delivered = [Int64]()
     var receivedEdges = [Int]()
+    var submittedEdges = [Int]()
     var eventMonitor: Any?
     let expectedEdges = [15, -15, 40, -40, 1, -1, 7, -7, 15, -15, 40, -40, 1, -1]
     var cursorKeys = [CGKeyCode]()
@@ -39,9 +63,30 @@ final class EditorTrial: NSObject, NSApplicationDelegate {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
             let key = Int(event.keyCode)
             if self.ownsField, [15, 40, 1, 7].contains(key) {
-                self.receivedEdges.append(event.type == .keyDown ? key : -key)
+                let edge = event.type == .keyDown ? key : -key
+                guard self.receivedEdges.count < self.submittedEdges.count,
+                      self.submittedEdges[self.receivedEdges.count] == edge else {
+                    self.finish(false, "unexpected letter edge in owned editor"); return nil
+                }
+                self.receivedEdges.append(edge)
+                if key == 15, event.type == .keyDown, self.firstRequestAt != nil, self.firstReceivedAt == nil {
+                    self.firstReceivedAt = ProcessInfo.processInfo.systemUptime
+                }
             }
             return event
+        }
+        editObserver = NotificationCenter.default.addObserver(forName:NSTextStorage.didProcessEditingNotification,
+            object:view.textStorage, queue:nil) { [weak self] _ in
+            guard let self else { return }
+            guard self.knownTrialText else { self.finish(false, "unexpected text in owned editor"); return }
+            guard self.firstAfterReturn == nil, let glyph = self.testSuffix() else { return }
+            self.firstAfterReturn = glyph
+            self.firstEditAt = ProcessInfo.processInfo.systemUptime
+        }
+        view.didDraw = { [weak self] in
+            guard let self, self.firstDraw == nil, let glyph = self.testSuffix() else { return }
+            self.firstDraw = glyph
+            self.firstDrawAt = ProcessInfo.processInfo.systemUptime
         }
         configureSwitch()
         wait("own editor", until: { self.ownsField }) {
@@ -68,6 +113,30 @@ final class EditorTrial: NSObject, NSApplicationDelegate {
             let source = InputSourceAccess.currentID()
             return SourceSwitchBarrier.classifyInitialLayout(first: source, layout: InputSourceAccess.currentLayoutID(),
                 override: InputSourceAccess.currentOverrideID(), last: InputSourceAccess.currentID(), target: target)
+        }
+        if overlap || observeLayout || control {
+            barrier.observeSwitchCommit = { target, _, inspect in
+                guard inspect else { return nil }
+                let start = ProcessInfo.processInfo.systemUptime
+                self.commitAt = start
+                let actual = self.barrier.initialLayout?(target)
+                self.decisionMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
+                self.sampleKind = actual.map { String(describing: $0) } ?? "unobserved"
+                return self.control ? nil : (self.overlap ? .conflicting : actual)
+            }
+        }
+        barrier.selectRoundTripSource = { target in
+            guard self.ownsField, !IsSecureEventInputEnabled() else { return -50 }
+            let status = InputSourceAccess.select(target)
+            if status == noErr && InputSourceAccess.currentID() == target { self.hops.append(target) }
+            if target == self.abc && self.overlap && status == noErr {
+                let count = self.delivered.count
+                let queuedBefore = self.barrier.diagnosticCounts.queued
+                for code: CGKeyCode in [15, 40, 1] { self.key(code) }
+                self.overlapEdges = self.barrier.diagnosticCounts.queued - queuedBefore
+                if self.delivered.count != count { self.finish(false, "letter released under ABC") }
+            }
+            return status
         }
         selector.allowed = { self.ownsField && !IsSecureEventInputEnabled() }
         selector.focus = { self.ownsField ? self.field : nil }
@@ -102,9 +171,20 @@ final class EditorTrial: NSObject, NSApplicationDelegate {
     func hasText(_ value: String) -> Bool {
         view.string == value && view.selectedRange() == NSRange(location: value.utf16.count, length: 0)
     }
+    var knownTrialText: Bool {
+        ["", "ㄱ", "가", "간", "간x", "간xㄱ", "간x가", "간x간",
+         "r", "rk", "rks", "간xr", "간xrk", "간xrks"].contains(view.string)
+    }
+    func testSuffix() -> String? {
+        guard firstRequestAt != nil, view.string.hasPrefix("간x"), view.string.count > 2 else { return nil }
+        let suffix = String(view.string.dropFirst(2))
+        if suffix.hasPrefix("r") { return "r" }
+        return ["ㄱ", "r", "가", "간"].contains(suffix) ? suffix : "other"
+    }
     func report(_ label: String) {
         let r = view.selectedRange()
-        print("\(label): text=\(view.string.debugDescription) caret=\(r.location),\(r.length) marked=\(view.hasMarkedText()) source=\(InputSourceAccess.currentID())")
+        let text = knownTrialText ? view.string.debugDescription : "<unexpected>"
+        print("\(label): text=\(text) caret=\(r.location),\(r.length) marked=\(view.hasMarkedText()) source=\(InputSourceAccess.currentID())")
     }
     func route(_ event: CGEvent) {
         guard !finished, ownsField else { finish(false, "lost editor before delivery"); return }
@@ -123,9 +203,13 @@ final class EditorTrial: NSObject, NSApplicationDelegate {
         guard type == .keyDown || type == .keyUp else { return }
         if type == .keyDown { delivered.append(code) }
         event.flags = result.flags
+        if [15,40,1,7].contains(code) { submittedEdges.append(type == .keyDown ? Int(code) : -Int(code)) }
         event.postToPid(getpid())
     }
     func key(_ code: CGKeyCode) {
+        if code == 15, firstRequestAt == nil, view.string == "간x" {
+            firstRequestAt = ProcessInfo.processInfo.systemUptime
+        }
         for down in [true, false] {
             guard let event = CGEvent(keyboardEventSource: keySource, virtualKey: code, keyDown: down) else { finish(false, "allocate key"); return }
             // Quartz assigns a timestamp during delivery. The fixture routes these
@@ -151,13 +235,18 @@ final class EditorTrial: NSObject, NSApplicationDelegate {
             self.key(7)
             self.wait("간x after first switch", until: { !self.barrier.busy && self.hasText("간x") }) {
                 self.report("after x")
+                self.returnRequestAt = ProcessInfo.processInfo.systemUptime
                 self.key(54)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.typeSyllable() }
-                self.wait("final 간x간 and last release", until: { !self.barrier.busy && self.hasText("간x간") && self.receivedEdges.count >= self.expectedEdges.count }) {
+                if !self.overlap { DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(self.keyDelayMS)) { self.typeSyllable() } }
+                self.wait("final 간x간 and last release", until: { !self.barrier.busy && self.hasText("간x간") && self.receivedEdges.count >= self.expectedEdges.count && self.firstDraw != nil }) {
                     let ok = self.firstEnd && self.cursorKeys.first == 123 && self.targets == [self.abc, self.korean] && self.retained == 0
                         && self.delivered == [15, 40, 1, 7, 15, 40, 1] && self.receivedEdges == self.expectedEdges
                         && InputSourceAccess.currentID() == self.korean
-                    self.finish(ok, "both switches and seven letter key presses")
+                    let overlappingOK = !self.overlap || (self.hops == [self.abc,self.korean] &&
+                        self.overlapEdges == 6 && self.firstAfterReturn == "ㄱ")
+                    let known = ["ㄱ","가","간"]
+                    self.finish(ok && overlappingOK && known.contains(self.firstAfterReturn ?? "") && known.contains(self.firstDraw ?? ""),
+                                "both switches and seven letter key presses")
                 }
             }
         }
@@ -176,9 +265,17 @@ final class EditorTrial: NSObject, NSApplicationDelegate {
         guard !finished else { return }
         finished = true
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        if let editObserver { NotificationCenter.default.removeObserver(editObserver) }
+        print("round-trip source confirmations=\(hops) overlappingEdges=\(overlapEdges) firstAfterReturn=\(firstAfterReturn ?? "unobserved")")
         report("final")
         print("cursorKeys=\(cursorKeys) rangeWrites=\(rangeWrites) delivered=\(delivered) retained=\(retained) ignoreAX=\(ignoresAX)")
         print("AppKit letter edges=\(receivedEdges)")
+        func ms(_ a: Double?, _ b: Double?) -> String {
+            guard let a, let b else { return "missing" }
+            return String(format:"%.3f", (b - a) * 1000)
+        }
+        print("firstKeyGapMS=\(keyDelayMS) switchToRequestMS=\(ms(returnRequestAt, firstRequestAt)) switchToReceiveMS=\(ms(returnRequestAt, firstReceivedAt))")
+        print("sample=\(sampleKind) sampleMS=\(decisionMS.map { String(format:"%.3f", $0) } ?? "missing") commitToRequestMS=\(ms(commitAt, firstRequestAt)) requestToReceiveMS=\(ms(firstRequestAt, firstReceivedAt)) requestToEditMS=\(ms(firstRequestAt, firstEditAt)) requestToDrawMS=\(ms(firstRequestAt, firstDrawAt)) firstDraw=\(firstDraw ?? "unobserved")")
         let restored = InputSourceAccess.currentID() == original || (NSApp.isActive && InputSourceAccess.select(original) == noErr && InputSourceAccess.currentID() == original)
         if NSApp.isActive { previousApp?.activate(options: []) }
         print("\(ok && restored ? "PASS" : "FAIL") \(reason), original source restored=\(restored)")

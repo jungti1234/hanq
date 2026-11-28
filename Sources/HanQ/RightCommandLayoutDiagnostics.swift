@@ -4,7 +4,7 @@ import Carbon
 /// Called on the main run loop by the switch coordinator and the input taps.
 /// This observer neither owns an event nor reads a focused application.
 final class RightCommandLayoutDiagnostics {
-    typealias Sources = (selected: String, layout: String, override: String?, selectedAfter: String)
+    typealias Sources = InputSourceAccess.LayoutSnapshot
     private let trace: InputIncidentTrace
     private let clock: () -> UInt64
     private let textFlags: (CGEventFlags) -> CGEventFlags
@@ -18,12 +18,7 @@ final class RightCommandLayoutDiagnostics {
          clock: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
          textFlags: @escaping (CGEventFlags) -> CGEventFlags = { $0 },
          secure: @escaping () -> Bool = { IsSecureEventInputEnabled() },
-         read: @escaping () -> Sources = {
-             let selected = InputSourceAccess.currentID()
-             let layout = InputSourceAccess.currentLayoutID()
-             let override = InputSourceAccess.currentOverrideID()
-             return (selected, layout, override, InputSourceAccess.currentID())
-         }) {
+         read: @escaping () -> Sources = InputSourceAccess.layoutSnapshot) {
         self.trace = trace; self.clock = clock; self.secure = secure; self.read = read; self.textFlags = textFlags
     }
 
@@ -36,12 +31,12 @@ final class RightCommandLayoutDiagnostics {
         request = rightCommand ? (target, stamp, generation) : nil
     }
 
-    func confirmed(_ target: String, at stamp: CGEventTimestamp) {
+    func confirmed(_ target: String, at stamp: CGEventTimestamp, reading: (UInt64, Sources)? = nil) {
         guard let request, request.target == target, request.stamp == stamp else { return }
         self.request = nil
         guard request.generation == trace.collectionGeneration, !secure() else { return }
-        let observed = clock()
-        let sample = sample(at: observed)
+        let observed = reading?.0 ?? clock()
+        let sample = sample(at: observed, reading: reading)
         guard request.generation == trace.collectionGeneration, !secure() else { return }
         nextID += 1
         let record = DiagnosticSwitchLayout(id: nextID, requestMicros: stamp <= observed ? Int(stamp / 1000) : 0,
@@ -88,8 +83,8 @@ final class RightCommandLayoutDiagnostics {
     // ISO/JIS printable positions and the numeric keypad (without Enter/Clear).
     private static let additionalPrintable: Set<UInt16> = [10, 65, 67, 69, 75, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92, 93, 94, 95]
 
-    private func sample(at observed: UInt64, eventTime: UInt64 = 0) -> DiagnosticLayoutSample {
-        let began = clock(), values = read()
+    private func sample(at observed: UInt64, eventTime: UInt64 = 0, reading: (UInt64, Sources)? = nil) -> DiagnosticLayoutSample {
+        let began = reading?.0 ?? clock(), values = reading?.1 ?? read()
         return DiagnosticLayoutSample(observedMicros: Int(observed / 1000), readMicros: Int(began / 1000),
             selected: Self.kind(values.selected), layout: Self.kind(values.layout),
             overrideLayout: values.override.map(Self.kind) ?? .none, selectedAfter: Self.kind(values.selectedAfter),

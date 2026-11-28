@@ -42,6 +42,7 @@ final class InputSourceObserver: NSObject {
     private var initialized = false
     var onChange: ((InputSourceSnapshot?) -> Void)?
     var onObservation: ((InputSourceSnapshot?) -> Void)?
+    var ignoreObservation: ((String?) -> Bool)?
 
     func start() {
         guard !started else { return }
@@ -67,6 +68,7 @@ final class InputSourceObserver: NSObject {
     }
     func refresh() {
         let current = InputSourceSnapshot.read()
+        if ignoreObservation?(current?.id) == true { return }
         onObservation?(current)
         guard !initialized || current != last else { return }
         initialized = true; last = current

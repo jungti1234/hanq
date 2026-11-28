@@ -558,6 +558,9 @@ def summarize(data):
     maxima=collections.defaultdict(int)
     boundary_stages=collections.Counter()
     unfocused_layout_samples=[]
+    round_trips=[]
+    round_trip_stages={46:'started',47:'abc_selected',48:'layout_ready',49:'layout_unconfirmed',
+                       50:'select_failed',51:'source_changed',52:'recipient_changed',53:'superseded'}
     outside_layouts={39:'two_set_selected_ABC_layout_no_override',40:'two_set_layout_ready',41:'layout_unknown_or_inconsistent',42:'selected_source_changed'}
     manual_edit_stages=collections.Counter()
     wait_reasons={13:'snapshot',14:'text',15:'caret',16:'repair',17:'repair_receipt',18:'onset_receipt',19:'replay_receipt',20:'focus',21:'selection_commit',22:'source_commit'}
@@ -803,6 +806,9 @@ def summarize(data):
             state_counts[lane][str(frame['category'])]+=1
             pending_max[lane]=max(pending_max[lane],frame.get('count',0))
         if frame['kind']==7:
+            if frame['category'] in round_trip_stages:
+                round_trips.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],
+                    stage=round_trip_stages[frame['category']],queued=frame.get('count',0)))
             if frame['category'] in outside_layouts:
                 unfocused_layout_samples.append(dict(sequence=frame['sequence'],milliseconds=frame['milliseconds'],layout=outside_layouts[frame['category']]))
             if frame['category'] in [29,30,31]:manual_edit_stages[{29:'started',30:'verified',31:'unverified'}[frame['category']]]+=1
@@ -850,6 +856,7 @@ def summarize(data):
             'caret_crossings':caret_crossings(onset_observation_rows, key_rows, data.get('skippedEvents', {}).get('2', 0)),'key_event_evidence':key_rows,'hud_stages':hud_rows,'switch_timelines':switch_timelines(source_evidence_rows,control_rows,key_rows,hud_rows,shape_rows),
             'right_command_layouts':right_command_layouts(data['rightCommandLayouts']) if 'rightCommandLayouts' in data else None,
             'unfocused_switch_layout_samples':unfocused_layout_samples,
+            'right_command_round_trips':round_trips,
             'shape_observations':shape_rows,'shape_baselines':baselines,'control_decisions':control_rows,'modifier_arrivals':modifier_arrivals,'source_evidence':source_evidence_rows,'manual_edit_boundary_counts':dict(manual_edit_stages),'source_boundary_stage_counts':dict(boundary_stages),'maximum_source_boundary_queue':maximum_boundary_queue,'maximum_unconfirmed_onset_receipts':maximum_unconfirmed_onsets,
             'decision_coalesced':decision_coalesced,'decision_queue_capacity':delivery['capacity'] if delivery is not None else None,'decision_queue_overflow':queue_overflow,
             'observation_delivery':observation_summary,'storage_before_write':storage,

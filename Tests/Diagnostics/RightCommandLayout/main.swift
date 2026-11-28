@@ -24,7 +24,7 @@ let tracker = RightCommandLayoutDiagnostics(trace: trace, clock: { now }, secure
 let barrier = SourceSwitchBarrier()
 barrier.incidentTrace = trace
 barrier.recordDiagnosticSwitchRequest = tracker.requested
-barrier.recordDiagnosticSwitchCommit = tracker.confirmed
+barrier.observeSwitchCommit = { target, stamp, _ in tracker.confirmed(target, at: stamp); return nil }
 barrier.now = { Double(now) / 1e9 }
 barrier.read = { nil }
 barrier.readForOutsideSwitch = { (nil, nil) }
@@ -150,7 +150,7 @@ let monitor = RightCommandLayoutDiagnostics(trace: extra, clock: { now }, secure
     return (editor.selected, "test.private.custom-id", nil, "unknown")
 })
 editor.barrier.recordDiagnosticSwitchRequest = monitor.requested
-editor.barrier.recordDiagnosticSwitchCommit = monitor.confirmed
+editor.barrier.observeSwitchCommit = { target, stamp, _ in monitor.confirmed(target, at: stamp); return nil }
 editor.time = Double(now) / 1e9 - 0.02
 editor.change(abc)
 check(extraReads == 1, "readable editor commit sampled exactly once (reads \(extraReads))")
@@ -256,6 +256,21 @@ check(reads == 2 && beforeKey.id == afterKey.id && beforeKey.commit == afterKey.
       afterKey.outcome == .firstKey, "same transition and ABC layout persisted in both halves of a manual capture")
 print("PASS ongoing switch, unchanged conflicting layout, mismatched confirmation, old captures and malformed evidence")
 
+// Activation and diagnostics must describe the very same commit. A second
+// read here could turn an ABC conflict into an apparently normal transition.
+now += 1_000_000
+paired.requested(korean, at: now, rightCommand: true)
+paired.confirmed(korean, at: now, reading: (now, (korean, abc, nil, korean)))
+let commitTime = now
+now += 5_000_000
+paired.firstKey(.keyDown, key(15), at: now)
+pairedTrace.mark()
+pairedTrace.flush()
+let sharedCommit = beforeAndAfter.last!.rightCommandLayouts!.last!
+check(reads == 3 && sharedCommit.commit.readMicros == Int(commitTime/1000) &&
+      sharedCommit.commit.layout == .abc && sharedCommit.commit.overrideLayout == .none &&
+      sharedCommit.firstKey?.overrideLayout == .us, "shared commit sample and independent first-key sample")
+
 // A user switch queued during a repair confirms on its own source boundary.
 // An intervening menu selection must end the association before a following key.
 do {
@@ -267,7 +282,7 @@ do {
         (recovery.selected, abc, nil, recovery.selected)
     })
     engine.diagnosticSwitchRequested = observer.requested
-    engine.diagnosticSwitchConfirmed = observer.confirmed
+    engine.diagnosticSwitchConfirmed = { observer.confirmed($0, at: $1) }
     engine.recovering = true
     engine.intendedSource = abc
     engine.recoveryDeadline = ProcessInfo.processInfo.systemUptime + 5
@@ -291,3 +306,34 @@ do {
           "recovery-owned switches have separate boundaries including a subsequent external selection")
     print("PASS recovery-owned right Command and intervening external source intent")
 }
+
+for (rightCommand, conflict) in [(true, true), (true, false), (false, true)] {
+    let editor = ReturnEditor(left: "rk", right: "")
+    let engine = editor.engine
+    var inspections = 0, selections = [String]()
+    engine.inspectRecoverySwitchLayout = { target, stamp in
+        check(target == korean && stamp == now, "inspect only the confirmed Korean transition")
+        inspections += 1
+        return conflict
+    }
+    engine.testSelectSource = { target in
+        selections.append(target)
+        editor.selected = target
+        return noErr
+    }
+    engine.recoveryLayoutReady = { target in editor.selected == target }
+    engine.recovering = true
+    engine.intendedSource = abc
+    engine.recoveryDeadline = ProcessInfo.processInfo.systemUptime + 5
+    now += 1_000_000
+    engine.setUserSourceIntent(korean, at:now, rightCommand:rightCommand)
+    engine.drain(verifiedSnapshot: editor.snapshot())
+    let expected = rightCommand && conflict ? [abc, korean] : []
+    check(selections == expected && inspections == (rightCommand ? 1 : 0),
+          "recovery owner selects immediately and once before any first key")
+    engine.drain(verifiedSnapshot: editor.snapshot())
+    check(selections == expected && !engine.recovering && editor.body == "rk" &&
+          editor.range == NSRange(location:2, length:0) && editor.writes.isEmpty,
+          "recovery owner keeps draft and caret across the verified return")
+}
+print("PASS shared diagnostic/activation sample and recovery-owned pre-key round trip")

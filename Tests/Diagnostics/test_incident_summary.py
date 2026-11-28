@@ -490,6 +490,14 @@ class ControlSummaryTests(unittest.TestCase):
         self.assertEqual(result['control_decisions'][0]['route_name'],'filter_consumed')
 
 class ManualEditBoundarySummaryTests(unittest.TestCase):
+    def test_round_trip_stages_preserve_order_and_queue_depth(self):
+        stages = ['started', 'abc_selected', 'layout_ready', 'layout_unconfirmed',
+                  'select_failed', 'source_changed', 'recipient_changed', 'superseded']
+        rows = [dict(frame(8,7,category=k),sequence=k,count=k-46) for k in range(46,54)]
+        result = summary.summarize(dict(schema=1,trigger=1,frames=rows))
+        self.assertEqual([(s['stage'],s['queued']) for s in result['right_command_round_trips']],
+                         list(zip(stages,range(8))))
+
     def test_correlated_capture_identity_and_split_resume_reasons(self):
         request=dict(trigger=3,milliseconds=20,afterSequence=10,lane=6,detail=1,event=0,inputOrigin=0,correlationID='00000000-0000-4000-8000-000000000001')
         value=dict(deferred=False,requests=[request],postCapacity=65536,postOmittedFrames=0,closed=False,endedOnShutdown=False)

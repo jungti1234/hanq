@@ -7,7 +7,7 @@ final class SourceSwitchBarrier {
     var sourceEvidence:MismatchSourceEvidence?
     private var deferredHistoryEpoch:Int?
     var recordDiagnosticSwitchRequest: ((String, CGEventTimestamp, Bool) -> Void)?
-    var recordDiagnosticSwitchCommit: ((String, CGEventTimestamp) -> Void)?
+    var observeSwitchCommit: ((String, CGEventTimestamp, Bool) -> InitialLayout?)?
     var didConfirmSource:(String,CGEventTimestamp)->Void = {_,_ in}
     var incidentTrace=InputIncidentTrace.shared
     var diagnostic:(InputIncidentTrace.BoundaryEvidence)->Void = {_ in}
@@ -25,6 +25,25 @@ final class SourceSwitchBarrier {
     // authorize an edit to text the application already owns.
     enum InitialLayout {case conflicting, ready, unknown, sourceChanged}
     var initialLayout:((String)->InitialLayout)?
+    var selectRoundTripSource: (String) -> OSStatus = InputSourceAccess.select
+    var roundTripAllowed: () -> Bool = { !IsSecureEventInputEnabled() }
+    private var roundTripRequest: CGEventTimestamp?
+    private final class RoundTrip {
+        let outside: Bool
+        let recipient: pid_t?
+        let window: AXUIElement?
+        let until: Double
+        var selecting = true
+        var awaitingLayout = true
+        init(outside: Bool, recipient: pid_t?, window: AXUIElement?, until: Double) {
+            self.outside = outside; self.recipient = recipient; self.window = window; self.until = until
+        }
+    }
+    private var roundTrip: RoundTrip?
+    var selectingTemporaryABC: Bool {
+        guard let trip = roundTrip else { return false }
+        return trip.selecting || (trip.awaitingLayout && now() < trip.until)
+    }
     var inspectReturnSurface: ((MismatchPlaceholderReader.Surface, Snapshot, AXUIElement, Double, @escaping (Bool) -> Void) -> Void)?
     var fieldWindow:(AXUIElement)->AXUIElement? = { field in
         var raw:CFTypeRef?
@@ -98,7 +117,7 @@ final class SourceSwitchBarrier {
     }
 
     func didSwitchWithoutField(_ id:String,at timestamp:CGEventTimestamp,prior:SwitchWindow?=nil) {
-        recordDiagnosticSwitchCommit?(id, timestamp)
+        confirmedLayout(id, at: timestamp, outside: true, prior: prior)
         unfocusedSwitch=nil
         guard id==KoreanKeyboardLayout.twoSetID,timestamp != 0,let pid=frontPID() else{return}
         let began=now(),current=frontWindow(pid)
@@ -108,6 +127,55 @@ final class SourceSwitchBarrier {
             if current==nil,!(0...0.15).contains(now()-prior.at){return}
         }
         unfocusedSwitch=UnfocusedSwitch(began:began,pid:pid,window:current ?? prior?.window,usedPrior:current==nil && prior != nil)
+    }
+
+    private func confirmedLayout(_ id: String, at stamp: CGEventTimestamp, outside: Bool, prior: SwitchWindow? = nil) {
+        let requested = id == KoreanKeyboardLayout.twoSetID && roundTripRequest == stamp
+        roundTripRequest = nil
+        guard observeSwitchCommit?(id, stamp, requested) == .conflicting, requested,
+              roundTrip == nil, roundTripAllowed(), isReady(), source() == id else { return }
+        let recipient = outside ? frontPID() : nil
+        if outside && (recipient == nil || (prior != nil && prior?.pid != recipient)) { return }
+        let trip = RoundTrip(outside: outside, recipient: recipient, window: prior?.window, until: now() + 0.032)
+        roundTrip = trip
+        if outside { busy = true; deadline = now() + 1 }
+        TwoSetLayoutRoundTrip.perform(target:id, source:source, select:selectRoundTripSource,
+                                     stillCurrent:{ self.roundTrip === trip }, trace:trace)
+        guard roundTrip === trip else { return }
+        trip.selecting = false
+        if source() == id, initialLayout?(id) == .ready {
+            trip.awaitingLayout = false; trace("round_trip_ready")
+            if !outside { roundTrip = nil }
+            else if queued.isEmpty && !awaitingReplay { roundTrip = nil; busy = false }
+        }
+        if roundTrip != nil { schedule() }
+    }
+
+    // The focused path rejoins its existing selection/receipt barrier. An initially
+    // unfocused app may focus its composer on the first original key.
+    private func advanceRoundTrip(_ trip: RoundTrip) -> Bool {
+        guard !trip.selecting else { schedule(); return false }
+        guard roundTripAllowed() else { fail("round_trip_recipient_changed"); return false }
+        let ko = KoreanKeyboardLayout.twoSetID, current = source()
+        if trip.awaitingLayout {
+            if current == ko, initialLayout?(ko) == .ready {
+                trip.awaitingLayout = false; trace("round_trip_ready")
+            } else if (current == ko || current == "com.apple.keylayout.ABC") && now() < trip.until {
+                schedule(); return false
+            } else if current == ko {
+                // The selected language is correct. Keep the ordinary first-key
+                // guard and its existing fallback if the layout remains inconclusive.
+                trip.awaitingLayout = false; trace("round_trip_unconfirmed")
+            } else { fail("round_trip_source_changed"); return false }
+        }
+        guard trip.outside else { roundTrip = nil; return true }
+        guard current == ko, now() < deadline, let pid = trip.recipient, frontPID() == pid,
+              trip.window.map({ original in frontWindow(pid).map { CFEqual($0, original) } == true }) ?? true
+        else { fail("round_trip_recipient_changed"); return false }
+        if awaitingReplay { schedule(); return false }
+        if !queued.isEmpty { replayNext(); return false }
+        roundTrip = nil; busy = false
+        return false
     }
     func cancelUnfocusedSwitch(){unfocusedSwitch=nil}
     func unfocusedKeyCheck(_ timestamp:CGEventTimestamp,needsReadyLayout:Bool=false)->InputIncidentTrace.SwitchKeyCheck {
@@ -1003,6 +1071,7 @@ final class SourceSwitchBarrier {
         queued.append(copy);trace("key_queued");schedule();return !releaseDelivered
     }
     @discardableResult func request(_ id:String,at timestamp:CGEventTimestamp=0,rightCommand:Bool=false,recordWindow:((SwitchWindow)->Void)?=nil)->Bool {
+        if roundTrip != nil { fail("round_trip_superseded") }
         recordDiagnosticSwitchRequest?(id, timestamp, rightCommand)
         returningWithMissingSyllable = false
         returnReceipt = nil
@@ -1011,6 +1080,7 @@ final class SourceSwitchBarrier {
         rightCommandRequest = rightCommand
         cancelUnfocusedSwitch()
         if heldStart != nil{fail("initial_source_changed")}
+        roundTripRequest = rightCommand && id == KoreanKeyboardLayout.twoSetID && timestamp != 0 ? timestamp : nil
         entry=nil;nativeBatch=nil;resumedOriginalBatch=false
         discardInvalidDeferredHistory()
         refreshIdleField()
@@ -1101,6 +1171,7 @@ final class SourceSwitchBarrier {
 
     func step(){
         guard busy else{observeNativeSelection();return}
+        if let trip = roundTrip, !advanceRoundTrip(trip) { return }
         if let h=heldStart,now()>=h.until,!isReady(){fail("initial_layout_deadline");return}
         // A repair has its own bounded edit/verification transaction. Do not
         // expire our editor-ack deadline or compete with its AX reads meanwhile.
@@ -1212,7 +1283,7 @@ final class SourceSwitchBarrier {
             let snap=switchSnapshot!;switchSnapshot=nil
             let committedTimestamp = targetTimestamp
             let confirmedUserRequest=targetTimestamp != 0
-            recordDiagnosticSwitchCommit?(target, targetTimestamp)
+            confirmedLayout(target, at: targetTimestamp, outside: false)
             didConfirmSource(target,targetTimestamp)
             didSelect(targetTimestamp);targetTimestamp=0
             let previous=ledger,previousDiagnosticHistory=diagnosticHistory
@@ -1291,6 +1362,7 @@ final class SourceSwitchBarrier {
         let interruptedWork = !canPrepareFreshMismatchObservation || heldStart != nil ||
             switchSnapshot != nil || waitingForRepairBoundary || target != nil || diagnosticTransaction != nil
         let recordFailure = reason != "input_stopped" || recordIdleInputStop || interruptedWork
+        roundTrip=nil;roundTripRequest=nil
         heldStart=nil;entry=nil;resumedOriginalBatch=false
         finishDiagnosticRequest(["deadline","repair_deadline"].contains(reason) ? 2:(["focus_changed","recipient_changed"].contains(reason) ? 3:4))
         manualEdit=nil;manualEditSequence+=1

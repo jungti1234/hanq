@@ -226,6 +226,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.engine.diagnosticSwitchConfirmed = { [weak self] target, stamp in
             self?.rightCommandLayouts.confirmed(target, at: stamp)
         }
+        controller.engine.inspectRecoverySwitchLayout = { [weak self] target, stamp in
+            self?.observeSwitchLayout(target, at: stamp, inspect: true) == .conflicting
+        }
+        controller.engine.recoveryLayoutReady = { target in
+            Self.classifyLayout(InputSourceAccess.layoutSnapshot(), target: target) == .ready
+        }
         controller.engine.diagnosticFirstKey = { [weak self] type, event, stamp in
             self?.rightCommandLayouts.firstKey(type, event, at: stamp)
         }
@@ -270,23 +276,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard var filter = self?.filter, filter.consuming else { return flags }
         return filter.process(type: .keyDown, key: -1, flags: flags, acceptNewPress: false).flags
     })
+    private static func classifyLayout(_ reading: InputSourceAccess.LayoutSnapshot, target: String) -> SourceSwitchBarrier.InitialLayout {
+        SourceSwitchBarrier.classifyInitialLayout(first: reading.selected, layout: reading.layout,
+            override: reading.override, last: reading.selectedAfter, target: target)
+    }
+    private func observeSwitchLayout(_ target: String, at stamp: CGEventTimestamp, inspect: Bool) -> SourceSwitchBarrier.InitialLayout? {
+        guard inspect, inputPermissionReady, !updateRestricted, !IsSecureEventInputEnabled() else {
+            rightCommandLayouts.confirmed(target, at: stamp); return nil
+        }
+        let when = DispatchTime.now().uptimeNanoseconds
+        let reading = InputSourceAccess.layoutSnapshot()
+        rightCommandLayouts.confirmed(target, at: stamp, reading: (when, reading))
+        return Self.classifyLayout(reading, target: target)
+    }
     lazy var sourceSwitchBarrier: SourceSwitchBarrier = {
         let barrier=SourceSwitchBarrier()
+        barrier.roundTripAllowed = { [weak self] in
+            self?.inputPermissionReady == true && self?.updateRestricted == false && !IsSecureEventInputEnabled()
+        }
         barrier.sourceEvidence=self.inputSourceEvidence
         barrier.recordDiagnosticSwitchRequest = { [weak self] target, stamp, rightCommand in
             self?.rightCommandLayouts.requested(target, at: stamp, rightCommand: rightCommand)
         }
-        barrier.recordDiagnosticSwitchCommit = { [weak self] target, stamp in
-            self?.rightCommandLayouts.confirmed(target, at: stamp)
+        barrier.observeSwitchCommit = { [weak self] target, stamp, inspectLayout in
+            self?.observeSwitchLayout(target, at: stamp, inspect: inspectLayout)
         }
         barrier.inspectReturnSurface = { kind, snap, window, deadline, done in
             MismatchPlaceholderReader.request(kind, field:snap.field, window:window, text:snap.text,
                                               selection:snap.selection, until:deadline, completion:done)
         }
         barrier.initialLayout = { target in
-            let first=InputSourceAccess.currentID(),layout=InputSourceAccess.currentLayoutID()
-            let override=InputSourceAccess.currentOverrideID(),last=InputSourceAccess.currentID()
-            return SourceSwitchBarrier.classifyInitialLayout(first:first,layout:layout,override:override,last:last,target:target)
+            Self.classifyLayout(InputSourceAccess.layoutSnapshot(), target: target)
         }
         barrier.didConfirmSource = { [weak self] id,timestamp in
             guard let self else{return}
@@ -612,6 +632,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.title = "한Q 시작하기"
         window.isReleasedWhenClosed = false
         buildPermissionView()
+        inputSource.ignoreObservation = { [weak self] id in
+            id == "com.apple.keylayout.ABC" && (self?.sourceSwitchBarrier.selectingTemporaryABC == true ||
+                self?.mismatchRecovery.engine.selectingTemporaryABC == true)
+        }
         inputSource.onObservation = { [weak self] snapshot in
             guard let self,!self.mismatchRecovery.engine.recovering else{return}
             let id=snapshot?.id ?? "unknown"

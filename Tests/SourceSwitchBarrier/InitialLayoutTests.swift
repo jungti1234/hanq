@@ -122,6 +122,88 @@ func runInitialLayoutTests(){
         func request(_ timestamp:UInt64=14){check(b.request(KoreanKeyboardLayout.twoSetID,at:timestamp),"explicit boundary accepted")}
         @discardableResult func sendKey(_ code:UInt16,_ down:Bool=true,_ flags:CGEventFlags=[])->Bool{let e=key(code,flags);e.type=down ? .keyDown:.keyUp;return b.receive(e.type,e)}
     }
+    // Inject original edges between the two actual source-selection calls, before any
+    // first-key readiness path could start. The same FIFO must serve an unreadable field.
+    for outside in [false, true] {
+        for delayed in [false, true] {
+            let r = Rig("rk", 2)
+            if outside { r.focus = nil }
+            r.b.frontPID = { 91 }; r.b.frontWindow = { _ in r.w }
+            var selected: [String] = [], sampled: [Bool] = []
+            r.b.observeSwitchCommit = { _, _, inspect in sampled.append(inspect); return r.phase }
+            r.b.selectRoundTripSource = { id in
+                selected.append(id); r.src = id
+                if id == abc {
+                    check(r.b.selectingTemporaryABC, "own temporary selection does not update display or source history")
+                    for code: UInt16 in [15, 40, 1] {
+                        check(r.sendKey(code) && r.sendKey(code, false), "every overlapping edge owned in order")
+                    }
+                    check(r.sent.isEmpty, "no overlapping event escapes to ABC")
+                } else if !delayed { r.phase = .ready }
+                return noErr
+            }
+            let handled = r.b.request(ko, at: 123, rightCommand: true)
+            if outside {
+                check(!handled, "outside switch takes the direct selection route")
+                r.src = ko; r.b.didSwitchWithoutField(ko, at: 123)
+            } else {
+                check(handled, "editor switch uses existing source barrier"); r.b.step()
+            }
+            check(sampled == [true] && selected == [abc, ko] && r.sent.isEmpty,
+                  "one round trip begins in the commit, before any original is delivered")
+            if delayed {
+                r.time += 0.004; r.b.step()
+                check(r.b.selectingTemporaryABC, "a delayed temporary ABC notification cannot supersede the commit diagnostic")
+                check(r.sent.isEmpty && r.b.busy, "keys remain queued until the effective layout catches up")
+                r.phase = .ready
+            }
+            r.advance(16)
+            check(r.body == "rk간" && r.selection == NSRange(location:3,length:0)
+                  && r.sent == [15,115,40,140,1,101] && r.saved.isEmpty && r.writes == 0 && !r.b.busy,
+                  "matching draft survives, overlapping rks reaches the editor exactly once")
+            r.b.didSwitchWithoutField(ko, at: 123)
+            check(!r.b.selectingTemporaryABC, "future user source changes are observed after the return")
+            check(selected == [abc, ko] && sampled.last == false, "duplicate confirmation cannot re-arm")
+        }
+    }
+    for (target, explicit, stamp, phase) in [
+        (ko,true,UInt64(44),B.InitialLayout.ready), (ko,true,44,.unknown), (ko,false,44,.conflicting),
+        (ko,true,0,.conflicting), (KoreanKeyboardLayout.threeSetID,true,44,.conflicting), (abc,true,44,.conflicting)
+    ] {
+        let r = Rig("",0); r.phase = phase
+        r.focus = nil; r.b.frontPID = { 91 }; r.b.frontWindow = { _ in r.w }
+        r.b.observeSwitchCommit = { _, _, _ in phase }
+        r.b.selectRoundTripSource = { _ in fatalError("unrequested source cycle") }
+        check(!r.b.request(target, at:stamp, rightCommand:explicit), "direct fast-path setup")
+        r.src = target; r.b.didSwitchWithoutField(target, at:stamp)
+        check(!r.b.busy && r.probes == 0, "no delay or post-selection poll on normal and unrelated switches")
+    }
+    for reason in ["changedSource", "changedWindow", "persistentLayout", "targetSelectFailed"] {
+        let r = Rig("",0); r.focus = nil
+        r.b.frontPID = { 91 }; r.b.frontWindow = { _ in r.window }
+        r.b.observeSwitchCommit = { _, _, inspect in inspect ? .conflicting : nil }
+        var selections: [String] = []
+        r.b.selectRoundTripSource = { id in
+            selections.append(id)
+            if id == ko && reason == "targetSelectFailed" { return -50 }
+            r.src = id; return noErr
+        }
+        check(!r.b.request(ko, at:42, rightCommand:true), "outside failure setup")
+        r.src = ko; r.b.didSwitchWithoutField(ko, at:42, prior:.init(pid:91,window:r.w,stamp:42,at:r.time))
+        check(r.sendKey(15) && r.sendKey(15,false), "pending original edges held")
+        switch reason {
+        case "changedSource": r.src = "third"
+        case "changedWindow": r.window = r.other; r.phase = .ready
+        default: break
+        }
+        r.time += 0.035; r.advance(3)
+        if reason == "persistentLayout" {
+            check(r.sent == [15,115] && r.saved.isEmpty && r.stages.contains("round_trip_unconfirmed"), "bounded native fallback")
+        } else {
+            check(r.sent.isEmpty && r.saved == [15,115], "undelivered edges retained on source or recipient loss")
+        }
+        check(!r.b.busy && selections == [abc,ko], "failure neither reselects nor duplicates")
+    }
     for pending in [true,false] {
         for (letters,wanted) in [([UInt16(15),40],"가"),([UInt16(15),46,0],"금"),([UInt16(1),40],"나")] {
             for draft in ["","rk","1234567890123456"] {

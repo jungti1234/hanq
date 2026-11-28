@@ -77,6 +77,14 @@ final class MismatchRecoveryEngine:NSObject {
     private var nextOrigin:Int64=0
     var diagnosticSwitchRequested: ((String, CGEventTimestamp, Bool) -> Void)?
     var diagnosticSwitchConfirmed: ((String, CGEventTimestamp) -> Void)?
+    var inspectRecoverySwitchLayout: ((String, CGEventTimestamp) -> Bool)?
+    var recoveryLayoutReady: ((String) -> Bool)?
+    var roundTripRequest: CGEventTimestamp?
+    var roundTripUntil: Double?
+    var selectingTemporaryABC: Bool {
+        guard let until = roundTripUntil else { return false }
+        return systemSwitch.busy || interactionNow() < until
+    }
     var diagnosticFirstKey: ((CGEventType, CGEvent, CGEventTimestamp) -> Void)?
     var willForwardEvent:(CGEventType,CGEvent)->Void = {_,_ in}
     @discardableResult func captureEventOrigin(_ type:CGEventType,_ event:CGEvent,at capturedTimestamp:CGEventTimestamp?=nil,shiftArrival:InputIncidentTrace.ShiftArrival?=nil)->Int64? {
@@ -1117,6 +1125,16 @@ final class MismatchRecoveryEngine:NSObject {
         guard ProcessInfo.processInfo.systemUptime<recoveryDeadline else{park("delivery_deadline");return}
         guard let snap=verifiedSnapshot ?? recoverySnapshot("delivery",retry:{[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts)}) else{return}
         if systemSwitch.busy{later(0.01){[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts)};return}
+        if let until = roundTripUntil {
+            let current = currentSource()
+            if current == mismatchKoreanID, recoveryLayoutReady?(current) == true {
+                roundTripUntil = nil; log("round_trip_ready")
+            } else if (current == mismatchKoreanID || current == "com.apple.keylayout.ABC") && interactionNow() < until {
+                later(0.002) { [weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts) }; return
+            } else if current == mismatchKoreanID {
+                roundTripUntil = nil; log("round_trip_unconfirmed")
+            } else { park("round_trip_source_changed"); return }
+        }
         if rollback,!rollbackFirstEditDelivered,!queuedSelectAll {
             // Recheck at delivery: an outstanding selection write can land
             // between rollback's asynchronous read and this one.
@@ -1177,7 +1195,18 @@ final class MismatchRecoveryEngine:NSObject {
             later(0.01){[weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts-1)};return
         }
         if nextSource == intendedSource, let boundary = recoverySourceBoundaries.last, boundary.source == nextSource {
-            diagnosticSwitchConfirmed?(nextSource, boundary.timestamp)
+            if roundTripRequest == boundary.timestamp, let inspectRecoverySwitchLayout {
+                roundTripRequest = nil
+                if inspectRecoverySwitchLayout(nextSource, boundary.timestamp) {
+                    roundTripUntil = interactionNow() + 0.032
+                    TwoSetLayoutRoundTrip.perform(target:nextSource, source:currentSource, select:chooseSource,
+                        stillCurrent:{ self.recovering && self.intendedSource == nextSource && self.roundTripUntil != nil },
+                        trace:{ self.log($0) })
+                    // The recovery engine owns these events. Re-read its editor
+                    // snapshot before draining any key across the temporary switch.
+                    later(0.002) { [weak self] in self?.drain(rollback:rollback,sourceAttempts:sourceAttempts) }; return
+                }
+            } else { diagnosticSwitchConfirmed?(nextSource, boundary.timestamp) }
         }
         if queuedSelectAll {
             guard snap.text==queuedSelectAllText else{park("select_all_context_changed");return}

@@ -1310,8 +1310,17 @@ final class InputIncidentTrace {
         case initialLayoutWait,initialLayoutReady,initialLayoutDeadline,initialContextChanged,initialSourceChanged,initialNativeBatchObserved,initialOriginalResumed
         case unfocusedLayoutConflict,unfocusedLayoutReady,unfocusedLayoutUnknown,unfocusedSourceChanged
         case initialTransportCompleted,editorDivergedInputResumed,nativeSelectAllDivergedInputResumed
+        case roundTripStarted,roundTripABC,roundTripReady,roundTripUnconfirmed,roundTripSelectFailed,roundTripSourceChanged,roundTripRecipientChanged,roundTripSuperseded
         static func event(_ stage:String)->BoundaryStage? {
             switch stage {
+            case "round_trip_started":return .roundTripStarted
+            case "round_trip_abc":return .roundTripABC
+            case "round_trip_ready":return .roundTripReady
+            case "round_trip_unconfirmed":return .roundTripUnconfirmed
+            case "round_trip_select_failed":return .roundTripSelectFailed
+            case "round_trip_source_changed":return .roundTripSourceChanged
+            case "round_trip_recipient_changed":return .roundTripRecipientChanged
+            case "round_trip_superseded":return .roundTripSuperseded
             case "initial_original_resumed":return .initialOriginalResumed
             case "initial_native_batch_observed":return .initialNativeBatchObserved
             case "initial_layout_wait":return .initialLayoutWait
